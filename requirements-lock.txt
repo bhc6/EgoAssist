@@ -1,0 +1,31 @@
+# Reproducible Windows/Python 3.13 environment used for EgoAssist 0.1.0.
+# Install only inside the project .venv:
+#   .\.venv\Scripts\python.exe -m pip install -r requirements-lock.txt
+
+aiohappyeyeballs==2.7.1
+aiohttp==3.14.1
+aiosignal==1.4.0
+attrs==26.1.0
+certifi==2026.6.17
+cffi==2.1.0
+charset-normalizer==3.4.9
+cryptography==49.0.0
+dashscope==1.26.4
+frozenlist==1.8.0
+idna==3.18
+iniconfig==2.3.0
+multidict==6.7.1
+numpy==2.5.1
+packaging==26.2
+pillow==12.3.0
+pluggy==1.6.0
+propcache==0.5.2
+pycparser==3.0
+Pygments==2.20.0
+python-dotenv==1.2.2
+PyYAML==6.0.3
+requests==2.34.2
+urllib3==2.7.0
+websocket-client==1.9.0
+yarl==1.24.2
+pytest==9.1.1

@@ -1,0 +1,11 @@
+{
+  "id":"water-filter","title":"安装净水壶滤芯","aliases":["净水壶","滤芯","water filter"],"version":"1.1","role":"免手装配教学助手","provenance":"bundled/generic-filter-procedure",
+  "safety_policy":["零件方向不明时询问","不可逆操作前确认","制造商手册与本流程冲突时以手册为准"],
+  "steps":[
+    {"id":"inspect","title":"检查零件","instruction":"对照型号检查滤芯和密封圈是否完整。","completion":"型号匹配且零件完整可见","risk":"low","source":"manufacturer manual required"},
+    {"id":"rinse","title":"预处理","instruction":"按制造商要求冲洗或浸泡滤芯。","completion":"完成手册规定的预处理","risk":"low","source":"manufacturer manual required"},
+    {"id":"gasket","title":"放密封圈","instruction":"将密封圈平整放入对应槽内。","completion":"密封圈无扭曲且完全入槽","risk":"medium","source":"generic assembly check"},
+    {"id":"insert","title":"插入滤芯","instruction":"按定位标记垂直装入滤芯。","completion":"滤芯与定位标记对齐","risk":"medium","source":"manufacturer manual required"},
+    {"id":"verify","title":"验证","instruction":"按手册完成冲洗并检查是否漏水。","completion":"无泄漏且冲洗完成","risk":"medium","source":"manufacturer manual required"}
+  ]
+}

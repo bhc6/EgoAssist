@@ -1,0 +1,13 @@
+{
+  "id":"tomato-eggs","title":"番茄炒蛋","aliases":["西红柿炒鸡蛋","tomato eggs"],"version":"1.1","role":"免手做菜教学助手","provenance":"bundled/household-procedure",
+  "safety_policy":["刀具、明火、烟雾风险优先","生蛋接触后清洁手和器具","看不清时询问，不自动推进"],
+  "steps":[
+    {"id":"prepare","title":"准备","instruction":"准备鸡蛋、番茄、少量油和盐。","completion":"材料和工具在操作区","risk":"low","source":"recipe-v1.1"},
+    {"id":"wash","title":"清洗","instruction":"把番茄洗净并擦干。","completion":"番茄完成清洗","risk":"low","source":"WHO Five Keys to Safer Food"},
+    {"id":"cut","title":"切配","instruction":"把番茄放稳，刀尖朝外，慢慢切块。","completion":"番茄切成块","risk":"medium","source":"kitchen knife safety"},
+    {"id":"beat","title":"打蛋","instruction":"鸡蛋打入碗中并搅匀，接触蛋液后洗手。","completion":"蛋液均匀且台面无蛋液污染","risk":"medium","source":"USDA egg handling"},
+    {"id":"egg","title":"炒蛋","instruction":"中火少油，蛋液凝固后盛出。","completion":"鸡蛋凝固并离锅","risk":"high","source":"recipe-v1.1"},
+    {"id":"tomato","title":"炒番茄","instruction":"中火翻炒番茄到明显出汁。","completion":"番茄明显出汁","risk":"high","source":"recipe-v1.1"},
+    {"id":"combine","title":"合炒","instruction":"倒回鸡蛋，少量盐，翻匀后关火。","completion":"混合完成且火已关闭","risk":"high","source":"recipe-v1.1"}
+  ]
+}

@@ -1,0 +1,60 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "egoassist"
+version = "0.1.0"
+description = "Skill-first full-duplex embodied assistance framework with observable memory and intervention control"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+authors = [{ name = "EgoAssist contributors" }]
+keywords = ["embodied-assistant", "full-duplex", "egocentric", "long-term-memory", "skills"]
+
+dependencies = [
+    "numpy>=1.24,<3",
+    "python-dotenv>=1.0",
+    "pillow>=10",
+    "aiohttp>=3.9",
+    "dashscope>=1.23.9",
+    "requests>=2.31",
+]
+
+[project.optional-dependencies]
+# 云端作答后端
+api = ["openai>=1.40", "google-generativeai>=0.8"]
+# 本地 GPU 作答 + 检索编码器（torch 需按 Blackwell 单独装，见 requirements-gpu.txt）
+gpu = [
+    "transformers>=4.49", "accelerate>=0.34", "qwen-vl-utils>=0.0.8",
+    "bitsandbytes>=0.44", "open_clip_torch>=2.24", "pillow>=10",
+    "opencv-python>=4.9", "faiss-cpu>=1.8", "sentencepiece",
+]
+dev = ["pytest>=8", "PyYAML>=6.0"]
+
+[project.scripts]
+egoassist = "run_egoassist:main"
+egoassist-egolife = "run_egolife_benchmark:main"
+egoassist-eval = "run_interaction_benchmark:main"
+
+[tool.setuptools]
+py-modules = ["run_egoassist", "run_egolife_benchmark", "run_interaction_benchmark"]
+include-package-data = true
+
+[tool.setuptools.package-data]
+egoassist = [
+    "console/*.html",
+    "console/*.css",
+    "console/*.js",
+    "skills/*/*.md",
+    "skills/*/*.json",
+    "skills/*/tasks/*.json",
+    "skills/*/references/*.md",
+]
+
+[tool.setuptools.packages.find]
+include = ["egoassist*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

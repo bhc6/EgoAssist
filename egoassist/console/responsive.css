@@ -1,0 +1,11 @@
+@media (max-width: 800px) {
+  header label {
+    flex: 1 1 calc(50% - 8px);
+    min-width: 145px;
+  }
+
+  .model-pill {
+    flex: 1 1 100%;
+    margin-left: 0;
+  }
+}

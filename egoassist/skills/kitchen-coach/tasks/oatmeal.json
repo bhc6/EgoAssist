@@ -1,0 +1,10 @@
+{
+  "id":"oatmeal","title":"香蕉燕麦粥","aliases":["燕麦粥","oatmeal","porridge"],"version":"1.0","role":"免手做菜教学助手","provenance":"bundled/simple-breakfast",
+  "safety_policy":["蒸汽和热容器风险优先","确认容器适用于微波炉","过敏或饮食限制不明确时先询问"],
+  "steps":[
+    {"id":"measure","title":"量取","instruction":"把燕麦和液体按包装建议比例放入大容量耐热碗。","completion":"食材已量取且碗有足够余量","risk":"low","source":"manufacturer package directions"},
+    {"id":"heat","title":"加热","instruction":"按包装建议分段加热，中途观察防止溢出。","completion":"燕麦变稠且停止加热","risk":"high","source":"manufacturer package directions"},
+    {"id":"rest","title":"静置","instruction":"戴隔热手套取出，静置一分钟并小心蒸汽。","completion":"容器稳定且蒸汽减弱","risk":"high","source":"microwave burn prevention"},
+    {"id":"finish","title":"调味","instruction":"加入香蕉片，确认温度合适后食用。","completion":"完成调味并确认入口温度","risk":"low","source":"bundled serving suggestion"}
+  ]
+}

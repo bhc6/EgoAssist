@@ -1,0 +1,418 @@
+const $ = selector => document.querySelector(selector);
+const $$ = selector => [...document.querySelectorAll(selector)];
+const esc = value => String(value ?? "").replace(/[&<>"']/g, character => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"}[character]));
+let state, stream, socket, audioContext, microphoneSource, processor, videoTimer;
+let playbackTime = 0, assistantText = "";
+let connectingPromise = null;
+let selectedEventId = null, pipelineDetails = [];
+const playbackSources = new Set();
+
+async function post(path, data = {}) {
+  const response = await fetch(path, {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(data)});
+  const body = await response.text();
+  let result;
+  try { result = JSON.parse(body); }
+  catch (_) { throw Error((response.ok ? "服务返回了无效 JSON：" : "请求失败：") + body.slice(0, 180)); }
+  if (!response.ok) throw Error(result.message || result.error || "请求失败");
+  return result;
+}
+
+const actionName = action => ({silent: "静默", guide: "指导", ask: "询问", correct: "纠错", emergency: "紧急"}[action] || action);
+const memoryStageName = key => ({evidence: "证据", candidate: "候选", confirmation: "确认", retrieval: "召回", impact: "影响"}[key] || key);
+const memoryStatusName = status => ({
+  observed: "已有证据", waiting: "等待中", pending: "待确认", confirmed: "已确认",
+  matched: "已匹配", ready: "待语音提醒", reused: "已注入", "already-used": "已抑制重复",
+  "no-match": "无匹配", none: "无"
+}[status] || status);
+
+const eventClass = type => type.startsWith("media.") || type.startsWith("audio.") || type.startsWith("perception.") ? "input" : type.startsWith("memory.") ? "memory" : type.startsWith("response.") || type.startsWith("barge_in.") ? "response" : type.includes("decision") || type.startsWith("task.") ? "decision" : "";
+const eventTime = event => (event.timestampWall || "").slice(11, 23);
+
+function inspect(value) {
+  const event = value && value.eventId ? value : null;
+  if (event) selectedEventId = event.eventId;
+  const title = event ? event.type : value.title;
+  const metadata = event ? {
+    "event id": event.eventId, "parent ids": (event.parentEventIds || []).join(", ") || "root",
+    source: event.source, time: event.timestampWall, model: event.model || "-",
+    skill: event.skill || "-", task: event.task || "-", "response id": event.responseId || "-",
+    latency: event.latencyMs == null ? "-" : event.latencyMs + " ms"
+  } : {stage: value.stage, status: value.status, claim: value.claim || "-"};
+  $("#eventInspector").innerHTML = "<div class='event-summary'><span>SELECTED OBSERVABLE</span><h3>" + esc(title) + "</h3><div class='meta-grid'>" + Object.entries(metadata).map(([key, item]) => "<span>" + esc(key) + "</span><b>" + esc(item) + "</b>").join("") + "</div></div><pre>" + esc(JSON.stringify(event || value, null, 2)) + "</pre>";
+}
+
+function renderPipeline(task, mechanism, step) {
+  const scheduler = state.scheduler || {};
+  const retrieval = mechanism.retrieval || {};
+  const routing = state.intentRouting || {status: "no-match", candidates: []};
+  const decision = task?.decision || state.genericDecision || {action: "silent", confidence: 0, reason: "no-domain-intent"};
+  const taskSummary = task && step ? step.title + " · " + step.status : state.activeSkill ? "Skill loaded · task unresolved" : "No task hypothesis";
+  pipelineDetails = [
+    {stage: "capture", title: "音频 / 视频采集", status: stream ? "live" : "idle", summary: stream ? "16 kHz PCM + latest-only JPEG" : "等待浏览器设备", claim: "原始媒体只记录大小和时间，不在账本保存 Base64"},
+    {stage: "attribution", title: "声道与说话者归因", status: stream ? "live" : "idle", summary: "input transcript ≠ spoken output transcript", claim: state.audioAttribution?.claimBoundary || "等待媒体配置"},
+    {stage: "intent", title: "意图路由", status: routing.status === "matched" ? "live" : routing.status === "ambiguous" ? "warning" : "idle", summary: routing.status + " · " + (routing.selectedSkill || "general"), claim: routing.claimBoundary},
+    {stage: "perception", title: "结构化感知", status: task?.observation ? "live" : "idle", summary: task?.observation ? task.observation.summary : "无控制面结构化观测", claim: "模型视觉上下文与已提交控制事件分开展示"},
+    {stage: "task", title: "Skill / 任务假设", status: task ? "live" : state.activeSkill ? "warning" : "idle", summary: taskSummary, claim: task ? "Checkpoint ledger，不规定唯一执行路径" : "无证据时不加载领域工作流"},
+    {stage: "knowledge", title: "知识增强", status: state.knowledgeMechanism.method === "none" ? "idle" : "warning", summary: state.knowledgeMechanism.method, claim: state.knowledgeMechanism.claimBoundary},
+    {stage: "memory", title: "记忆检索", status: retrieval.status === "matched" || state.episodicMemory?.count ? "live" : "idle", summary: "preference " + (retrieval.candidates || []).length + " · episodes " + (state.episodicMemory?.count || 0), claim: "偏好与情景记忆分开；显示查询、候选、拒绝原因和实际注入结果"},
+    {stage: "policy", title: "主动干预策略", status: "live", summary: actionName(decision.action) + " · " + Math.round((decision.confidence || 0) * 100) + "%", claim: decision.reason},
+    {stage: "scheduler", title: "响应调度与打断", status: scheduler.pending || scheduler.activeResponseIds?.length ? "live" : "idle", summary: scheduler.activePolicies?.[0]?.speechPolicy || state.turnTakingPolicy.currentSelection.policy, claim: "Skill 可配置：" + state.turnTakingPolicy.currentSelection.basis},
+    {stage: "output", title: "语音与字幕输出", status: scheduler.activeResponseIds?.length ? "live" : "idle", summary: scheduler.activeResponseIds?.join(", ") || "等待输出", claim: "只展示可验证输出和结构化中间产物，不声称访问隐藏思维链"}
+  ];
+  $("#pipeline").innerHTML = pipelineDetails.map((item, index) => "<article class='pipeline-node " + esc(item.status) + "' data-pipeline='" + index + "'><div><h3>" + esc(item.title) + "</h3><p>" + esc(item.summary) + "</p></div><b>" + esc(item.stage) + "</b></article>").join("");
+  $$('[data-pipeline]').forEach(node => node.onclick = () => inspect(pipelineDetails[Number(node.dataset.pipeline)]));
+}
+
+function renderTimeline(events) {
+  $("#eventCount").textContent = events.length + " events";
+  $("#timeline").innerHTML = events.length ? events.slice(-60).map(event => "<button class='event-chip " + eventClass(event.type) + "' data-event='" + esc(event.eventId) + "'><b>" + esc(event.type) + "</b><span>" + esc(eventTime(event) + " · " + event.source) + "</span></button>").join("") : "<span>等待事件</span>";
+  $$('[data-event]').forEach(node => node.onclick = () => inspect(events.find(event => event.eventId === node.dataset.event)));
+  const selected = events.find(event => event.eventId === selectedEventId) || [...events].reverse().find(event => !event.type.startsWith("media."));
+  if (selected) inspect(selected);
+}
+
+function render(next) {
+  state = next;
+  const task = state.task, memory = state.memory, mechanism = state.memoryMechanism;
+  const decision = task?.decision || state.genericDecision;
+  const step = task ? task.steps.find(item => item.id === task.currentCheckpointId) || task.steps[task.stepIndex] : null;
+  $("#mode").textContent = "● " + state.realtimeModel;
+  $("#sessionId").textContent = state.sessionId;
+  $("#promptHash").textContent = state.promptContext.hash;
+  $("#promptContext").textContent = state.promptContext.text;
+  $("#skillName").textContent = state.activeSkill ? state.activeSkill.name + " / " + (task ? task.task.title : "待确认任务") : "General / no Skill";
+  $("#taskTitle").textContent = task ? task.task.title + " · " + task.task.version : "No task hypothesis";
+  $("#skillSelect").innerHTML = "<option value=''>通用模式 · 按意图加载</option>" + state.skills.map(item => "<option value='" + esc(item.name) + "'>" + esc(item.name) + " · " + item.tasks.length + " tasks</option>").join("");
+  $("#skillSelect").value = state.activeSkill?.name || "";
+  $("#taskSelect").innerHTML = state.tasks.length ? "<option value=''>选择具体任务</option>" + state.tasks.map(item => "<option value='" + esc(item.id) + "'>" + esc(item.title) + " · " + esc(item.provenance) + "</option>").join("") : "<option value=''>无活动任务</option>";
+  $("#taskSelect").value = task?.task.id || "";
+  $("#taskSelect").disabled = !state.activeSkill;
+  $("#newTask").disabled = !state.activeSkill?.allowCustomTasks;
+  $("#skillTools").innerHTML = (state.activeSkill?.tools || []).map(item => "<button data-tool='" + esc(item.name) + "' data-confirm='" + item.requires_confirmation + "'>" + esc(item.name) + (item.requires_confirmation ? " · 需确认" : "") + "</button>").join("") || "<span class='muted'>无领域工具</span>";
+  $$("[data-tool]").forEach(button => button.onclick = () => executeTool(button));
+  $("#action").textContent = actionName(decision.action);
+  $("#decision").className = "decision " + decision.action;
+  $("#decision").innerHTML = "<h3>" + esc(decision.message) + "</h3><p>" + esc(decision.reason) + " · confidence " + Math.round(decision.confidence * 100) + "%</p>";
+  $("#mapStatus").textContent = task ? "当前假设 " + step.id + " · " + task.steps.length + " checkpoints" : "等待意图与任务证据";
+  $("#steps").innerHTML = task ? task.steps.map(item => {
+    const label = item.id === task.currentCheckpointId ? "当前系统假设" : "可选证据锚点";
+    return "<article class='checkpoint " + esc(item.status) + "'><span>" + esc(item.status) + "<br>confidence " + Math.round((item.confidence || 0) * 100) + "%</span><div><h3>" + esc(item.title) + "</h3><p>" + esc(label + " · " + item.instruction) + "</p></div><b>evidence " + (item.evidenceIds || []).length + "</b></article>";
+  }).join("") : "<p class='empty-state'>尚未建立任务假设。意图路由匹配后才加载领域工作流。</p>";
+  $("#knowledge").innerHTML = "<b>" + esc(state.knowledgeMechanism.method) + "</b><br>selected: " + esc(step ? step.id + " / " + step.source : "none") + "<br><span>边界：" + esc(state.knowledgeMechanism.claimBoundary) + "</span>";
+  $("#vision").textContent = task?.observation ? task.observation.summary + " · " + Math.round(task.observation.confidence * 100) + "% · " + task.observation.source : "无结构化视觉观测；模型视觉上下文不会伪装为已提交事件";
+  $("#memoryScope").textContent = "exact-trigger-lookup · " + (mechanism.scope.skill || "general") + " / " + (mechanism.scope.task || "unscoped");
+  $("#memorySystems").innerHTML = state.memorySystems.map(item => "<article class='system-card " + esc(item.status) + "'><b>" + esc(item.name) + "</b><span>" + esc(item.status + " · " + item.implementation) + "</span></article>").join("");
+  $("#memoryFlow").innerHTML = ["evidence", "candidate", "confirmation", "retrieval", "impact"].map(key => {
+    const stage = mechanism[key];
+    const source = key === "evidence" && stage.source ? "<small>" + esc(stage.source) + "</small>" : "";
+    return "<article class='memory-stage " + esc(stage.status) + "'><span>" + esc(memoryStageName(key)) + "</span><b>" + esc(memoryStatusName(stage.status)) + "</b><p>" + esc(stage.text) + "</p>" + source + "</article>";
+  }).join("");
+  const candidates = mechanism.retrieval.candidates || [];
+  $("#retrievalCandidates").innerHTML = "<b>RETRIEVAL CANDIDATES</b>" + (candidates.length ? candidates.map(item => "<div class='rank-row " + (item.selected ? "selected" : "") + "'><b>" + esc(item.memoryId) + "</b><span>score " + item.score.toFixed(2) + " · " + esc(item.selected ? "selected" : item.rejectionReasons.join(", ")) + "</span><small>task=" + item.match.task + " checkpoint=" + item.match.checkpoint + "</small></div>").join("") : "<p>无候选记录</p>");
+  $("#memories").innerHTML = memory.records.length ? memory.records.map(item => "<article><b>" + esc(item.preference) + "</b><small>trigger " + esc(item.trigger.task) + " / " + esc(item.trigger.step) + "</small><button data-delete='" + esc(item.id) + "'>删除</button></article>").join("") : "<span>暂无已确认偏好</span>";
+  const episodic = state.episodicMemory || {recent: [], retrieval: {candidates: []}};
+  const episodeCandidates = episodic.retrieval?.candidates || [];
+  $("#episodicRetrieval").innerHTML = "<b>EPISODIC RETRIEVAL · " + esc(episodic.retrieval?.method || "none") + "</b>" + (episodeCandidates.length ? episodeCandidates.slice(0, 6).map(item => "<div class='rank-row " + (item.selected ? "selected" : "") + "'><b>" + esc(item.episodeId) + "</b><span>score " + Number(item.score || 0).toFixed(2) + " · " + esc(item.selected ? "selected" : (item.rejectionReasons || []).join(", ")) + "</span><small>" + esc(item.record.kind + " / " + item.record.source) + "</small></div>").join("") : "<p>无情景召回候选</p>");
+  $("#episodicEpisodes").innerHTML = "<b>RECENT EPISODES · raw media retained: " + esc(episodic.retainsRawMedia) + "</b>" + (episodic.recent?.length ? episodic.recent.map(item => "<article><b>" + esc(item.summary) + "</b><small>" + esc(item.kind + " · " + item.source) + "</small><span>" + esc(item.task || "general") + "</span></article>").join("") : "<p>暂无实时情景摘要</p>");
+  $("#toolAudit").innerHTML = state.toolAudit.length ? state.toolAudit.map(item => "<article><b>" + esc(item.tool || item.action || "tool") + "</b><p>" + esc(JSON.stringify(item.arguments || item.result || {})) + "</p><small>" + esc(item.time || item.timestamp || "") + "</small></article>").join("") : "<span class='muted'>暂无工具调用</span>";
+  $$("[data-delete]").forEach(button => button.onclick = () => run(button, post("/api/memory/delete", {id: button.dataset.delete})));
+  $("#memoryCandidate").innerHTML = memory.candidate ? "<div class='candidate'><b>要记住这个提示偏好吗？</b><p>" + esc(memory.candidate.preference) + "</p><button data-accept='true'>确认保存</button><button data-accept='false'>不要保存</button></div>" : "";
+  $$("[data-accept]").forEach(button => button.onclick = () => run(button, post("/api/candidate", {accepted: button.dataset.accept === "true"})));
+  const scheduler = state.scheduler;
+  $("#scheduler").innerHTML = "<b>Response scheduler</b><br>active: " + esc((scheduler.activeResponseIds || []).join(", ") || "none") + "<br>queued: " + esc(JSON.stringify(scheduler.queued)) + "<br>inflight: " + esc(JSON.stringify(scheduler.inflight)) + "<br>barge-in pending: " + esc(scheduler.bargeInPending) + "<br><b>Policy source</b>: " + esc(state.turnTakingPolicy.source) + "<br>selected: " + esc(JSON.stringify(state.turnTakingPolicy.currentSelection)) + "<br>protected max: " + esc(state.turnTakingPolicy.maxProtectionMs) + " ms";
+  $("#intentRouting").textContent = JSON.stringify(state.intentRouting, null, 2);
+  $("#audioAttribution").textContent = JSON.stringify(state.audioAttribution, null, 2);
+  $$('[data-requires-task]').forEach(button => button.disabled = !task);
+  $("#taskDebug").hidden = !task;
+  renderPipeline(task, mechanism, step);
+  renderTimeline(state.events || []);
+  renderManualSteps();
+}
+
+function defaultToolArguments(declaration) {
+  return Object.fromEntries(Object.entries(declaration.arguments?.properties || {})
+    .filter(([, field]) => Object.hasOwn(field, "default"))
+    .map(([name, field]) => [name, field.default]));
+}
+
+async function executeTool(button) {
+  const declaration = (state.activeSkill?.tools || []).find(item => item.name === button.dataset.tool);
+  if (!declaration) return alert("当前 Skill 未声明该工具");
+  const tool = declaration.name;
+  const needsConfirmation = declaration.requires_confirmation !== false;
+  const confirmed = !needsConfirmation || confirm("当前 Skill 请求调用 " + tool + "，是否允许？");
+  if (!confirmed) return;
+  const arguments = defaultToolArguments(declaration);
+  try {
+    const payload = await post("/api/tools/execute", {tool, arguments, confirmed});
+    $("#toolResult").textContent = JSON.stringify(payload.result);
+    render(payload.state);
+  } catch (error) { alert(error.message); }
+}
+
+function renderManualSteps() {
+  if (!state) return;
+  $("#manualSteps").innerHTML = state.task ? state.task.steps.map(item => "<button data-step='" + esc(item.id) + "'>外部观察：" + esc(item.title) + "</button>").join("") : "";
+  $$("[data-step]").forEach(button => button.onclick = () => run(button, post("/api/task/observe", {
+    step: button.dataset.step, completed: false, confidence: 0.92,
+    summary: "外部感知：" + button.dataset.step, hazards: [], source: "manual/ui"
+  })));
+}
+
+async function run(button, promise) {
+  if (button) button.disabled = true;
+  try {
+    render(await promise);
+    if (socket && socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify({type: "refresh"}));
+  } catch (error) { alert(error.message); }
+  finally { if (button) button.disabled = false; }
+}
+
+async function ensureMedia() {
+  if (stream) return;
+  stream = await navigator.mediaDevices.getUserMedia({
+    video: {facingMode: {ideal: "environment"}, width: {ideal: 1280}, frameRate: {ideal: 30}},
+    audio: {channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true}
+  });
+  $("#video").srcObject = stream;
+  $("#cameraEmpty").hidden = true;
+  $("#cameraState").textContent = "摄像头与麦克风在线";
+  $("#cameraButton").textContent = "关闭设备";
+}
+
+function stopMedia() {
+  if (videoTimer) clearInterval(videoTimer);
+  videoTimer = null;
+  if (processor) processor.disconnect();
+  if (microphoneSource) microphoneSource.disconnect();
+  processor = microphoneSource = null;
+  if (stream) stream.getTracks().forEach(track => track.stop());
+  stream = null;
+  $("#video").srcObject = null;
+  $("#cameraEmpty").hidden = false;
+  $("#cameraState").textContent = "摄像头未启动";
+  $("#cameraButton").textContent = "启用设备";
+}
+
+function floatToPcm16Base64(floatSamples, sourceRate) {
+  const ratio = sourceRate / 16000;
+  const length = Math.floor(floatSamples.length / ratio);
+  const pcm = new Int16Array(length);
+  for (let index = 0; index < length; index++) {
+    const sourceIndex = Math.floor(index * ratio);
+    const sample = Math.max(-1, Math.min(1, floatSamples[sourceIndex]));
+    pcm[index] = sample < 0 ? sample * 32768 : sample * 32767;
+  }
+  const bytes = new Uint8Array(pcm.buffer);
+  let binary = "";
+  for (let offset = 0; offset < bytes.length; offset += 8192) binary += String.fromCharCode(...bytes.subarray(offset, offset + 8192));
+  return btoa(binary);
+}
+
+async function startAudioCapture() {
+  if (processor) return;
+  audioContext = audioContext || new AudioContext();
+  await audioContext.resume();
+  microphoneSource = audioContext.createMediaStreamSource(stream);
+  processor = audioContext.createScriptProcessor(4096, 1, 1);
+  processor.onaudioprocess = event => {
+    if (!socket || socket.readyState !== WebSocket.OPEN) return;
+    const audio = floatToPcm16Base64(event.inputBuffer.getChannelData(0), audioContext.sampleRate);
+    socket.send(JSON.stringify({type: "audio", audio}));
+  };
+  microphoneSource.connect(processor);
+  processor.connect(audioContext.destination);
+}
+
+function sendVideoFrame() {
+  if (!socket || socket.readyState !== WebSocket.OPEN || !stream || $("#video").readyState < 2) return;
+  const video = $("#video"), canvas = $("#canvas"), scale = Math.min(1, 768 / video.videoWidth);
+  canvas.width = Math.floor(video.videoWidth * scale);
+  canvas.height = Math.floor(video.videoHeight * scale);
+  canvas.getContext("2d").drawImage(video, 0, 0, canvas.width, canvas.height);
+  const image = canvas.toDataURL("image/jpeg", 0.72).split(",", 2)[1];
+  socket.send(JSON.stringify({type: "video", image}));
+}
+
+function sendMediaConfiguration(ws) {
+  const track = stream?.getAudioTracks()[0];
+  const settings = track?.getSettings ? track.getSettings() : {};
+  ws.send(JSON.stringify({
+    type: "media_config",
+    playbackCapture: false,
+    audio: {
+      deviceId: settings.deviceId ? "present" : "unreported",
+      channelCount: settings.channelCount,
+      sampleRate: settings.sampleRate,
+      echoCancellation: settings.echoCancellation,
+      noiseSuppression: settings.noiseSuppression,
+      autoGainControl: settings.autoGainControl
+    }
+  }));
+}
+
+function playPcm24(base64Audio) {
+  if (!audioContext) return;
+  const binary = atob(base64Audio), pcm = new Int16Array(Math.floor(binary.length / 2));
+  for (let index = 0; index < pcm.length; index++) pcm[index] = binary.charCodeAt(index * 2) | (binary.charCodeAt(index * 2 + 1) << 8);
+  const buffer = audioContext.createBuffer(1, pcm.length, 24000);
+  const channel = buffer.getChannelData(0);
+  for (let index = 0; index < pcm.length; index++) channel[index] = pcm[index] / 32768;
+  const source = audioContext.createBufferSource();
+  source.buffer = buffer;
+  source.connect(audioContext.destination);
+  const now = audioContext.currentTime;
+  playbackTime = Math.max(playbackTime, now + 0.03);
+  source.start(playbackTime);
+  playbackSources.add(source);
+  source.onended = () => playbackSources.delete(source);
+  playbackTime += buffer.duration;
+}
+
+function stopPlayback() {
+  playbackSources.forEach(source => { try { source.stop(); } catch (_) {} });
+  playbackSources.clear();
+  playbackTime = audioContext ? audioContext.currentTime : 0;
+}
+
+async function connectRealtime() {
+  if (socket && socket.readyState === WebSocket.OPEN && !connectingPromise) return;
+  if (connectingPromise) return connectingPromise;
+  connectingPromise = connectRealtimeSession();
+  try { await connectingPromise; }
+  finally { connectingPromise = null; }
+}
+
+async function connectRealtimeSession() {
+  await ensureMedia();
+  await startAudioCapture();
+  const scheme = location.protocol === "https:" ? "wss:" : "ws:";
+  const ws = new WebSocket(scheme + "//" + location.host + "/ws/realtime");
+  socket = ws;
+  let ready = false;
+  let restartAfterClose = false;
+  let resolveReady, rejectReady;
+  const readyPromise = new Promise((resolve, reject) => { resolveReady = resolve; rejectReady = reject; });
+  ws.onopen = () => {
+    if (socket !== ws) return;
+    $("#duplexState").textContent = "正在连接实时模型…";
+    const fps = Number($("#videoFps").value);
+    if (videoTimer) clearInterval(videoTimer);
+    videoTimer = setInterval(sendVideoFrame, 1000 / fps);
+  };
+  ws.onmessage = event => {
+    if (socket !== ws) return;
+    const message = JSON.parse(event.data);
+    if (message.type === "ready") {
+      ready = true;
+      resolveReady();
+      sendMediaConfiguration(ws);
+      $("#duplexState").textContent = "全双工在线 · 直接说话，可随时打断";
+      $("#realtimeButton").textContent = "结束陪练";
+    } else if (message.type === "audio") {
+      $("#duplexState").textContent = "助手正在说 · 你可以随时打断";
+      playPcm24(message.audio);
+    } else if (message.type === "interrupted") {
+      stopPlayback();
+      $("#duplexState").textContent = "已打断旧响应，正在处理你的请求";
+    } else if (message.type === "barge_in_policy") {
+      $("#duplexState").textContent = message.action === "protected" ? "安全句保护播报中 · 仍在听你说话" : "将在当前短句边界停止 · 仍在听你说话";
+    } else if (message.type === "user_transcript") {
+      $("#transcript").textContent = "你 · " + (message.channel || "input_audio_transcription") + "：" + message.text + (message.echoRisk === "suspected" ? " · 可能残余回声" : "");
+      $("#duplexState").textContent = "正在听你说话";
+    } else if (message.type === "assistant_transcript") {
+      assistantText = message.done ? message.text : assistantText + message.text;
+      $("#assistantCaption").innerHTML = "<span>助手语音字幕 · provider output channel · " + (message.done ? "已完成" : "生成中") + "</span><p>" + esc(assistantText) + "</p>";
+      $("#duplexState").textContent = message.done ? "全双工在线 · 正在听" : "助手正在说 · 你可以随时打断";
+      if (message.done) assistantText = "";
+    } else if (message.type === "state") {
+      render(message.state);
+    } else if (message.type === "session_stale") {
+      restartAfterClose = true;
+      $("#duplexState").textContent = "任务已切换，正在重建实时会话…";
+    } else if (message.type === "error") {
+      alert(message.message);
+    }
+  };
+  ws.onerror = () => { if (!ready) rejectReady(Error("实时 WebSocket 连接失败")); };
+  ws.onclose = () => {
+    if (!ready) rejectReady(Error("实时模型连接在就绪前关闭"));
+    if (socket !== ws) return;
+    $("#duplexState").textContent = "实时会话已结束";
+    $("#realtimeButton").textContent = "启动全双工陪练";
+    socket = null;
+    if (restartAfterClose && stream) {
+      setTimeout(() => connectRealtime().catch(error => alert("重连失败：" + error.message)), 0);
+    }
+  };
+  return readyPromise;
+}
+
+function disconnectRealtime() {
+  stopPlayback();
+  const ws = socket;
+  socket = null;
+  if (ws) ws.close();
+  if (videoTimer) clearInterval(videoTimer);
+  videoTimer = null;
+  if (processor) processor.disconnect();
+  if (microphoneSource) microphoneSource.disconnect();
+  processor = microphoneSource = null;
+  $("#duplexState").textContent = "实时会话已结束";
+  $("#realtimeButton").textContent = "启动全双工陪练";
+}
+
+async function sendControl(button) {
+  button.disabled = true;
+  try {
+    await connectRealtime();
+    if (!socket || socket.readyState !== WebSocket.OPEN) throw Error("实时会话尚未就绪");
+    socket.send(JSON.stringify({type: "control", transcript: button.dataset.say}));
+  } catch (error) { alert(error.message); }
+  finally { button.disabled = false; }
+}
+
+async function switchRuntime(button, path, payload) {
+  const wasRealtime = Boolean(socket || connectingPromise);
+  const pendingConnection = connectingPromise;
+  if (wasRealtime) disconnectRealtime();
+  if (pendingConnection) await pendingConnection.catch(() => {});
+  button.disabled = true;
+  try {
+    render(await post(path, payload));
+    if (wasRealtime) await connectRealtime();
+  } catch (error) { alert(error.message); }
+  finally { button.disabled = false; }
+}
+
+$("#realtimeButton").onclick = async () => { try { socket ? disconnectRealtime() : await connectRealtime(); } catch (error) { alert("启动失败：" + error.message); disconnectRealtime(); } };
+$("#cameraButton").onclick = async () => { try { stream ? stopMedia() : await ensureMedia(); } catch (error) { alert("设备访问失败：" + error.message); } };
+$("#videoFps").onchange = () => { if (!socket) return; clearInterval(videoTimer); videoTimer = setInterval(sendVideoFrame, 1000 / Number($("#videoFps").value)); };
+$$("[data-say]").forEach(button => button.onclick = () => sendControl(button));
+$("#reset").onclick = event => switchRuntime(event.currentTarget, "/api/task/reset", {});
+$("#skillSelect").onchange = event => switchRuntime(event.currentTarget, "/api/skills/activate", {skill: event.currentTarget.value});
+$("#taskSelect").onchange = event => { if (event.currentTarget.value) switchRuntime(event.currentTarget, "/api/tasks/select", {task: event.currentTarget.value}); };
+$$('[data-replay]').forEach(button => button.onclick = () => run(button, post("/api/replay/observe", {kind: button.dataset.replay})));
+$("#newTask").onclick = () => $("#taskDialog").showModal();
+$("#cancelTask").onclick = () => $("#taskDialog").close();
+$("#taskDialog").onclose = () => $("#taskForm").reset();
+$("#taskForm").onsubmit = async event => {
+  event.preventDefault();
+  const title = $("#customTitle").value.trim();
+  const steps = $("#customSteps").value.split(/\r?\n/).map(item => item.trim()).filter(Boolean);
+  try {
+    const wasRealtime = Boolean(socket || connectingPromise);
+    const pendingConnection = connectingPromise;
+    if (wasRealtime) disconnectRealtime();
+    if (pendingConnection) await pendingConnection.catch(() => {});
+    render(await post("/api/tasks/create", {title, steps}));
+    $("#taskDialog").close();
+    if (wasRealtime) await connectRealtime();
+  } catch (error) { alert(error.message); }
+};
+fetch("/api/state").then(response => response.json()).then(render).catch(error => alert(error.message));
+setInterval(() => {
+  if (!socket || socket.readyState !== WebSocket.OPEN) return;
+  fetch("/api/state").then(response => response.json()).then(render).catch(() => {});
+}, 1200);
+addEventListener("beforeunload", () => { disconnectRealtime(); stopMedia(); });

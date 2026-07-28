@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>EgoAssist Research Console</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="styles.css">
+  <link rel="stylesheet" href="responsive.css">
+</head>
+<body>
+  <header>
+    <div class="brand"><b>EgoAssist</b><span>OBSERVABILITY CONSOLE</span></div>
+    <label>Skill<select id="skillSelect"></select></label>
+    <label>Task<select id="taskSelect"></select></label>
+    <button id="newTask">新建任务</button>
+    <span id="mode" class="model-pill"></span>
+    <button id="reset">重置会话</button>
+  </header>
+
+  <main>
+    <section class="session-strip">
+      <div><span>SESSION</span><b id="sessionId">-</b></div>
+      <div><span>PROMPT HASH</span><b id="promptHash">-</b></div>
+      <div><span>SKILL / TASK</span><b id="skillName">-</b></div>
+      <div><span>REALTIME</span><b id="duplexState">未连接</b></div>
+      <div><span>DECISION</span><b id="action">-</b></div>
+    </section>
+
+    <section class="research-grid">
+      <aside class="source-panel panel">
+        <div class="panel-head"><div><span>01 / RAW INPUT</span><h1>证据源</h1></div><b id="cameraState">设备离线</b></div>
+        <div class="camera">
+          <video id="video" autoplay muted playsinline></video><canvas id="canvas"></canvas>
+          <div id="cameraEmpty">CAMERA OFFLINE</div><div id="vision" class="vision"></div>
+        </div>
+        <div class="device-actions">
+          <button id="realtimeButton" class="primary">启动全双工</button>
+          <button id="cameraButton" title="仅管理摄像头与麦克风设备">启用设备</button>
+          <label>FPS<select id="videoFps"><option>1</option><option selected>2</option><option>4</option></select></label>
+        </div>
+        <div class="speech-stream">
+          <article><span>USER TRANSCRIPT</span><p id="transcript">等待语音</p></article>
+          <article id="assistantCaption"><span>SPOKEN AUDIO TRANSCRIPT</span><p>等待语音输出</p></article>
+        </div>
+        <div class="quick">
+          <button data-say="完成了" data-requires-task>目标达成</button><button data-say="再说一遍">重复</button>
+          <button data-say="怎么做">请求帮助</button><button data-say="暂停" data-requires-task>暂停</button>
+        </div>
+        <details id="taskDebug"><summary>可复现实验输入</summary><div class="manual"><button data-replay="progress">持续操作</button><button data-replay="complete">可能达成</button><button data-replay="wrong_step">意外路径</button><button data-replay="occluded">视野遮挡</button><button data-replay="hazard">现场风险</button></div><div id="manualSteps" class="manual"></div></details>
+      </aside>
+
+      <section class="pipeline-panel panel">
+        <div class="panel-head"><div><span>02 / EXECUTION GRAPH</span><h1>可解释 Pipeline</h1></div><b>可观测状态，不是思维链</b></div>
+        <div id="pipeline" class="pipeline"></div>
+        <div class="decision-block"><span>INTERVENTION OUTPUT</span><div id="decision"></div></div>
+        <div id="memoryCandidate"></div>
+      </section>
+
+      <aside class="inspector-panel panel">
+        <div class="panel-head"><div><span>03 / EVENT INSPECTOR</span><h1>事件检查器</h1></div><b id="eventCount">0 events</b></div>
+        <div id="eventInspector" class="event-inspector"><p>选择管线节点或时间线事件</p></div>
+        <details class="context-details"><summary>当前模型上下文</summary><pre id="promptContext"></pre></details>
+      </aside>
+    </section>
+
+    <section class="timeline-panel panel">
+      <div class="panel-head"><div><span>04 / CAUSAL TIMELINE</span><h1>统一事件时间线</h1></div><div class="legend"><i class="input"></i>输入 <i class="decision"></i>决策 <i class="response"></i>响应 <i class="memory"></i>记忆</div></div>
+      <div id="timeline" class="timeline"></div>
+    </section>
+
+    <section class="analysis-grid">
+      <section class="panel"><div class="panel-head"><div><span>MEMORY SUBSYSTEMS</span><h2>记忆边界与召回候选</h2></div><b id="memoryScope"></b></div><div id="memorySystems" class="system-grid"></div><div id="memoryFlow"></div><div id="retrievalCandidates" class="rank-list"></div><div id="memories" class="archive"></div><div id="episodicRetrieval" class="rank-list"></div><div id="episodicEpisodes" class="archive"></div></section>
+      <section class="panel"><div class="panel-head"><div><span>TASK HYPOTHESES</span><h2 id="taskTitle">Checkpoint Ledger</h2></div><b id="mapStatus"></b></div><div id="steps" class="checkpoint-list"></div><div id="knowledge" class="knowledge-box"></div></section>
+      <section class="panel"><div class="panel-head"><div><span>RUNTIME CONTROL</span><h2>路由、归因与调度</h2></div></div><details open><summary>意图候选与激活证据</summary><pre id="intentRouting"></pre></details><details><summary>用户/助手声道归因</summary><pre id="audioAttribution"></pre></details><div id="scheduler" class="scheduler"></div><p class="tools-title">当前 Skill 工具</p><div id="skillTools" class="quick"></div><p id="toolResult"></p><div id="toolAudit" class="archive"></div><div id="trace" hidden></div></section>
+    </section>
+  </main>
+
+  <footer>研究原型 · 界面只展示可观测事件、显式策略和结构化状态，不展示或声称访问模型隐藏思维链。</footer>
+  <dialog id="taskDialog"><form method="dialog" id="taskForm"><h2>创建当前 Skill 的任务</h2><label>任务名称<input id="customTitle" required maxlength="80" placeholder="例如：整理书桌"></label><label>参考知识锚点<textarea id="customSteps" required rows="7" placeholder="每行一个目标、证据或安全检查"></textarea></label><p>锚点是可独立满足、跳过或修正的假设，不规定唯一执行顺序。</p><div class="dialog-actions"><button id="cancelTask" type="button">取消</button><button id="createTask" type="submit" value="default" class="primary">创建并激活</button></div></form></dialog>
+  <script src="app.js"></script>
+</body>
+</html>

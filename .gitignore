@@ -1,0 +1,43 @@
+# ---- secrets / 本地环境 ----
+.env
+*.key
+
+# ---- Python 独立环境 ----
+venv/
+.venv/
+env/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+release_dist/
+.test-tmp/
+.test-runs/
+tmp/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# ---- 运行产物 / 缓存 ----
+outputs/
+.cache/
+.egoassist/
+research_references/
+*.log
+
+# ---- 模型权重与数据（体积大，勿入仓库）----
+*.mp4
+*.mkv
+*.mov
+*.bin
+*.safetensors
+*.pt
+*.pth
+/data/
+/data_real/
+
+# ---- 系统 ----
+.DS_Store
+node_modules/

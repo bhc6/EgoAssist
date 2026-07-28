@@ -1,0 +1,12 @@
+# Optional local-video and EgoLife benchmark dependencies.
+# Install in the project virtual environment after the base package.
+transformers>=4.49
+accelerate>=0.34
+qwen-vl-utils>=0.0.8
+bitsandbytes>=0.44
+sentencepiece
+open_clip_torch>=2.24
+faiss-cpu>=1.8
+opencv-python>=4.9
+openai>=1.40
+google-generativeai>=0.8

@@ -1,0 +1,10 @@
+{
+  "id":"fruit-salad","title":"水果沙拉","aliases":["果盘","fruit salad"],"version":"1.0","role":"免手做菜教学助手","provenance":"bundled/no-cook-procedure",
+  "safety_policy":["清洗与生熟分区优先","刀具风险优先","不确定过敏原时先询问"],
+  "steps":[
+    {"id":"clean","title":"清洁","instruction":"洗手并清洁砧板和刀具。","completion":"双手和操作面已清洁","risk":"low","source":"WHO Five Keys to Safer Food"},
+    {"id":"wash","title":"清洗水果","instruction":"在流动水下清洗完整水果并擦干。","completion":"水果表面已清洁并擦干","risk":"low","source":"FDA produce safety"},
+    {"id":"cut","title":"切配","instruction":"把水果放稳，手指内收，逐个切成适口块。","completion":"水果已安全切块","risk":"medium","source":"kitchen knife safety"},
+    {"id":"mix","title":"混合","instruction":"放入干净碗中轻轻拌匀。","completion":"所有水果已混合","risk":"low","source":"bundled no-cook procedure"}
+  ]
+}

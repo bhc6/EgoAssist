@@ -1,0 +1,41 @@
+{
+  "tasks": "tasks/*.json",
+  "default_task": "tomato-eggs",
+  "activation_phrases": ["做菜", "做饭", "烹饪", "下厨", "cook", "cooking"],
+  "allow_custom_tasks": true,
+  "capabilities": ["food-hygiene", "knife-safety", "heat-safety", "step-recovery"],
+  "proactive_check_seconds": 4,
+  "turn_taking": {
+    "immediate_actions": ["guide", "silent"],
+    "finish_clause_actions": ["ask", "correct"],
+    "protected_actions": ["emergency"],
+    "max_protection_ms": 2500
+  },
+  "memory_policy": {"write": "confirm", "trigger": ["task_id", "step_id"]},
+  "tools": [
+    {
+      "name": "set_timer",
+      "description": "Set a cooking timer with a spoken label",
+      "requires_confirmation": false,
+      "handler": "builtin.relative-deadline.v1",
+      "arguments": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "seconds": {"type": "integer", "minimum": 1, "maximum": 86400, "default": 60},
+          "label": {"type": "string", "maxLength": 80, "default": "当前任务"}
+        },
+        "required": ["seconds"]
+      }
+    },
+    {
+      "name": "request_human_help",
+      "description": "Share minimal recent context with a trusted helper",
+      "requires_confirmation": true,
+      "handler": "builtin.local-acknowledgement.v1",
+      "arguments": {"type": "object", "additionalProperties": false, "properties": {}},
+      "result": {"status": "accepted", "message": "求助请求已进入本地演示队列；未连接外部服务。"}
+    }
+  ],
+  "evaluation": ["intervention_precision", "unnecessary_interruption_rate", "hazard_recall", "followup_reuse", "barge_in_success"]
+}

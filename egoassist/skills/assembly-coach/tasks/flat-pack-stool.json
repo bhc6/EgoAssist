@@ -1,0 +1,12 @@
+{
+  "id":"flat-pack-stool","title":"组装平板包装凳","aliases":["组装凳子","小凳子","flat pack stool"],"version":"1.0","role":"免手装配教学助手","provenance":"bundled/generic-flat-pack-demo",
+  "safety_policy":["必须先核对随产品提供的手册和零件编号","承重结构未紧固前不得试坐","电动工具和夹手风险优先"],
+  "steps":[
+    {"id":"inventory","title":"清点","instruction":"按产品手册清点板件、紧固件和工具。","completion":"零件数量与手册一致","risk":"low","source":"product manual"},
+    {"id":"orient","title":"辨认方向","instruction":"按孔位和标签摆正每个板件，暂不拧紧。","completion":"板件方向与图示一致","risk":"low","source":"product manual"},
+    {"id":"join","title":"预连接","instruction":"按对角顺序装入紧固件，只拧到可调整。","completion":"连接完整且仍可微调","risk":"medium","source":"generic flat-pack practice"},
+    {"id":"square","title":"校正","instruction":"在平面检查四脚着地和结构方正。","completion":"无明显晃动且结构方正","risk":"medium","source":"generic flat-pack practice"},
+    {"id":"tighten","title":"终拧","instruction":"按手册扭矩和顺序逐步紧固。","completion":"紧固件到位且无板件损伤","risk":"high","source":"product manual"},
+    {"id":"inspect","title":"承重前检查","instruction":"复查全部连接，确认无松动后再按额定用途使用。","completion":"所有连接通过目视和手动检查","risk":"high","source":"product manual"}
+  ]
+}
