@@ -92,6 +92,12 @@
         <b id="workCenterCounts">0 active · 0 results</b>
       </div>
       <div id="capabilityTruth" class="capability-strip" aria-label="产品能力真值"></div>
+      <form id="reminderForm" class="reminder-create">
+        <label>提醒内容<input id="reminderLabel" maxlength="80" value="检查当前任务" required></label>
+        <label>秒数<input id="reminderSeconds" type="number" min="1" max="86400" value="60" required></label>
+        <button id="createReminder" type="submit">创建提醒</button>
+        <span id="reminderAvailability"></span>
+      </form>
       <div class="work-center-grid">
         <section aria-labelledby="intentListTitle"><h3 id="intentListTitle">意图</h3><div id="intentList" class="work-list"></div></section>
         <section aria-labelledby="jobListTitle"><h3 id="jobListTitle">任务</h3><div id="jobList" class="work-list"></div></section>

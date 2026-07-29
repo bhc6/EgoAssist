@@ -143,15 +143,27 @@ def skill_capability_truth(manifest: Mapping[str, Any]) -> list[dict[str, Any]]:
     return values
 
 
-def platform_capability_truth() -> list[dict[str, Any]]:
+def platform_capability_truth(
+    overrides: Mapping[str, Mapping[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
+    configured = dict(overrides or {})
     return [
-        {**item, "executable": item["status"] == EXECUTABLE_STATUS}
+        {
+            **item,
+            **dict(configured.get(str(item["id"]), {})),
+            "executable": str(
+                configured.get(str(item["id"]), {}).get("status", item["status"])
+            ) == EXECUTABLE_STATUS,
+        }
         for item in PLATFORM_CAPABILITIES
     ]
 
 
-def platform_capability_available(capability_id: str) -> bool:
+def platform_capability_available(
+    capability_id: str,
+    overrides: Mapping[str, Mapping[str, Any]] | None = None,
+) -> bool:
     return any(
         item["id"] == str(capability_id) and item["status"] == EXECUTABLE_STATUS
-        for item in PLATFORM_CAPABILITIES
+        for item in platform_capability_truth(overrides)
     )

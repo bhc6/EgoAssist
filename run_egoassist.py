@@ -13,6 +13,7 @@ import json
 import logging
 import os
 import webbrowser
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -45,10 +46,20 @@ from egoassist.realtime import (
     executable_tool_declarations,
     platform_capability_available,
     platform_capability_truth,
+    public_tool_declaration,
 )
 from egoassist.realtime.media_audit import MediaAuditAccumulator
 from egoassist.realtime.tools import tool_result_succeeded
 from egoassist.product import ProductDatabase
+from egoassist.product.notifications import NtfyNotificationPort
+from egoassist.product.reminders import (
+    DEFAULT_TASK_QUEUE,
+    ReminderActivities,
+    ReminderWorkflow,
+    ReminderWorkflowInput,
+    TemporalReminderCoordinator,
+)
+from temporalio.worker import Worker
 
 
 ROOT = Path(__file__).resolve().parent
@@ -208,6 +219,42 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
     identity = IdentityStore(Path(memory_path).with_name("identity.sqlite3"))
     product_database = ProductDatabase(Path(memory_path).with_name("product.sqlite3"))
     product_database.create_schema()
+    capability_overrides: dict[str, dict[str, Any]] = {}
+    reminder_runtime: dict[str, Any] = {
+        "status": "unconfigured",
+        "coordinator": None,
+        "worker": None,
+        "workerTask": None,
+        "reason": "EGOASSIST_TEMPORAL_TARGET is not configured.",
+    }
+    reminder_start_tasks: set[asyncio.Task] = set()
+
+    def runtime_tool_declarations(package) -> list[dict]:
+        declarations = []
+        timer_available = platform_capability_available(
+            "timer-delivery", capability_overrides,
+        )
+        for raw in package.manifest.get("tools", []):
+            item = dict(raw)
+            if item.get("name") == "set_timer" and timer_available:
+                item["availability"] = {
+                    "status": "available",
+                    "reason": "Temporal workflow and durable ResultInbox delivery are connected.",
+                }
+                item["handler"] = "builtin.temporal-reminder.v1"
+            declarations.append(item)
+        return declarations
+
+    def runtime_skill_summary(package) -> dict:
+        summary = package.public_summary()
+        summary["tools"] = [
+            public_tool_declaration(item)
+            for item in runtime_tool_declarations(package)
+        ]
+        return summary
+
+    def runtime_skill_summaries() -> list[dict]:
+        return [runtime_skill_summary(package) for package in registry.skills.values()]
     user_memory_root = Path(memory_path).with_name("users")
     user_memories: dict[str, PreferenceMemory] = {}
     case_memories: dict[tuple[str, str], PreferenceMemory] = {}
@@ -340,7 +387,10 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
         active_runtime = target_runtime or runtime
         # Durable user data is projected as typed low-trust messages by the
         # harness. It must never be interpolated into provider instructions.
-        base = active_runtime.context([])
+        base = active_runtime.context(
+            [],
+            runtime_tool_declarations(active_runtime.skill) if active_runtime.skill else None,
+        )
         evidence = (episode_injection or active_episode_injection).get("evidence", [])
         if not include_untrusted_evidence or not evidence:
             return base
@@ -569,6 +619,7 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
             work_ledger=CaseWorkLedger(journal),
         )
         case_owners[session_id] = owner
+        recover_case_reminders(owner)
         ensure_job_scheduler(owner)
         return owner
 
@@ -863,14 +914,14 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
             }
         )
         capability_catalog = {
-            "platform": platform_capability_truth(),
+            "platform": platform_capability_truth(capability_overrides),
             "skills": [
                 {
                     "name": item["name"],
                     "capabilities": item.get("capabilityTruth", []),
                     "tools": item.get("tools", []),
                 }
-                for item in registry.summaries()
+                for item in runtime_skill_summaries()
             ],
         }
         visible_events = (
@@ -993,8 +1044,8 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                 "genericDecision": generic_decision,
                 "realtimeModel": model,
                 "providerLanes": provider_lanes,
-                "activeSkill": active_runtime.skill.public_summary() if active_runtime.skill else None,
-                "skills": registry.summaries(),
+                "activeSkill": runtime_skill_summary(active_runtime.skill) if active_runtime.skill else None,
+                "skills": runtime_skill_summaries(),
                 "tasks": active_runtime.task_summaries(),
                 "intentRouting": active_routing,
                 "audioAttribution": audio_attribution,
@@ -1103,8 +1154,8 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
             "task": task_state,
             "realtimeModel": model,
             "providerLanes": provider_lanes,
-            "activeSkill": active_runtime.skill.public_summary(),
-            "skills": registry.summaries(),
+            "activeSkill": runtime_skill_summary(active_runtime.skill),
+            "skills": runtime_skill_summaries(),
             "tasks": active_runtime.task_summaries(),
             "intentRouting": active_routing,
             "audioAttribution": audio_attribution,
@@ -1169,6 +1220,140 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                 origin=origin,
             )
         return bridge.request_response(instructions, priority=priority, interrupt=interrupt)
+
+    async def start_reminder_workflow(owner: CaseRuntimeOwner, value: ReminderWorkflowInput) -> None:
+        ledger = owner.work_ledger or CaseWorkLedger(owner.journal)
+        coordinator = reminder_runtime.get("coordinator")
+        try:
+            if coordinator is None:
+                raise RuntimeError("Temporal reminder coordinator is unavailable")
+            await coordinator.start(value)
+            async with owner.mutation_lock:
+                current = ledger.jobs().get(value.job_id)
+                if current and current.get("status") == "queued":
+                    ledger.set_job_status(
+                        value.job_id,
+                        "running",
+                        detail={"workflowId": value.workflow_id, "executor": "temporal"},
+                    )
+        except Exception as exc:
+            async with owner.mutation_lock:
+                current = ledger.jobs().get(value.job_id)
+                if current and current.get("status") not in {"completed", "failed", "cancelled"}:
+                    ledger.set_job_status(
+                        value.job_id, "failed", detail={"error": str(exc), "executor": "temporal"},
+                    )
+                intent = ledger.intents().get(value.intent_id)
+                if intent and intent.get("status") not in {"completed", "failed", "cancelled"}:
+                    ledger.set_intent_status(value.intent_id, "failed", detail={"error": str(exc)})
+                ledger.enqueue_result(
+                    value.intent_id,
+                    {"kind": "reminder-failed", "label": value.label, "error": str(exc)},
+                    job_id=value.job_id,
+                    priority=100,
+                    result_id=value.result_id,
+                )
+
+    def queue_reminder(
+        owner: CaseRuntimeOwner,
+        *,
+        seconds: int,
+        label: str,
+        turn_id: str | None = None,
+    ) -> dict[str, Any]:
+        if reminder_runtime.get("status") != "ready":
+            raise RuntimeError(reminder_runtime.get("reason") or "Temporal reminder is unavailable")
+        if isinstance(seconds, bool) or not isinstance(seconds, int) or not 1 <= seconds <= 86400:
+            raise ValueError("timer seconds must be an integer between 1 and 86400")
+        normalized_label = str(label or "Reminder").strip()[:80] or "Reminder"
+        ledger = owner.work_ledger or CaseWorkLedger(owner.journal)
+        source_turn_id = str(turn_id or "")
+        if source_turn_id not in ledger.turns():
+            captured = ledger.capture_turn(
+                f"Set reminder: {normalized_label}",
+                source="reminder-command",
+            )
+            source_turn_id = captured["turnId"]
+        stable = uuid4().hex[:16]
+        workflow_id = f"egoassist-reminder-{owner.session_id}-{stable}"
+        result_id = f"reminder-result-{stable}"
+        intent = ledger.create_intent(
+            source_turn_id,
+            kind="background-reminder",
+            payload={"label": normalized_label, "seconds": seconds},
+            skill_ref={"name": "kitchen-coach", "tool": "set_timer"},
+            status="running-background",
+            intent_id=f"reminder-intent-{stable}",
+        )
+        due_at = datetime.now(timezone.utc) + timedelta(seconds=seconds)
+        job = ledger.create_job(
+            intent["intentId"],
+            kind="timer-delivery",
+            payload={
+                "dueAt": due_at.isoformat(),
+                "label": normalized_label,
+                "workflowId": workflow_id,
+                "resultId": result_id,
+            },
+            status="queued",
+            job_id=f"reminder-job-{stable}",
+        )
+        value = ReminderWorkflowInput(
+            workflow_id=workflow_id,
+            user_id=owner.user_id,
+            session_id=owner.session_id,
+            journal_path=str(owner.journal.path),
+            intent_id=intent["intentId"],
+            job_id=job["jobId"],
+            result_id=result_id,
+            label=normalized_label,
+            due_at=due_at.isoformat(),
+        )
+        task = asyncio.create_task(
+            start_reminder_workflow(owner, value),
+            name=f"egoassist-start-reminder:{workflow_id}",
+        )
+        reminder_start_tasks.add(task)
+        task.add_done_callback(reminder_start_tasks.discard)
+        return {
+            "status": "queued",
+            "jobId": job["jobId"],
+            "intentId": intent["intentId"],
+            "workflowId": workflow_id,
+            "dueAt": due_at.isoformat(),
+            "label": normalized_label,
+        }
+
+    def recover_case_reminders(owner: CaseRuntimeOwner) -> None:
+        if reminder_runtime.get("status") != "ready":
+            return
+        ledger = owner.work_ledger or CaseWorkLedger(owner.journal)
+        for job in ledger.jobs().values():
+            payload = dict(job.get("payload") or {})
+            if job.get("kind") != "timer-delivery" or job.get("status") != "queued":
+                continue
+            intent_id = str(job.get("intentId", ""))
+            workflow_id = str(payload.get("workflowId", ""))
+            result_id = str(payload.get("resultId", ""))
+            if not intent_id or not workflow_id or not result_id:
+                continue
+            value = ReminderWorkflowInput(
+                workflow_id=workflow_id,
+                user_id=owner.user_id,
+                session_id=owner.session_id,
+                journal_path=str(owner.journal.path),
+                intent_id=intent_id,
+                job_id=str(job["jobId"]),
+                result_id=result_id,
+                label=str(payload.get("label", "Reminder")),
+                due_at=str(payload.get("dueAt")),
+            )
+            task = asyncio.create_task(
+                start_reminder_workflow(owner, value),
+                name=f"egoassist-recover-reminder:{workflow_id}",
+            )
+            reminder_start_tasks.add(task)
+            task.add_done_callback(reminder_start_tasks.discard)
 
     def ensure_job_scheduler(owner: CaseRuntimeOwner) -> None:
         """Start one durable case scheduler independently of WebSocket lifetime."""
@@ -2815,10 +3000,40 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
             raise ValueError("sessionId and jobId are required")
         identity.get_context_session(user_id, session_id)
         owner = case_owner(user_id, session_id)
+        ledger = owner.work_ledger or CaseWorkLedger(owner.journal)
+        existing = ledger.jobs().get(job_id)
+        if existing is None:
+            raise ValueError("job not found")
+        workflow_id = str((existing.get("payload") or {}).get("workflowId", ""))
+        if (
+            workflow_id
+            and existing.get("status") not in {"completed", "failed", "cancelled"}
+            and reminder_runtime.get("coordinator") is not None
+        ):
+            await reminder_runtime["coordinator"].cancel(workflow_id)
         async with owner.mutation_lock:
-            job = (owner.work_ledger or CaseWorkLedger(owner.journal)).cancel_job(job_id)
+            job = ledger.cancel_job(job_id)
         return web.json_response({
             "job": job,
+            "state": scoped_state_for_user(user_id, session_id, runtime_override=owner.runtime),
+        })
+
+    async def post_reminder_create(request):
+        user_id = request[user_key]["id"]
+        payload = await request.json()
+        session_id = str(payload.get("sessionId", "")).strip()
+        if not session_id:
+            raise ValueError("sessionId is required")
+        identity.get_context_session(user_id, session_id)
+        owner = case_owner(user_id, session_id)
+        async with owner.mutation_lock:
+            result = queue_reminder(
+                owner,
+                seconds=payload.get("seconds"),
+                label=payload.get("label", "Reminder"),
+            )
+        return web.json_response({
+            "reminder": result,
             "state": scoped_state_for_user(user_id, session_id, runtime_override=owner.runtime),
         })
 
@@ -2864,12 +3079,30 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                 if active_runtime.skill is None:
                     raise ValueError("no active skill exposes tools")
                 audit_count = len(active_tools.audit)
-                result = active_tools.execute(
-                    tool=str(payload.get("tool", "")),
-                    arguments=payload.get("arguments", {}),
-                    declared_tools=active_runtime.skill.manifest.get("tools", []),
-                    confirmed=bool(payload.get("confirmed", False)),
-                )
+                tool_name = str(payload.get("tool", ""))
+                arguments = payload.get("arguments", {})
+                runtime_declarations = runtime_tool_declarations(active_runtime.skill)
+                declaration = next((item for item in runtime_declarations if item.get("name") == tool_name), None)
+                if tool_name == "set_timer" and declaration and declaration.get("handler") == "builtin.temporal-reminder.v1":
+                    result = queue_reminder(
+                        owner,
+                        seconds=arguments.get("seconds"),
+                        label=arguments.get("label", "Reminder"),
+                    )
+                    active_tools.audit.append({
+                        "time": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                        "tool": tool_name,
+                        "handler": "builtin.temporal-reminder.v1",
+                        "arguments": dict(arguments),
+                        "result": dict(result),
+                    })
+                else:
+                    result = active_tools.execute(
+                        tool=tool_name,
+                        arguments=arguments,
+                        declared_tools=runtime_declarations,
+                        confirmed=bool(payload.get("confirmed", False)),
+                    )
                 persist_tool_audit(owner, audit_count)
         else:
             if active_runtime.skill is None:
@@ -3052,7 +3285,7 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
 
         def session_tool_declarations() -> list[dict]:
             return (
-                executable_tool_declarations(session_runtime.skill.manifest.get("tools", []))
+                executable_tool_declarations(runtime_tool_declarations(session_runtime.skill))
                 if session_runtime.skill else []
             )
 
@@ -3070,6 +3303,23 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
             declared_tools = source.get("tools")
             if not isinstance(declared_tools, list):
                 declared_tools = session_tool_declarations()
+            declaration = next((item for item in declared_tools if item.get("name") == name), None)
+            if name == "set_timer" and declaration and declaration.get("handler") == "builtin.temporal-reminder.v1":
+                result = queue_reminder(
+                    owner,
+                    seconds=arguments.get("seconds"),
+                    label=arguments.get("label", "Reminder"),
+                    turn_id=source.get("turnId"),
+                )
+                session_tools.audit.append({
+                    "time": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                    "tool": name,
+                    "handler": "builtin.temporal-reminder.v1",
+                    "arguments": dict(arguments),
+                    "result": dict(result),
+                })
+                persist_tool_audit(owner, audit_count)
+                return result
             result = session_tools.execute(
                 tool=name,
                 arguments=arguments,
@@ -3115,6 +3365,8 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
             source_origin = {}
             if journal_entry:
                 source_origin = dict((journal_entry.get("metadata") or {}).get("origin") or {})
+            if isinstance(result, dict) and str(result.get("status", "")).casefold() in {"queued", "running"}:
+                return None
             ledger = owner.work_ledger or CaseWorkLedger(harness.journal)
             intent_id = source_origin.get("intentId")
             result_entry = None
@@ -3894,6 +4146,68 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
 
     app = web.Application(client_max_size=3_000_000, middlewares=[errors, authentication])
 
+    async def temporal_reminder_context(_app):
+        target = str(os.getenv("EGOASSIST_TEMPORAL_TARGET", "")).strip()
+        if not target:
+            yield
+            return
+        worker = None
+        worker_task = None
+        try:
+            coordinator = await TemporalReminderCoordinator.connect(
+                target,
+                namespace=os.getenv("EGOASSIST_TEMPORAL_NAMESPACE", "default"),
+                task_queue=os.getenv("EGOASSIST_TEMPORAL_TASK_QUEUE", DEFAULT_TASK_QUEUE),
+            )
+            notification = None
+            ntfy_topic = str(os.getenv("EGOASSIST_NTFY_TOPIC", "")).strip()
+            if ntfy_topic:
+                notification = NtfyNotificationPort(
+                    ntfy_topic,
+                    server=os.getenv("EGOASSIST_NTFY_SERVER", "https://ntfy.sh"),
+                    token=os.getenv("EGOASSIST_NTFY_TOKEN"),
+                )
+            activities = ReminderActivities(notification)
+            worker = Worker(
+                coordinator.client,
+                task_queue=coordinator.task_queue,
+                workflows=[ReminderWorkflow],
+                activities=[activities.deliver],
+            )
+            worker_task = asyncio.create_task(worker.run(), name="egoassist-temporal-reminder-worker")
+            reminder_runtime.update({
+                "status": "ready",
+                "coordinator": coordinator,
+                "worker": worker,
+                "workerTask": worker_task,
+                "reason": "Temporal workflow and durable ResultInbox delivery are connected.",
+            })
+            capability_overrides["timer-delivery"] = {
+                "status": "available",
+                "reason": "Temporal owns timer lifecycle; ResultInbox is durable and ntfy is optional.",
+            }
+            for owner in tuple(case_owners.values()):
+                recover_case_reminders(owner)
+        except Exception as exc:
+            LOGGER.exception("Temporal reminder startup failed")
+            reminder_runtime.update({
+                "status": "unavailable",
+                "coordinator": None,
+                "reason": f"Temporal connection failed: {exc}",
+            })
+        try:
+            yield
+        finally:
+            capability_overrides.pop("timer-delivery", None)
+            reminder_runtime["status"] = "stopping"
+            if reminder_start_tasks:
+                await asyncio.gather(*tuple(reminder_start_tasks), return_exceptions=True)
+            if worker is not None:
+                await worker.shutdown()
+            if worker_task is not None:
+                await asyncio.gather(worker_task, return_exceptions=True)
+            reminder_runtime.update({"status": "stopped", "coordinator": None})
+
     async def runtime_root_lease_context(_app):
         lease = RuntimeRootLease(memory_path)
         lease.acquire()
@@ -3922,6 +4236,7 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                 lease.release()
 
     app.cleanup_ctx.append(runtime_root_lease_context)
+    app.cleanup_ctx.append(temporal_reminder_context)
     app.add_routes([
         web.post("/api/auth/register", post_register),
         web.post("/api/auth/login", post_login),
@@ -3940,6 +4255,7 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
         web.post("/api/task/reset", post_reset),
         web.post("/api/intents/focus", post_intent_focus),
         web.post("/api/jobs/cancel", post_job_cancel),
+        web.post("/api/reminders", post_reminder_create),
         web.post("/api/results/dismiss", post_result_dismiss),
         web.post("/api/candidate", post_candidate),
         web.post("/api/memory/delete", post_delete),

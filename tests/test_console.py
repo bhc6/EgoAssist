@@ -107,3 +107,6 @@ def test_frontend_exposes_operable_work_center_and_capability_truth():
     assert 'post("/api/jobs/cancel"' in script
     assert 'post("/api/results/dismiss"' in script
     assert "availability.executable" in script
+    assert 'id="reminderForm"' in html
+    assert 'post("/api/reminders"' in script
+    assert 'item.id === "timer-delivery"' in script

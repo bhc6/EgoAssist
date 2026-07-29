@@ -9,7 +9,7 @@ from pathlib import Path
 
 from .config import Config
 
-PACKAGE_ROOT = Path(__file__).resolve().parent
+PACKAGE_ROOT = Path(__file__).parent
 CONSOLE_ROOT = PACKAGE_ROOT / "console"
 BUILTIN_SKILLS_ROOT = PACKAGE_ROOT / "skills"
 

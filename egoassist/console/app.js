@@ -218,6 +218,13 @@ function renderWorkCenter() {
   const ledger = state.workLedger || {intents: [], jobs: [], resultInbox: [], foregroundIntentId: null};
   const capabilities = state.capabilityCatalog?.platform || [];
   const unavailable = capabilities.filter(item => item.status !== "available");
+  const timerCapability = capabilities.find(item => item.id === "timer-delivery") || {
+    status: "unsupported", reason: "Temporal reminder service is not configured.",
+  };
+  $("#createReminder").disabled = timerCapability.status !== "available";
+  $("#reminderAvailability").textContent = timerCapability.status === "available"
+    ? "Temporal · durable"
+    : timerCapability.status + " · " + timerCapability.reason;
   $("#capabilityTruth").innerHTML = capabilities.map(item =>
     "<span class='capability-state " + esc(item.status) + "' title='" + esc(item.reason) + "'><b>" +
     esc(item.label + " · " + item.status) + "</b></span>"
@@ -750,6 +757,20 @@ $("#taskForm").onsubmit = async event => {
     $("#taskDialog").close();
     if (wasRealtime) await connectRealtime();
   } catch (error) { alert(error.message); }
+};
+$("#reminderForm").onsubmit = async event => {
+  event.preventDefault();
+  const button = $("#createReminder");
+  button.disabled = true;
+  try {
+    const payload = await post("/api/reminders", {
+      sessionId: selectedSessionId,
+      seconds: Number($("#reminderSeconds").value),
+      label: $("#reminderLabel").value.trim(),
+    });
+    render(payload.state);
+  } catch (error) { alert(error.message); }
+  finally { if (state) renderWorkCenter(); }
 };
 
 $("#loginMode").onclick = () => setAuthMode("login");

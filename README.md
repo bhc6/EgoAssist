@@ -374,9 +374,12 @@ is written only after a committed, non-error tool result explicitly reports
 success. Model wording, a confirmation request, rejection, exception, or
 `unsupported` result cannot create an effect card.
 
-The bundled `set_timer` adapter currently returns `unsupported`. It can compute a
-relative deadline but there is no persistent alarm-delivery scheduler, so EgoAssist
-must not claim that a timer or reminder was created.
+`set_timer` remains `unsupported` unless `EGOASSIST_TEMPORAL_TARGET` connects to a
+Temporal server and the reminder worker starts. When connected, timer lifecycle,
+retry, cancellation, and restart recovery belong to Temporal; the activity writes
+one stable result to the durable ResultInbox before optional ntfy delivery. The
+tool first returns `queued`, not `scheduled`, and a failed workflow becomes a
+visible failed job/result rather than a success claim.
 
 ## Configuration
 
@@ -403,6 +406,14 @@ EGOASSIST_TURN_ROUTER_MODEL=qwen-flash
 EGOASSIST_TURN_ROUTER_TIMEOUT=3.0
 EGOASSIST_RESPONSE_CREATE_TIMEOUT=5
 EGOASSIST_RESPONSE_FINISH_TIMEOUT=45
+
+EGOASSIST_TEMPORAL_TARGET=127.0.0.1:7233
+EGOASSIST_TEMPORAL_NAMESPACE=default
+EGOASSIST_TEMPORAL_TASK_QUEUE=egoassist-reminders-v1
+# Optional push in addition to the persistent ResultInbox:
+EGOASSIST_NTFY_SERVER=https://ntfy.sh
+EGOASSIST_NTFY_TOPIC=
+EGOASSIST_NTFY_TOKEN=
 
 EGOASSIST_CONTEXT_WINDOW=32768
 EGOASSIST_CONTEXT_RESERVE=4096

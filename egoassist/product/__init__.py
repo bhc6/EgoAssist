@@ -1,11 +1,35 @@
-"""Product contracts, ports, persistence, and tracing boundaries."""
+"""Lazy product exports keep Temporal workflow imports deterministic and small."""
 
-from .contracts import *  # noqa: F401,F403
-from .database import ProductDatabase
-from .models import Base
-from .ports import *  # noqa: F401,F403
-from .telemetry import correlation_ids, current_trace_id, product_span
+from __future__ import annotations
+
+from importlib import import_module
+from typing import Any
+
+
+_MODULES = (
+    "egoassist.product.contracts",
+    "egoassist.product.ports",
+    "egoassist.product.database",
+    "egoassist.product.models",
+    "egoassist.product.telemetry",
+)
+
+
+def __getattr__(name: str) -> Any:
+    for module_name in _MODULES:
+        module = import_module(module_name)
+        if hasattr(module, name):
+            value = getattr(module, name)
+            globals()[name] = value
+            return value
+    raise AttributeError(name)
+
 
 __all__ = [
     "ProductDatabase", "Base", "correlation_ids", "current_trace_id", "product_span",
+    "ConversationTurn", "CorrelationIds", "IntentEnvelope", "JobRecord", "JobAttempt",
+    "ResultRecord", "NotificationRequest", "NotificationReceipt", "ArtifactDescriptor",
+    "HumanHelpRequest", "HumanHelpReceipt", "ObservationEvidence", "ProviderDisclosure",
+    "InteractionTransport", "WorkflowPort", "NotificationPort", "ArtifactPort",
+    "HumanHelpPort", "PerceptionPort",
 ]

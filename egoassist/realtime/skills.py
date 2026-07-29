@@ -76,8 +76,15 @@ class SkillPackage:
             default_task_id=default_task_id,
         )
 
-    def realtime_instructions(self, task_spec: TaskSpec, memories: list[dict[str, Any]]) -> str:
-        tools = executable_tool_declarations(self.manifest.get("tools", []))
+    def realtime_instructions(
+        self,
+        task_spec: TaskSpec,
+        memories: list[dict[str, Any]],
+        tool_declarations: list[dict[str, Any]] | None = None,
+    ) -> str:
+        tools = executable_tool_declarations(
+            self.manifest.get("tools", []) if tool_declarations is None else tool_declarations
+        )
         tool_text = "\n".join(
             f"- {tool['name']}: {tool.get('description', '')}; 需要确认={tool.get('requires_confirmation', True)}"
             for tool in tools
@@ -260,7 +267,11 @@ class SkillRuntime:
             for spec in self.tasks.values()
         ]
 
-    def context(self, memories: list[dict[str, Any]]) -> str:
+    def context(
+        self,
+        memories: list[dict[str, Any]],
+        tool_declarations: list[dict[str, Any]] | None = None,
+    ) -> str:
         if self.skill is None:
             return (
                 "你是 EgoAssist，一个通用实时多模态助手。当前没有加载领域 Skill，也没有预设任务。"
@@ -291,7 +302,7 @@ class SkillRuntime:
             f"控制面决策={snapshot['decision']['action']}:{snapshot['decision']['reason']}</runtime_state>"
         )
         return (
-            self.skill.realtime_instructions(self.task.spec, memories)
+            self.skill.realtime_instructions(self.task.spec, memories, tool_declarations)
             + f"\n当前 Skill 可切换任务：{catalog}。用户明确说出其中一个任务名称时切换；"
               "若用户目标不是当前任务，先澄清或请求创建任务，绝不把默认任务冒充为用户目标。"
             + live_state

@@ -342,7 +342,7 @@ is marked complete only after its exit gate and regression suite pass.
 |---|---|---|
 | M0 Truth reset | Complete | Capability catalog drives prompts, provider tools, APIs, and the Task Center; unavailable adapters return `unsupported` or `demo-only`; the local pseudo-scheduler is disabled; full regression and frontend syntax checks pass. |
 | M1 Foundation | Complete | Pydantic contracts, typed infrastructure ports, SQLAlchemy models, reversible Alembic migration `b0688201c8ee`, OpenTelemetry ID filtering, and an idempotent JSONL compatibility projector are implemented and tested. Runtime state now projects each case journal into the product DB without replacing TimelineMemory. |
-| M2 Reliable timer | Not started | Timer delivery remains unavailable. |
+| M2 Reliable timer | Complete | Temporal SDK `1.31.0` owns durable timers, retry, signals, and workflow IDs. The activity writes a stable ResultInbox item before optional ntfy delivery, records per-attempt receipts, and deduplicates repeated activity execution. Task Center supports create/cancel/result acknowledgement. Official time-skipping server tests cover worker restart, fire, cancel, duplicate activity, disconnected UI recovery, and conditional capability exposure. |
 | M3 Interaction transport | Not started | Existing provider bridge remains active pending LiveKit migration. |
 | M4 Artifacts and human help | Not started | Both remain unavailable or demo-only. |
 | M5 Structured perception | Not started | Realtime checkpoint-constrained perception remains experimental. |
