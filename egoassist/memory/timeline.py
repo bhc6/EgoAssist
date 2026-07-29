@@ -8,7 +8,6 @@ import math
 import re
 import sqlite3
 import threading
-from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping, Sequence
@@ -16,8 +15,10 @@ from uuid import uuid4
 
 import numpy as np
 
+from .temporal import ClockContext, query_time_range
 
-TIMELINE_SCHEMA_VERSION = 1
+
+TIMELINE_SCHEMA_VERSION = 2
 MEMORY_KINDS = {
     "fact", "event", "state", "preference", "task-preference",
     "scene", "observation", "tool-effect", "capture", "legacy",
@@ -68,13 +69,41 @@ def _parse_time(value: str) -> datetime:
     return parsed.astimezone(timezone.utc)
 
 
-def _day_key(value: datetime | str | None) -> str:
+def _day_key(
+    value: datetime | str | None,
+    timezone_name: str = "UTC",
+    utc_offset_minutes: int = 0,
+) -> str:
     if value is None:
-        return datetime.now().astimezone().date().isoformat()
+        value = utc_now()
     parsed = _parse_time(value) if isinstance(value, str) else value
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=timezone.utc)
-    return parsed.astimezone().date().isoformat()
+    clock = ClockContext.current(
+        timezone_name,
+        utc_offset_minutes,
+        now_utc=parsed.astimezone(timezone.utc),
+    )
+    return clock.local_now.date().isoformat()
+
+
+def normalize_identity(value: str | None) -> str | None:
+    normalized = normalize_text(value or "")
+    return normalized or None
+
+
+def memory_key_for(subject: str | None, predicate: str | None) -> str | None:
+    """Generate entity-qualified keys at the trusted storage boundary."""
+
+    entity = normalize_identity(subject)
+    relation = normalize_identity(predicate)
+    if not entity or not relation:
+        return None
+    if relation in {"phone", "telephone", "contact.phone"}:
+        return f"contact:{entity}:phone"
+    if relation in {"location", "located_at", "object.location"}:
+        return f"location:{entity}"
+    return f"{relation}:{entity}"
 
 
 def normalize_text(text: str) -> str:
@@ -174,6 +203,15 @@ class TimelineMemory:
                     memory_key TEXT,
                     happened_at TEXT NOT NULL,
                     day_key TEXT NOT NULL,
+                    recorded_at TEXT,
+                    effective_at TEXT,
+                    effective_end TEXT,
+                    timezone_name TEXT,
+                    utc_offset_minutes INTEGER,
+                    recurrence TEXT,
+                    subject TEXT,
+                    predicate TEXT,
+                    value TEXT,
                     embedding BLOB NOT NULL,
                     embedding_dim INTEGER NOT NULL,
                     source_ids TEXT NOT NULL,
@@ -195,12 +233,55 @@ class TimelineMemory:
                     fingerprint TEXT NOT NULL,
                     imported_at TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS memory_drafts (
+                    id TEXT PRIMARY KEY,
+                    user_id TEXT NOT NULL,
+                    case_id TEXT NOT NULL,
+                    subject TEXT,
+                    predicate TEXT NOT NULL,
+                    language TEXT,
+                    missing_fields TEXT NOT NULL,
+                    source_ids TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    started_at TEXT NOT NULL,
+                    expires_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    metadata TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS memory_drafts_owner
+                    ON memory_drafts(user_id, case_id, status, expires_at DESC);
             """)
             version = connection.execute(
                 "SELECT value FROM timeline_meta WHERE key='schema_version'"
             ).fetchone()
-            if version and int(version["value"]) != TIMELINE_SCHEMA_VERSION:
+            if version and int(version["value"]) not in {1, TIMELINE_SCHEMA_VERSION}:
                 raise ValueError(f"unsupported timeline schema version: {version['value']}")
+            columns = {
+                str(row["name"])
+                for row in connection.execute("PRAGMA table_info(memory_cards)").fetchall()
+            }
+            migrations = {
+                "recorded_at": "TEXT",
+                "effective_at": "TEXT",
+                "effective_end": "TEXT",
+                "timezone_name": "TEXT",
+                "utc_offset_minutes": "INTEGER",
+                "recurrence": "TEXT",
+                "subject": "TEXT",
+                "predicate": "TEXT",
+                "value": "TEXT",
+            }
+            for column, declaration in migrations.items():
+                if column not in columns:
+                    connection.execute(f"ALTER TABLE memory_cards ADD COLUMN {column} {declaration}")
+            connection.execute(
+                """UPDATE memory_cards
+                   SET recorded_at=COALESCE(recorded_at, created_at),
+                       effective_at=COALESCE(effective_at, happened_at),
+                       timezone_name=COALESCE(timezone_name, 'UTC'),
+                       utc_offset_minutes=COALESCE(utc_offset_minutes, 0),
+                       recurrence=COALESCE(recurrence, 'null')"""
+            )
             connection.execute(
                 "INSERT OR REPLACE INTO timeline_meta(key, value) VALUES('schema_version', ?)",
                 (str(TIMELINE_SCHEMA_VERSION),),
@@ -217,6 +298,15 @@ class TimelineMemory:
         tier: str = "short",
         memory_key: str | None = None,
         happened_at: datetime | str | None = None,
+        recorded_at: datetime | str | None = None,
+        effective_at: datetime | str | None = None,
+        effective_end: datetime | str | None = None,
+        timezone_name: str = "UTC",
+        utc_offset_minutes: int = 0,
+        recurrence: Mapping[str, Any] | None = None,
+        subject: str | None = None,
+        predicate: str | None = None,
+        value: str | None = None,
         source_ids: Iterable[str] = (),
         status: str = "active",
         importance: float = 0.5,
@@ -237,8 +327,18 @@ class TimelineMemory:
         case_id = str(case_id).strip() if case_id else None
         if not user_id:
             raise ValueError("memory user_id is required")
-        happened = _iso(happened_at)
-        now = _iso(None)
+        now = _iso(recorded_at)
+        effective = _iso(effective_at) if effective_at is not None else (
+            _iso(happened_at) if happened_at is not None else None
+        )
+        effective_stop = _iso(effective_end) if effective_end is not None else None
+        happened = effective or now
+        normalized_subject = normalize_identity(subject)
+        normalized_predicate = normalize_identity(predicate)
+        generated_key = memory_key_for(normalized_subject, normalized_predicate)
+        if generated_key:
+            memory_key = generated_key
+        recurrence_json = json.dumps(recurrence, ensure_ascii=False, sort_keys=True) if recurrence else "null"
         normalized = normalize_text(text)
         vector = np.asarray(self.encoder(text), dtype=np.float32).reshape(-1)
         if not vector.size or not np.all(np.isfinite(vector)):
@@ -247,6 +347,7 @@ class TimelineMemory:
         if norm:
             vector = vector / norm
         source_values = list(dict.fromkeys(str(value) for value in source_ids if value))
+        explicit_card_id = card_id is not None
         card_id = str(card_id or uuid4().hex[:16])
         supersedes_id = None
         with self._lock, self._connect() as connection:
@@ -255,7 +356,7 @@ class TimelineMemory:
             ).fetchone()
             if existing_id:
                 return self._row_to_card(existing_id)
-            if kind not in {"event", "scene", "observation", "tool-effect"}:
+            if not explicit_card_id and kind not in {"event", "scene", "observation", "tool-effect"}:
                 duplicate = connection.execute(
                     """SELECT * FROM memory_cards
                        WHERE user_id=? AND scope=? AND COALESCE(case_id, '')=COALESCE(?, '')
@@ -292,20 +393,150 @@ class TimelineMemory:
                 """INSERT INTO memory_cards(
                     id, user_id, case_id, scope, tier, kind, text, normalized_text,
                     memory_key, happened_at, day_key, embedding, embedding_dim,
-                    source_ids, status, importance, supersedes, metadata, created_at, updated_at
-                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    source_ids, status, importance, supersedes, metadata, created_at, updated_at,
+                    recorded_at, effective_at, effective_end, timezone_name, utc_offset_minutes, recurrence,
+                    subject, predicate, value
+                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     card_id, user_id, case_id, scope, tier, kind, text, normalized,
-                    memory_key, happened, _day_key(happened), vector.tobytes(), vector.size,
+                    memory_key, happened, _day_key(happened, timezone_name, utc_offset_minutes), vector.tobytes(), vector.size,
                     json.dumps(source_values, ensure_ascii=False), status,
                     max(0.0, min(1.0, float(importance))), supersedes_id,
                     json.dumps(dict(metadata or {}), ensure_ascii=False, sort_keys=True), now, now,
+                    now, effective, effective_stop, str(timezone_name or "UTC"),
+                    int(utc_offset_minutes), recurrence_json,
+                    normalized_subject, normalized_predicate, None if value is None else str(value),
                 ),
             )
             row = connection.execute("SELECT * FROM memory_cards WHERE id=?", (card_id,)).fetchone()
         card = self._row_to_card(row)
         self._emit("timeline.memory.written", {"card": card})
         return card
+
+    def begin_draft(
+        self,
+        *,
+        user_id: str,
+        case_id: str,
+        predicate: str,
+        subject: str | None = None,
+        missing_fields: Iterable[str] = ("value",),
+        language: str | None = None,
+        source_ids: Iterable[str] = (),
+        lifetime_seconds: float = 300.0,
+    ) -> dict[str, Any]:
+        relation = normalize_identity(predicate)
+        if not relation:
+            raise ValueError("memory draft predicate is required")
+        now = utc_now()
+        draft_id = uuid4().hex[:16]
+        missing = sorted({str(item) for item in missing_fields if str(item)}) or ["value"]
+        with self._lock, self._connect() as connection:
+            connection.execute(
+                """UPDATE memory_drafts SET status='cancelled', updated_at=?
+                   WHERE user_id=? AND case_id=? AND status='pending'""",
+                (_iso(now), str(user_id), str(case_id)),
+            )
+            connection.execute(
+                """INSERT INTO memory_drafts(
+                    id, user_id, case_id, subject, predicate, language, missing_fields,
+                    source_ids, status, started_at, expires_at, updated_at, metadata
+                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, '{}')""",
+                (
+                    draft_id, str(user_id), str(case_id), normalize_identity(subject), relation,
+                    str(language or "") or None, json.dumps(missing, ensure_ascii=False),
+                    json.dumps([str(item) for item in source_ids if item], ensure_ascii=False),
+                    _iso(now), _iso(now + timedelta(seconds=max(1.0, float(lifetime_seconds)))), _iso(now),
+                ),
+            )
+            row = connection.execute("SELECT * FROM memory_drafts WHERE id=?", (draft_id,)).fetchone()
+        draft = self._row_to_draft(row)
+        self._emit("timeline.memory.draft.started", {"draft": draft})
+        return draft
+
+    def update_draft(
+        self,
+        draft_id: str,
+        *,
+        subject: str | None = None,
+        predicate: str | None = None,
+        missing_fields: Iterable[str] | None = None,
+        source_ids: Iterable[str] = (),
+    ) -> dict[str, Any]:
+        with self._lock, self._connect() as connection:
+            row = connection.execute("SELECT * FROM memory_drafts WHERE id=?", (str(draft_id),)).fetchone()
+            if row is None or row["status"] != "pending":
+                raise ValueError("pending memory draft not found")
+            current_subject = normalize_identity(row["subject"])
+            next_subject = normalize_identity(subject) or current_subject
+            current_predicate = normalize_identity(row["predicate"])
+            next_predicate = normalize_identity(predicate) or current_predicate
+            if current_subject and next_subject != current_subject:
+                raise ValueError("memory draft subject mismatch")
+            if current_predicate and next_predicate != current_predicate:
+                raise ValueError("memory draft predicate mismatch")
+            sources = json.loads(row["source_ids"])
+            sources.extend(str(item) for item in source_ids if item)
+            sources = list(dict.fromkeys(sources))
+            missing = (
+                sorted({str(item) for item in missing_fields if str(item)})
+                if missing_fields is not None else json.loads(row["missing_fields"])
+            )
+            connection.execute(
+                """UPDATE memory_drafts SET subject=?, predicate=?, missing_fields=?,
+                   source_ids=?, updated_at=? WHERE id=?""",
+                (
+                    next_subject, next_predicate, json.dumps(missing, ensure_ascii=False),
+                    json.dumps(sources, ensure_ascii=False), _iso(None), str(draft_id),
+                ),
+            )
+            updated = connection.execute("SELECT * FROM memory_drafts WHERE id=?", (str(draft_id),)).fetchone()
+        draft = self._row_to_draft(updated)
+        self._emit("timeline.memory.draft.updated", {"draft": draft})
+        return draft
+
+    def pending_draft(self, *, user_id: str, case_id: str) -> dict[str, Any] | None:
+        now = _iso(None)
+        with self._lock, self._connect() as connection:
+            connection.execute(
+                """UPDATE memory_drafts SET status='expired', updated_at=?
+                   WHERE user_id=? AND case_id=? AND status='pending' AND expires_at<?""",
+                (now, str(user_id), str(case_id), now),
+            )
+            row = connection.execute(
+                """SELECT * FROM memory_drafts
+                   WHERE user_id=? AND case_id=? AND status='pending'
+                   ORDER BY started_at DESC LIMIT 1""",
+                (str(user_id), str(case_id)),
+            ).fetchone()
+        return self._row_to_draft(row) if row else None
+
+    def finish_draft(self, draft_id: str, *, status: str = "consumed") -> dict[str, Any]:
+        if status not in {"consumed", "cancelled", "expired"}:
+            raise ValueError("invalid memory draft terminal status")
+        with self._lock, self._connect() as connection:
+            changed = connection.execute(
+                "UPDATE memory_drafts SET status=?, updated_at=? WHERE id=? AND status='pending'",
+                (status, _iso(None), str(draft_id)),
+            )
+            if not changed.rowcount:
+                raise ValueError("pending memory draft not found")
+            row = connection.execute("SELECT * FROM memory_drafts WHERE id=?", (str(draft_id),)).fetchone()
+        draft = self._row_to_draft(row)
+        self._emit(f"timeline.memory.draft.{status}", {"draft": draft})
+        return draft
+
+    @staticmethod
+    def draft_accepts(draft: Mapping[str, Any], *, subject: str | None, predicate: str | None) -> bool:
+        expected_subject = normalize_identity(draft.get("subject"))
+        expected_predicate = normalize_identity(draft.get("predicate"))
+        actual_subject = normalize_identity(subject)
+        actual_predicate = normalize_identity(predicate)
+        return bool(
+            actual_predicate
+            and actual_predicate == expected_predicate
+            and (not expected_subject or actual_subject == expected_subject)
+        )
 
     def begin_capture(
         self,
@@ -314,22 +545,25 @@ class TimelineMemory:
         case_id: str,
         source_ids: Iterable[str] = (),
     ) -> dict[str, Any]:
-        self.consume_capture(user_id=user_id, case_id=case_id)
-        return self.remember(
-            "Awaiting the user's next memory value",
+        """Compatibility wrapper for callers that do not yet provide a typed draft."""
+        return self.begin_draft(
             user_id=user_id,
             case_id=case_id,
-            scope="case",
-            kind="capture",
-            tier="short",
-            memory_key="pending-explicit-memory-capture",
+            predicate="memory.value",
+            missing_fields=("subject", "value"),
             source_ids=source_ids,
-            status="pending",
-            importance=1.0,
-            supersede=False,
-        ) or {}
+        )
 
     def pending_capture(self, *, user_id: str, case_id: str) -> dict[str, Any] | None:
+        draft = self.pending_draft(user_id=user_id, case_id=case_id)
+        if draft:
+            return {
+                **draft,
+                "kind": "capture",
+                "happenedAt": draft["startedAt"],
+                "tier": "short",
+                "scope": "case",
+            }
         cutoff = _iso(utc_now() - timedelta(minutes=5))
         with self._lock, self._connect() as connection:
             connection.execute(
@@ -347,6 +581,9 @@ class TimelineMemory:
         return self._row_to_card(row) if row else None
 
     def consume_capture(self, *, user_id: str, case_id: str) -> dict[str, Any] | None:
+        draft = self.pending_draft(user_id=user_id, case_id=case_id)
+        if draft:
+            return self.finish_draft(draft["id"], status="consumed")
         capture = self.pending_capture(user_id=user_id, case_id=case_id)
         if not capture:
             return None
@@ -448,10 +685,16 @@ class TimelineMemory:
         limit: int = 5,
         kinds: Iterable[str] | None = None,
         now: datetime | None = None,
+        clock: ClockContext | None = None,
+        query_spec: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         if scope not in MEMORY_SCOPES:
             raise ValueError("invalid memory scope")
-        now = now or utc_now()
+        clock = clock or ClockContext.current(now_utc=now or utc_now())
+        now = clock.now_utc
+        query_spec = dict(query_spec or {})
+        query_subject = normalize_identity(query_spec.get("subject"))
+        query_predicate = normalize_identity(query_spec.get("predicate"))
         query_normalized = normalize_text(query)
         query_terms = memory_terms(query)
         query_vector = np.asarray(self.encoder(query), dtype=np.float32).reshape(-1)
@@ -475,7 +718,8 @@ class TimelineMemory:
         wants_recent = any(marker in query_normalized for marker in _RECENT_HINTS)
         wants_today = any(marker in query_normalized for marker in _TODAY_HINTS)
         wants_long = any(marker in query_normalized for marker in _LONG_HINTS)
-        today_key = now.astimezone().date().isoformat()
+        today_key = clock.local_now.date().isoformat()
+        range_start, range_end = query_time_range(query, clock)
         candidates = []
         for row in rows:
             card = self._row_to_card(row, include_embedding=True)
@@ -488,10 +732,21 @@ class TimelineMemory:
                 layer_penalty = 0.06
             else:
                 layer_penalty = 0.0
-            if wants_today and card["dayKey"] != today_key:
+            if (wants_today or range_start is not None) and card["dayKey"] != today_key and range_start is None:
                 time_eligible = card["kind"] in {"preference", "fact", "state", "task-preference"}
             else:
                 time_eligible = True
+            if range_start is not None:
+                card_start = _parse_time(card["effectiveAt"] or card["happenedAt"])
+                card_end = _parse_time(card["effectiveEnd"]) if card.get("effectiveEnd") else None
+                upper = range_end or (range_start + timedelta(days=1))
+                time_eligible = (
+                    card_start < upper and card_end > range_start
+                    if card_end is not None
+                    else range_start <= card_start < upper
+                )
+            subject_eligible = not query_subject or normalize_identity(card.get("subject")) == query_subject
+            predicate_eligible = not query_predicate or normalize_identity(card.get("predicate")) == query_predicate
             card_terms = memory_terms(card["text"])
             overlap = len(query_terms & card_terms)
             union = max(1, len(query_terms | card_terms))
@@ -507,12 +762,19 @@ class TimelineMemory:
             kind_bonus = 0.08 if card["kind"] in {"fact", "state", "tool-effect"} else 0.04 if card["kind"] in {"event", "preference", "task-preference"} else 0.0
             recency = math.exp(-age_seconds / (7 * 86400.0)) * 0.08
             score = max(0.0, 0.62 * semantic + 0.26 * lexical + digit_bonus + kind_bonus + recency - layer_penalty)
-            eligible = time_eligible and (overlap > 0 or semantic_evidence)
+            structured_match = bool(query_subject or query_predicate) and subject_eligible and predicate_eligible
+            eligible = time_eligible and subject_eligible and predicate_eligible and (
+                structured_match or overlap > 0 or semantic_evidence
+            )
             reasons = []
             if overlap:
                 reasons.append("term-overlap")
             if semantic_evidence:
                 reasons.append("embedding-similarity")
+            if query_subject and subject_eligible:
+                reasons.append("subject-match")
+            if query_predicate and predicate_eligible:
+                reasons.append("predicate-match")
             if wants_today:
                 reasons.append("today-filter" if time_eligible else "outside-today")
             if wants_recent:
@@ -526,7 +788,12 @@ class TimelineMemory:
                 "layer": layer,
                 "kind": card["kind"],
                 "reasons": reasons,
-                "rejectionReasons": [] if eligible else ["no-relevant-evidence" if time_eligible else "time-mismatch"],
+                "rejectionReasons": [] if eligible else [
+                    "time-mismatch" if not time_eligible else
+                    "subject-mismatch" if not subject_eligible else
+                    "predicate-mismatch" if not predicate_eligible else
+                    "no-relevant-evidence"
+                ],
                 "card": card,
             })
         candidates.sort(
@@ -540,7 +807,7 @@ class TimelineMemory:
             if item["score"] and not item["selected"]:
                 item["rejectionReasons"].append("outside-top-k")
         return {
-            "method": "timeline-hybrid-retrieval-v1",
+            "method": "timeline-structured-temporal-retrieval-v2",
             "query": str(query),
             "scope": {"user": str(user_id), "case": case_id, "memoryScope": scope},
             "routing": {
@@ -548,11 +815,13 @@ class TimelineMemory:
                 "today": wants_today,
                 "longTerm": wants_long,
                 "layers": ["current", "short", "long"],
+                "clock": clock.prompt_payload(),
+                "querySpec": {"subject": query_subject, "predicate": query_predicate},
             },
             "candidates": candidates[:20],
             "selected": selected,
             "injection": {"status": "not-injected", "cardIds": []},
-            "claimBoundary": "Natural-language memory cards with hashed-embedding and lexical evidence; no answer is inferred by retrieval itself.",
+            "claimBoundary": "Entity and civil-time constraints are applied before lexical/embedding ranking; retrieval does not infer an answer.",
         }
 
     def consolidate(self, *, user_id: str, case_id: str | None, scope: str) -> dict[str, Any]:
@@ -563,41 +832,43 @@ class TimelineMemory:
         active_short = [card for card in active_short if card["tier"] == "short" and card["kind"] not in {"capture"}]
         if len(active_short) <= self.short_term_capacity:
             return {"status": "not-needed", "shortCount": len(active_short), "created": []}
-        oldest = list(reversed(active_short))[ : max(1, len(active_short) - self.short_term_capacity // 2)]
-        groups: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
-        for index, card in enumerate(oldest):
-            grouping_key = card.get("memoryKey") or f"chronological:{index // 4}"
-            groups[(card["kind"], grouping_key)].append(card)
+        oldest = list(reversed(active_short))[:max(1, len(active_short) - self.short_term_capacity // 2)]
         created = []
         with self._lock:
-            for (kind, memory_key), group in groups.items():
-                texts = list(dict.fromkeys(card["text"] for card in group))
-                summary = texts[-1] if kind in {"fact", "state", "preference", "task-preference"} else "; ".join(texts[-4:])
-                consolidation_id = "consolidated-" + hashlib.sha256(
-                    (
-                        f"{user_id}|{scope}|{case_id or ''}|{kind}|"
-                        + "|".join(item["id"] for item in group)
-                    ).encode("utf-8")
+            for source in oldest:
+                promotion_id = "promoted-" + hashlib.sha256(
+                    f"{user_id}|{scope}|{case_id or ''}|{source['id']}".encode("utf-8")
                 ).hexdigest()[:16]
-                card = self.remember(
-                    summary,
+                promoted = self.remember(
+                    source["text"],
                     user_id=user_id,
                     case_id=case_id,
                     scope=scope,
-                    kind=kind,
+                    kind=source["kind"],
                     tier="long",
-                    memory_key=group[0].get("memoryKey"),
-                    happened_at=group[-1]["happenedAt"],
-                    source_ids=[item["id"] for item in group],
-                    importance=max(item["importance"] for item in group),
-                    metadata={"consolidation": "deterministic-card-group-v1"},
+                    memory_key=source.get("memoryKey"),
+                    happened_at=source["happenedAt"],
+                    recorded_at=source.get("recordedAt"),
+                    effective_at=source.get("effectiveAt"),
+                    effective_end=source.get("effectiveEnd"),
+                    timezone_name=source.get("timezone") or "UTC",
+                    utc_offset_minutes=int(source.get("utcOffsetMinutes") or 0),
+                    recurrence=source.get("recurrence"),
+                    subject=source.get("subject"),
+                    predicate=source.get("predicate"),
+                    value=source.get("value"),
+                    source_ids=[source["id"], *source.get("sourceIds", [])],
+                    importance=source["importance"],
+                    metadata={
+                        **dict(source.get("metadata") or {}),
+                        "consolidation": "deterministic-lossless-promotion-v2",
+                    },
                     supersede=False,
-                    card_id=consolidation_id,
+                    card_id=promotion_id,
                 )
-                if card:
-                    created.append(card["id"])
-                for child in group:
-                    self.update_status(child["id"], "consolidated")
+                if promoted:
+                    created.append(promoted["id"])
+                    self.update_status(source["id"], "consolidated")
         result = {"status": "consolidated", "shortCount": len(active_short), "created": created}
         self._emit("timeline.memory.consolidated", result)
         return result
@@ -621,6 +892,7 @@ class TimelineMemory:
             "layers": counts,
             "recent": cards[:12],
             "scope": scope,
+            "draft": self.pending_draft(user_id=user_id, case_id=case_id) if scope == "case" and case_id else None,
             "retainsRawMedia": False,
         }
 
@@ -702,6 +974,15 @@ class TimelineMemory:
             "memoryKey": row["memory_key"],
             "happenedAt": str(row["happened_at"]),
             "dayKey": str(row["day_key"]),
+            "recordedAt": str(row["recorded_at"] or row["created_at"]),
+            "effectiveAt": row["effective_at"],
+            "effectiveEnd": row["effective_end"],
+            "timezone": str(row["timezone_name"] or "UTC"),
+            "utcOffsetMinutes": int(row["utc_offset_minutes"] or 0),
+            "recurrence": json.loads(row["recurrence"] or "null"),
+            "subject": row["subject"],
+            "predicate": row["predicate"],
+            "value": row["value"],
             "sourceIds": json.loads(row["source_ids"]),
             "status": str(row["status"]),
             "importance": float(row["importance"]),
@@ -715,6 +996,24 @@ class TimelineMemory:
                 row["embedding"], dtype=np.float32, count=int(row["embedding_dim"]),
             ).copy()
         return card
+
+    @staticmethod
+    def _row_to_draft(row: sqlite3.Row) -> dict[str, Any]:
+        return {
+            "id": str(row["id"]),
+            "userId": str(row["user_id"]),
+            "caseId": str(row["case_id"]),
+            "subject": row["subject"],
+            "predicate": str(row["predicate"]),
+            "language": row["language"],
+            "missingFields": json.loads(row["missing_fields"]),
+            "sourceIds": json.loads(row["source_ids"]),
+            "status": str(row["status"]),
+            "startedAt": str(row["started_at"]),
+            "expiresAt": str(row["expires_at"]),
+            "updatedAt": str(row["updated_at"]),
+            "metadata": json.loads(row["metadata"]),
+        }
 
     def _emit(self, event_type: str, payload: dict[str, Any]) -> None:
         if not self._event_sink:

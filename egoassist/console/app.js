@@ -427,6 +427,10 @@ function sendMediaConfiguration(ws) {
   ws.send(JSON.stringify({
     type: "media_config",
     playbackCapture: false,
+    clock: {
+      timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC",
+      utcOffsetMinutes: -new Date().getTimezoneOffset()
+    },
     video: {
       mirrored: mirrorCamera,
       previewMatchesModelInput: true,

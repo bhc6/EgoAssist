@@ -19,7 +19,7 @@ from uuid import uuid4
 
 from egoassist import BUILTIN_SKILLS_ROOT, CONSOLE_ROOT
 from egoassist._env import load_env
-from egoassist.memory import TimelineMemory
+from egoassist.memory import ClockContext, TimelineMemory, resolve_time_semantics
 from egoassist.realtime import (
     ContextHarness,
     ContextLayer,
@@ -129,6 +129,8 @@ class CaseRuntimeOwner:
     maintenance_task: asyncio.Task | None = None
     consolidation_requested: bool = False
     transitioning: bool = False
+    turn_sequence: int = 0
+    latest_input_sequence: int = 0
 
 
 def runtime_root() -> Path:
@@ -198,6 +200,13 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
     user_runtimes: dict[str, SkillRuntime] = {}
     user_routing: dict[str, dict] = {}
     user_tools: dict[str, SkillToolExecutor] = {}
+
+    def clock_for_session(user_id: str, session_id: str) -> ClockContext:
+        experiment_case = identity.get_context_session(user_id, session_id)
+        return ClockContext.current(
+            experiment_case.get("timezone", "UTC"),
+            experiment_case.get("utcOffsetMinutes", 0),
+        )
 
     def memory_for_user(user_id: str) -> PreferenceMemory:
         if user_id not in user_memories:
@@ -1568,6 +1577,7 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
         semantic_decision: dict | None = None,
         memory_policy: dict | None = None,
         episodic_memory: RealtimeEpisodeMemory | None = None,
+        clock_context: ClockContext | None = None,
     ) -> dict:
         nonlocal routing_state, active_episode_injection
         active_runtime = target_runtime or runtime
@@ -1576,6 +1586,7 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
         active_policy = normalize_memory_policy(memory_policy or default_memory_policy())
         preference_enabled = active_policy["components"]["preference"]["enabled"]
         episodic_settings = active_policy["components"]["episodic"]
+        clock_context = clock_context or ClockContext.current()
         if harness:
             transcript_entry = harness.record_user(
                 transcript,
@@ -1600,6 +1611,8 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                 user_scope=user_scope,
                 allow_cross_session=episodic_settings["scope"] == "participant",
                 referential=semantic_decision.get("memoryQuery") == "referential",
+                clock=clock_context,
+                query_spec=semantic_decision.get("memoryQuerySpec"),
             )
         durable_retrieval = None
         if (
@@ -1613,6 +1626,8 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                 user_scope=user_scope,
                 allow_cross_session=True,
                 referential=semantic_decision.get("memoryQuery") == "referential",
+                clock=clock_context,
+                query_spec=semantic_decision.get("memoryQuerySpec"),
             )
         if episodic_retrieval is not None and durable_retrieval is not None:
                 merged_by_id = {
@@ -1903,81 +1918,151 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
         memory_kind = semantic_decision.get("memoryKind")
         memory_consent = semantic_decision.get("memoryConsent")
         memory_case_id = harness.session_id if harness else "local-default"
-        if memory_kind == "capture" and preference_enabled:
-            capture = timeline.begin_capture(
-                user_id=user_scope,
-                case_id=memory_case_id,
-                source_ids=[transcript_event["eventId"]],
-            )
-            timeline_write = {"action": "capture", "card": capture}
-        elif memory_kind == "capture":
-            timeline_write = {
-                "action": "not-written",
-                "status": "disabled",
-                "reason": "participant-memory-disabled",
-                "card": None,
+        memory_atoms = list(semantic_decision.get("memoryAtoms") or [])
+        if not memory_atoms and memory_kind in {"fact", "event", "state", "preference"}:
+            memory_atoms = [{
+                "kind": memory_kind,
+                "text": semantic_decision.get("memoryText") or transcript,
+                "subject": None,
+                "predicate": None,
+                "value": semantic_decision.get("memoryText") or transcript,
+                "scope": semantic_decision.get("memoryScope") or "case",
+                "consent": semantic_decision.get("memoryConsent") or "observed",
+                "legacyMemoryKey": semantic_decision.get("memoryKey"),
+            }]
+        pending_draft = timeline.pending_draft(user_id=user_scope, case_id=memory_case_id)
+        draft_decision = semantic_decision.get("memoryDraft")
+        if memory_kind == "capture" and not draft_decision:
+            draft_decision = {
+                "mode": "start", "subject": None, "predicate": "memory.value",
+                "language": None, "missingFields": ["subject", "value"],
             }
-        elif memory_kind in {"fact", "event", "state", "preference"}:
-            requested_scope = semantic_decision.get("memoryScope") or "case"
-            pending_capture = timeline.pending_capture(user_id=user_scope, case_id=memory_case_id)
-            promoted_capture = False
-            if pending_capture and memory_consent == "observed":
-                requested_scope = "participant"
-                memory_consent = "explicit"
-                promoted_capture = True
-            write_enabled = (
-                preference_enabled if requested_scope == "participant"
-                else episodic_settings["enabled"]
-            )
-            if write_enabled:
+        if draft_decision and preference_enabled:
+            if (
+                draft_decision.get("mode") == "continue"
+                and pending_draft
+                and timeline.draft_accepts(
+                    pending_draft,
+                    subject=draft_decision.get("subject"),
+                    predicate=draft_decision.get("predicate"),
+                )
+            ):
+                draft = timeline.update_draft(
+                    pending_draft["id"],
+                    subject=draft_decision.get("subject"),
+                    predicate=draft_decision.get("predicate"),
+                    missing_fields=draft_decision.get("missingFields"),
+                    source_ids=[transcript_event["eventId"]],
+                )
+            elif draft_decision.get("mode") == "start" or not pending_draft:
+                draft = timeline.begin_draft(
+                    user_id=user_scope,
+                    case_id=memory_case_id,
+                    subject=draft_decision.get("subject"),
+                    predicate=draft_decision.get("predicate") or "memory.value",
+                    missing_fields=draft_decision.get("missingFields") or ("value",),
+                    language=draft_decision.get("language"),
+                    source_ids=[transcript_event["eventId"]],
+                )
+            else:
+                draft = pending_draft
+            timeline_write = {
+                "action": "capture",
+                "card": {**draft, "kind": "capture", "tier": "short", "scope": "case"},
+                "draft": draft,
+            }
+        elif draft_decision:
+            timeline_write = {
+                "action": "not-written", "status": "disabled",
+                "reason": "participant-memory-disabled", "card": None, "cards": [],
+            }
+        elif memory_atoms:
+            written_cards = []
+            skipped_reasons = []
+            consumed_draft = False
+            for atom in memory_atoms[:3]:
+                atom_kind = atom.get("kind")
+                atom_consent = atom.get("consent") or "observed"
+                requested_scope = atom.get("scope") or "case"
+                compatible_draft = bool(
+                    pending_draft
+                    and (
+                        timeline.draft_accepts(
+                            pending_draft,
+                            subject=atom.get("subject"),
+                            predicate=atom.get("predicate"),
+                        )
+                        or (
+                            pending_draft.get("predicate") == "memory.value"
+                            and semantic_method == "explicit-research-api-labels-v1"
+                        )
+                    )
+                )
+                if compatible_draft:
+                    requested_scope = "participant"
+                    atom_consent = "explicit"
+                write_enabled = (
+                    preference_enabled if requested_scope == "participant"
+                    else episodic_settings["enabled"]
+                )
+                if not write_enabled:
+                    skipped_reasons.append(f"{requested_scope}-memory-disabled")
+                    continue
                 target_episodic = (
                     episodic_for_user(user_scope)
                     if requested_scope == "participant" and user_scope != "local-default"
                     else active_episodic
                 )
+                temporal = resolve_time_semantics(
+                    f"{transcript} {atom.get('text') or ''}", clock_context, kind=atom_kind,
+                )
                 episode = target_episodic.remember(
-                    semantic_decision.get("memoryText") or transcript,
-                    kind=memory_kind,
+                    atom.get("text") or transcript,
+                    kind=atom_kind,
                     source="semantic-memory-card",
                     skill=active_runtime.skill.name if active_runtime.skill else None,
                     task=active_runtime.task.spec.id if active_runtime.task else None,
                     evidence_event_id=transcript_event["eventId"],
                     session_id=memory_case_id,
                     user_scope=user_scope,
-                    memory_key=semantic_decision.get("memoryKey"),
+                    memory_key=atom.get("legacyMemoryKey"),
                     scope=requested_scope,
-                    tier="long" if requested_scope == "participant" and memory_consent == "explicit" else "short",
-                    status="pending" if memory_consent == "inferred" else "active",
-                    importance=1.0 if memory_consent == "explicit" else 0.7,
+                    tier="long" if requested_scope == "participant" and atom_consent == "explicit" else "short",
+                    status="pending" if atom_consent == "inferred" else "active",
+                    importance=1.0 if atom_consent == "explicit" else 0.7,
+                    recorded_at=temporal["recordedAt"],
+                    effective_at=temporal["effectiveAt"],
+                    effective_end=temporal["effectiveEnd"],
+                    timezone_name=temporal["timezone"],
+                    utc_offset_minutes=clock_context.utc_offset_minutes,
+                    recurrence=temporal["recurrence"],
+                    subject=atom.get("subject"),
+                    predicate=atom.get("predicate"),
+                    value=atom.get("value"),
                     candidate_scope=memory_case_id,
                 )
                 if episode:
-                    if promoted_capture:
-                        timeline.consume_capture(user_id=user_scope, case_id=memory_case_id)
-                    timeline_write = {
-                        "action": "written",
-                        "card": episode,
-                        "consent": memory_consent,
-                        "storageScope": requested_scope,
-                    }
+                    written_cards.append(episode)
+                    consumed_draft = consumed_draft or compatible_draft
                 else:
-                    timeline_write = {
-                        "action": "not-written",
-                        "status": "rejected",
-                        "reason": "empty-or-question-like-memory-text",
-                        "card": None,
-                        "storageScope": requested_scope,
-                    }
+                    skipped_reasons.append("empty-or-question-like-memory-text")
+            if consumed_draft and pending_draft:
+                timeline.finish_draft(pending_draft["id"], status="consumed")
+            if written_cards:
+                scopes = {card.get("scope") for card in written_cards}
+                timeline_write = {
+                    "action": "written", "card": written_cards[0], "cards": written_cards,
+                    "consent": "explicit" if consumed_draft else None,
+                    "storageScope": next(iter(scopes)) if len(scopes) == 1 else "mixed",
+                }
             else:
                 timeline_write = {
-                    "action": "not-written",
-                    "status": "disabled",
-                    "reason": f"{requested_scope}-memory-disabled",
-                    "card": None,
-                    "storageScope": requested_scope,
+                    "action": "not-written", "status": "rejected", "card": None, "cards": [],
+                    "reason": skipped_reasons[0] if skipped_reasons else "no-valid-memory-atoms",
                 }
         if harness and timeline_write:
             card = timeline_write.get("card", {})
+            cards = timeline_write.get("cards") or ([card] if card else [])
             event_type = {
                 "capture": "timeline.memory.capture.started",
                 "written": "timeline.memory.written",
@@ -1989,6 +2074,8 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                 "timeline-memory",
                 {
                     "cardId": (card or {}).get("id"),
+                    "cardIds": [item.get("id") for item in cards if item.get("id")],
+                    "cardCount": len(cards),
                     "kind": (card or {}).get("kind") or memory_kind,
                     "tier": (card or {}).get("tier"),
                     "storageScope": (card or {}).get("scope") or timeline_write.get("storageScope"),
@@ -1996,6 +2083,7 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                     "memoryKey": (card or {}).get("memoryKey"),
                     "reason": timeline_write.get("reason"),
                     "evidenceEventId": transcript_event["eventId"],
+                    "clock": clock_context.prompt_payload(),
                 },
                 parent_event_id=transcript_event["eventId"],
             )
@@ -2155,6 +2243,9 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
             "memoryConsent": payload.get("memoryConsent"),
             "skillControl": payload.get("skillControl"),
         }
+        memory_atoms = SemanticTurnRouter._normalize_atoms(payload.get("memoryAtoms", []))
+        memory_draft = SemanticTurnRouter._normalize_draft(payload.get("memoryDraft"))
+        memory_query_spec = SemanticTurnRouter._normalize_query_spec(payload.get("memoryQuerySpec"))
         if labels["speechControl"] not in {None, "stop-speaking"}:
             raise ValueError("invalid speechControl research label")
         if labels["taskControl"] not in TASK_CONTROL_LABELS:
@@ -2183,6 +2274,9 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
             "model": None,
             "status": "provided",
             **labels,
+            "memoryAtoms": memory_atoms,
+            "memoryDraft": memory_draft,
+            "memoryQuerySpec": memory_query_spec,
             "selectedSkill": selected_skill,
             "skillStatus": (
                 "deactivated" if labels["skillControl"] == "deactivate"
@@ -2201,10 +2295,13 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                     user_scope=user_id,
                     semantic_decision=api_semantic,
                     memory_policy=policy,
+                    clock_context=clock_for_session(user_id, session_id),
                 )
                 owner.routing = result["routingState"]
-            timeline_card = (result.get("timelineWrite") or {}).get("card") or {}
-            if timeline_card.get("status") == "active" and timeline_card.get("tier") == "short":
+            timeline_cards = (result.get("timelineWrite") or {}).get("cards") or [
+                (result.get("timelineWrite") or {}).get("card") or {}
+            ]
+            if any(card.get("status") == "active" and card.get("tier") == "short" for card in timeline_cards):
                 request_timeline_consolidation(owner)
         else:
             result = process_transcript(
@@ -2216,6 +2313,7 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                 user_scope=user_id,
                 semantic_decision=api_semantic,
                 memory_policy=policy,
+                clock_context=ClockContext.current(),
             )
         if session_id:
             return web.json_response(scoped_state_for_user(
@@ -2676,6 +2774,11 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                 {"name": item["name"], "description": item["description"]}
                 for item in registry.summaries()
             ]
+            turn_clock = clock_for_session(user_id, session_id)
+            semantic_router.set_turn_context(
+                clock_context=turn_clock.prompt_payload(),
+                memory_draft=timeline.pending_draft(user_id=user_id, case_id=session_id),
+            )
             return await semantic_router.classify(text, catalog)
 
         def resolve_semantic_turn(text: str, result: dict, semantic: dict) -> None:
@@ -2685,7 +2788,7 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                 "input": text,
             })
 
-        async def process_queued_turn(text: str, *, explicit: bool) -> dict:
+        async def process_queued_turn(text: str, *, explicit: bool, turn_sequence: int) -> dict:
             nonlocal session_routing, session_episode_injection
             text = str(text).strip()
             if not text:
@@ -2706,6 +2809,7 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                     user_scope=user_id,
                     semantic_decision=semantic,
                     memory_policy=current_memory_policy(),
+                    clock_context=clock_for_session(user_id, session_id),
                 )
                 resolve_semantic_turn(text, result, semantic)
                 session_routing = result["routingState"]
@@ -2721,6 +2825,7 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                     bridge.inject_context_data("current_turn_context", {
                         "transcript": text,
                         "retrievalEvidence": evidence,
+                        "clock": clock_for_session(user_id, session_id).prompt_payload(),
                     })
                 if result.get("control") == "stop-speaking":
                     bridge.cancel_response(
@@ -2743,8 +2848,10 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                         user_scope=user_id,
                         memory_policy_override=current_memory_policy(),
                     )
-            timeline_card = (result.get("timelineWrite") or {}).get("card") or {}
-            if timeline_card.get("status") == "active" and timeline_card.get("tier") == "short":
+            timeline_cards = (result.get("timelineWrite") or {}).get("cards") or [
+                (result.get("timelineWrite") or {}).get("card") or {}
+            ]
+            if any(card.get("status") == "active" and card.get("tier") == "short" for card in timeline_cards):
                 request_timeline_consolidation(owner)
             if not ws.closed:
                 await ws.send_json({"type": "state", "state": state_payload})
@@ -2755,6 +2862,11 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                 and owner.socket_token is socket_token
                 and owner.epoch == connection_epoch
                 and not ws.closed
+                and turn_sequence == owner.latest_input_sequence
+                and not (
+                    hasattr(bridge, "has_unresolved_user_input")
+                    and bridge.has_unresolved_user_input()
+                )
             ):
                 selection = turn_policy(session_runtime).select(result["decision"])
                 request_bridge_response(
@@ -2771,6 +2883,22 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                         selection["maxProtectionMs"] or turn_policy(session_runtime).max_protection_ms
                     ),
                 )
+            elif result.get("control") != "stop-speaking" and turn_sequence < owner.latest_input_sequence:
+                session_trace(
+                    "response.skipped.stale_user_turn",
+                    "case-turn-worker",
+                    {"turnSequence": turn_sequence, "latestInputSequence": owner.latest_input_sequence},
+                )
+            elif (
+                result.get("control") != "stop-speaking"
+                and hasattr(bridge, "has_unresolved_user_input")
+                and bridge.has_unresolved_user_input()
+            ):
+                session_trace(
+                    "response.skipped.unresolved_user_input",
+                    "case-turn-worker",
+                    {"turnSequence": turn_sequence, "latestInputSequence": owner.latest_input_sequence},
+                )
             return result
 
         async def turn_worker_loop(queue: asyncio.Queue) -> None:
@@ -2778,7 +2906,9 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                 item = await queue.get()
                 future = item.get("future")
                 try:
-                    result = await process_queued_turn(item["text"], explicit=item["explicit"])
+                    result = await process_queued_turn(
+                        item["text"], explicit=item["explicit"], turn_sequence=item["turnSequence"],
+                    )
                     if future and not future.done():
                         future.set_result(result)
                 except asyncio.CancelledError:
@@ -2803,7 +2933,12 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                 and owner.socket_token is socket_token
                 and owner.epoch == connection_epoch
             ):
-                queue.put_nowait({"text": str(text), "explicit": False, "future": None})
+                owner.turn_sequence += 1
+                owner.latest_input_sequence = owner.turn_sequence
+                queue.put_nowait({
+                    "text": str(text), "explicit": False, "future": None,
+                    "turnSequence": owner.turn_sequence,
+                })
 
         try:
             owner.turn_queue = asyncio.Queue()
@@ -2877,6 +3012,14 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                         if isinstance(raw_audio_configuration, dict)
                         else {}
                     )
+                    raw_clock = payload.get("clock", {})
+                    browser_clock = raw_clock if isinstance(raw_clock, dict) else {}
+                    clock_snapshot = identity.update_clock_context(
+                        user_id,
+                        session_id,
+                        timezone_name=str(browser_clock.get("timezone") or "UTC"),
+                        utc_offset_minutes=int(browser_clock.get("utcOffsetMinutes") or 0),
+                    )
                     mirrored = bool(video_configuration.get("mirrored", False))
                     session_media_configuration.clear()
                     session_media_configuration.update({
@@ -2890,6 +3033,7 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                                 "horizontally-mirrored" if mirrored else "camera-native"
                             ),
                         },
+                        "clock": clock_snapshot,
                     })
                     trace_event(
                         "media.audio.configuration", "browser-media",
@@ -2898,6 +3042,7 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                             "playbackCapture": bool(payload.get("playbackCapture", False)),
                         },
                     )
+                    session_trace("clock.context.updated", "browser-clock", clock_snapshot)
                 elif kind == "cancel":
                     bridge.cancel_response()
                 elif kind == "control":
@@ -2912,10 +3057,15 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                     if queue is None or owner.turn_worker is None or owner.turn_worker.done():
                         raise RuntimeError("case turn worker is not available")
                     future = asyncio.get_running_loop().create_future()
+                    owner.turn_sequence += 1
+                    owner.latest_input_sequence = owner.turn_sequence
+                    if hasattr(bridge, "handle_user_speech_started"):
+                        bridge.handle_user_speech_started(trigger="explicit-control")
                     queue.put_nowait({
                         "text": transcript,
                         "explicit": True,
                         "future": future,
+                        "turnSequence": owner.turn_sequence,
                     })
                     await future
                 elif kind == "tool_confirmation":

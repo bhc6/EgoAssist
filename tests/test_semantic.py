@@ -205,3 +205,56 @@ def test_semantic_router_timeout_fails_open_without_state_labels():
     assert result["preferenceIntent"] is None
     assert result["memoryQuery"] is None
     assert result["memoryKind"] is None
+
+
+def test_structured_router_emits_three_atoms_draft_and_entity_query():
+    payload = json.loads(decision())
+    payload.update({
+        "memoryAtoms": [
+            {
+                "kind": "state", "text": "维生素D3放在书桌右边的架子上。",
+                "subject": "维生素D3", "predicate": "location", "value": "书桌右边的架子",
+                "scope": "participant", "consent": "explicit",
+            },
+            {
+                "kind": "preference", "text": "用户每天中午十二点服用两颗维生素D3。",
+                "subject": "用户", "predicate": "medication.schedule", "value": "维生素D3两颗",
+                "scope": "participant", "consent": "explicit",
+            },
+        ],
+        "memoryDraft": None,
+        "memoryQuerySpec": {"subject": "维生素D3", "predicate": "location"},
+    })
+    router = SemanticTurnRouter(
+        "test-key", generation_call=lambda **_: provider_response(json.dumps(payload, ensure_ascii=False)),
+    )
+    router.set_turn_context(
+        clock_context={"localNow": "2026-07-29T21:00:00+08:00", "timezone": "Asia/Shanghai"},
+        memory_draft=None,
+    )
+
+    result = asyncio.run(router.classify("请记住药的位置和服药时间", []))
+
+    assert result["status"] == "classified"
+    assert len(result["memoryAtoms"]) == 2
+    assert result["memoryText"] == "维生素D3放在书桌右边的架子上。"
+    assert result["memoryQuerySpec"] == {"subject": "维生素D3", "predicate": "location"}
+
+
+def test_structured_router_supplies_clock_and_pending_draft_to_provider():
+    calls = []
+
+    def generation_call(**kwargs):
+        calls.append(kwargs)
+        return provider_response(decision())
+
+    router = SemanticTurnRouter("test-key", generation_call=generation_call)
+    router.set_turn_context(
+        clock_context={"localNow": "2026-07-29T21:00:00+08:00", "timezone": "Asia/Shanghai"},
+        memory_draft={"subject": "小李", "predicate": "phone", "missingFields": ["value"]},
+    )
+    asyncio.run(router.classify("是13659892706", []))
+    supplied = json.loads(calls[0]["messages"][1]["content"])
+    assert supplied["transcript"] == "是13659892706"
+    assert supplied["clock"]["timezone"] == "Asia/Shanghai"
+    assert supplied["pendingMemoryDraft"]["subject"] == "小李"

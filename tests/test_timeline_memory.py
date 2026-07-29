@@ -1,10 +1,11 @@
 from datetime import datetime, timedelta, timezone
 import json
+import sqlite3
 
 import numpy as np
 
-from egoassist.memory import MemoryItem, TimelineMemory, import_visual_items
-from egoassist.memory.timeline import looks_like_question
+from egoassist.memory import ClockContext, MemoryItem, TimelineMemory, import_visual_items, resolve_time_semantics
+from egoassist.memory.timeline import looks_like_question, memory_key_for
 
 
 def remember(memory, text, **overrides):
@@ -121,10 +122,14 @@ def test_expired_capture_is_not_left_as_pending_state(tmp_path):
 
 def test_consolidation_moves_old_short_cards_to_long_with_sources(tmp_path):
     memory = TimelineMemory(tmp_path / "timeline.sqlite3", short_term_capacity=4)
+    base = datetime(2026, 7, 1, tzinfo=timezone.utc)
     for index in range(6):
         remember(
             memory, f"用户在第{index}次练习后休息",
             kind="event", memory_key="routine:practice-rest", supersede=False,
+            effective_at=base + timedelta(days=index), recorded_at=base + timedelta(days=index),
+            timezone_name="Asia/Shanghai", utc_offset_minutes=480,
+            subject="用户", predicate="practice.rest", value=str(index),
         )
 
     result = memory.consolidate(user_id="user-a", case_id="case-a", scope="case")
@@ -134,8 +139,15 @@ def test_consolidation_moves_old_short_cards_to_long_with_sources(tmp_path):
     ]
 
     assert result["status"] == "consolidated"
-    assert long_cards
-    assert len(long_cards[0]["sourceIds"]) >= 2
+    assert len(long_cards) == 4
+    assert all(len(item["sourceIds"]) >= 1 for item in long_cards)
+    assert all(item["subject"] == "用户" for item in long_cards)
+    assert all(item["predicate"] == "practice.rest" for item in long_cards)
+    assert all(item["timezone"] == "Asia/Shanghai" for item in long_cards)
+    assert all(item["utcOffsetMinutes"] == 480 for item in long_cards)
+    assert {item["text"] for item in long_cards} == {
+        f"用户在第{index}次练习后休息" for index in range(4)
+    }
 
 
 def test_legacy_import_drops_questions_instead_of_polluting_memory(tmp_path):
@@ -233,3 +245,207 @@ def test_visual_memory_adapter_preserves_temporal_and_frame_provenance(tmp_path)
         "egolife:video-1:hash:frame:25",
         "egolife:video-1:hash:frame:35",
     ]
+
+
+def test_memory_draft_persists_and_rejects_unrelated_entity(tmp_path):
+    path = tmp_path / "timeline.sqlite3"
+    memory = TimelineMemory(path)
+    draft = memory.begin_draft(
+        user_id="user-a", case_id="case-a", subject="小李", predicate="phone",
+        missing_fields=("value",),
+    )
+
+    restored = TimelineMemory(path)
+    pending = restored.pending_draft(user_id="user-a", case_id="case-a")
+    assert pending["id"] == draft["id"]
+    assert restored.draft_accepts(pending, subject="小李", predicate="phone")
+    assert not restored.draft_accepts(pending, subject="小陈", predicate="phone")
+    assert not restored.draft_accepts(pending, subject="小李", predicate="location")
+
+
+def test_real_civil_time_is_separate_from_recording_time(tmp_path):
+    clock = ClockContext.current(
+        "Asia/Shanghai", 480,
+        now_utc=datetime(2026, 7, 29, 16, 30, tzinfo=timezone.utc),
+    )
+    temporal = resolve_time_semantics("我昨天吃过药了", clock, kind="event")
+    assert temporal["recordedAt"].startswith("2026-07-29T16:30")
+    assert temporal["effectiveAt"].startswith("2026-07-28T16:00")
+    assert temporal["effectiveEnd"].startswith("2026-07-29T16:00")
+
+    memory = TimelineMemory(tmp_path / "timeline.sqlite3")
+    card = remember(
+        memory, "我昨天吃过药了", kind="event",
+        recorded_at=temporal["recordedAt"], effective_at=temporal["effectiveAt"],
+        effective_end=temporal["effectiveEnd"], timezone_name=temporal["timezone"],
+        utc_offset_minutes=clock.utc_offset_minutes, subject="用户", predicate="medication.taken",
+        value="维生素D3",
+    )
+    assert card["recordedAt"] != card["effectiveAt"]
+    assert card["dayKey"] == "2026-07-29"
+
+    yesterday = memory.retrieve(
+        "我昨天吃过药了吗", user_id="user-a", case_id="case-a", scope="case",
+        clock=clock, query_spec={"subject": "用户", "predicate": "medication.taken"},
+    )
+    today = memory.retrieve(
+        "我今天吃过药了吗", user_id="user-a", case_id="case-a", scope="case",
+        clock=clock, query_spec={"subject": "用户", "predicate": "medication.taken"},
+    )
+    assert [item["cardId"] for item in yesterday["selected"]] == [card["id"]]
+    assert today["selected"] == []
+
+
+def test_daily_recurrence_uses_participant_timezone():
+    clock = ClockContext.current(
+        "Asia/Shanghai", 480,
+        now_utc=datetime(2026, 7, 29, 5, 0, tzinfo=timezone.utc),
+    )
+    temporal = resolve_time_semantics("我每天中午十二点吃两颗", clock, kind="preference")
+    assert temporal["recurrence"] == {
+        "frequency": "daily", "localTime": "12:00", "timezone": "Asia/Shanghai",
+    }
+
+
+def test_entity_qualified_key_and_retrieval_never_mix_people(tmp_path):
+    memory = TimelineMemory(tmp_path / "timeline.sqlite3")
+    li = remember(
+        memory, "小李的电话是13659892706", scope="participant", case_id=None,
+        subject="小李", predicate="phone", value="13659892706",
+    )
+    chen = remember(
+        memory, "小陈的电话是12358", scope="participant", case_id=None,
+        subject="小陈", predicate="phone", value="12358",
+    )
+    assert li["memoryKey"] == memory_key_for("小李", "phone") == "contact:小李:phone"
+    assert chen["memoryKey"] == "contact:小陈:phone"
+    assert li["status"] == chen["status"] == "active"
+
+    result = memory.retrieve(
+        "小李电话是多少", user_id="user-a", case_id=None, scope="participant",
+        query_spec={"subject": "小李", "predicate": "phone"},
+    )
+    assert [item["cardId"] for item in result["selected"]] == [li["id"]]
+    rejected = next(item for item in result["candidates"] if item["cardId"] == chen["id"])
+    assert rejected["rejectionReasons"] == ["subject-mismatch"]
+
+
+def test_v1_database_migrates_in_place_without_losing_cards(tmp_path):
+    path = tmp_path / "timeline.sqlite3"
+    vector = np.asarray([1.0, 0.0], dtype=np.float32)
+    with sqlite3.connect(path) as connection:
+        connection.executescript("""
+            CREATE TABLE timeline_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+            INSERT INTO timeline_meta(key, value) VALUES('schema_version', '1');
+            CREATE TABLE memory_cards (
+                id TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL,
+                case_id TEXT,
+                scope TEXT NOT NULL,
+                tier TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                text TEXT NOT NULL,
+                normalized_text TEXT NOT NULL,
+                memory_key TEXT,
+                happened_at TEXT NOT NULL,
+                day_key TEXT NOT NULL,
+                embedding BLOB NOT NULL,
+                embedding_dim INTEGER NOT NULL,
+                source_ids TEXT NOT NULL,
+                status TEXT NOT NULL,
+                importance REAL NOT NULL,
+                supersedes TEXT,
+                metadata TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+        """)
+        connection.execute(
+            """INSERT INTO memory_cards VALUES(
+                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+            )""",
+            (
+                "legacy-card", "user-a", "case-a", "case", "short", "fact",
+                "旧版记忆", "旧版记忆", None, "2026-07-20T08:00:00+00:00", "2026-07-20",
+                vector.tobytes(), 2, "[]", "active", 0.7, None, "{}",
+                "2026-07-20T08:01:00+00:00", "2026-07-20T08:01:00+00:00",
+            ),
+        )
+
+    restored = TimelineMemory(path)
+    card = restored.cards(user_id="user-a", case_id="case-a", scope="case")[0]
+    assert card["id"] == "legacy-card"
+    assert card["recordedAt"] == "2026-07-20T08:01:00+00:00"
+    assert card["effectiveAt"] == "2026-07-20T08:00:00+00:00"
+    assert card["timezone"] == "UTC"
+    assert card["utcOffsetMinutes"] == 0
+    with sqlite3.connect(path) as connection:
+        version = connection.execute(
+            "SELECT value FROM timeline_meta WHERE key='schema_version'"
+        ).fetchone()[0]
+    assert version == "2"
+
+
+def test_dst_day_ranges_follow_civil_calendar_and_normalize_missing_hour():
+    try:
+        from zoneinfo import ZoneInfo
+        ZoneInfo("America/New_York")
+    except Exception:
+        return
+
+    spring = ClockContext.current(
+        "America/New_York", -300,
+        now_utc=datetime(2026, 3, 8, 12, 0, tzinfo=timezone.utc),
+    )
+    spring_day = resolve_time_semantics("今天", spring, kind="event")
+    spring_span = (
+        datetime.fromisoformat(spring_day["effectiveEnd"])
+        - datetime.fromisoformat(spring_day["effectiveAt"])
+    )
+    assert spring_span == timedelta(hours=23)
+
+    missing = resolve_time_semantics("2026年3月8日凌晨2点30分", spring, kind="event")
+    assert missing["effectiveAt"].startswith("2026-03-08T07:30")
+
+    autumn = ClockContext.current(
+        "America/New_York", -240,
+        now_utc=datetime(2026, 11, 1, 12, 0, tzinfo=timezone.utc),
+    )
+    autumn_day = resolve_time_semantics("今天", autumn, kind="event")
+    autumn_span = (
+        datetime.fromisoformat(autumn_day["effectiveEnd"])
+        - datetime.fromisoformat(autumn_day["effectiveAt"])
+    )
+    assert autumn_span == timedelta(hours=25)
+
+
+def test_clock_query_uses_exact_minute_instead_of_following_day(tmp_path):
+    memory = TimelineMemory(tmp_path / "timeline.sqlite3")
+    clock = ClockContext.current(
+        "Asia/Shanghai", 480,
+        now_utc=datetime(2026, 7, 29, 12, 0, tzinfo=timezone.utc),
+    )
+    at_three = resolve_time_semantics("2026年7月29日下午3点", clock, kind="event")
+    at_four = resolve_time_semantics("2026年7月29日下午4点", clock, kind="event")
+    first = remember(
+        memory, "用户下午三点服药", kind="event",
+        effective_at=at_three["effectiveAt"], subject="用户", predicate="medication.taken",
+    )
+    remember(
+        memory, "用户下午四点服药", kind="event",
+        effective_at=at_four["effectiveAt"], subject="用户", predicate="medication.taken",
+    )
+
+    result = memory.retrieve(
+        "2026年7月29日下午3点服药了吗", user_id="user-a", case_id="case-a", scope="case",
+        clock=clock, query_spec={"subject": "用户", "predicate": "medication.taken"},
+    )
+    assert [item["cardId"] for item in result["selected"]] == [first["id"]]
+
+
+def test_draft_with_known_subject_rejects_subjectless_atom(tmp_path):
+    memory = TimelineMemory(tmp_path / "timeline.sqlite3")
+    draft = memory.begin_draft(
+        user_id="user-a", case_id="case-a", subject="小李", predicate="phone",
+    )
+    assert not memory.draft_accepts(draft, subject=None, predicate="phone")

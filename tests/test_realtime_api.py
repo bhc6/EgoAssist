@@ -103,6 +103,7 @@ def install_queue_test_bridge(monkeypatch):
             self.requests = []
             self.injections = []
             self.cancellations = []
+            self.unresolved_input = False
             instances.append(self)
 
         async def connect(self):
@@ -140,6 +141,9 @@ def install_queue_test_bridge(monkeypatch):
         def cancel_response(self, **kwargs):
             self.cancellations.append(kwargs)
             return True
+
+        def has_unresolved_user_input(self):
+            return self.unresolved_input
 
         async def close(self):
             return None
@@ -207,10 +211,11 @@ def test_grounded_turn_claims_follow_committed_memory_state(tmp_path, monkeypatc
             ordinary_instruction = await control("你现在记住了吗")
             assert "No active memory card was committed" in ordinary_instruction
             assert "No tool result has been committed" in ordinary_instruction
-            assert instances[0].injections[-1] == (
-                "current_turn_context",
-                {"transcript": "你现在记住了吗", "retrievalEvidence": []},
-            )
+            label, injected = instances[0].injections[-1]
+            assert label == "current_turn_context"
+            assert injected["transcript"] == "你现在记住了吗"
+            assert injected["retrievalEvidence"] == []
+            assert injected["clock"]["authority"] == "server-clock"
             await ws.close()
 
     asyncio.run(scenario())
@@ -278,7 +283,6 @@ def test_participant_memory_survives_restart_when_case_timeline_is_disabled(tmp_
 
     asyncio.run(first_process())
     asyncio.run(second_process())
-
     journal_path = tmp_path / "users" / user_id / "sessions" / f"{session_id}.jsonl"
     entries = [json.loads(line) for line in journal_path.read_text(encoding="utf-8").splitlines()]
     latest_context = next(
@@ -296,6 +300,82 @@ def test_participant_memory_survives_restart_when_case_timeline_is_disabled(tmp_
         ("小李的电话号码是13657352908", "deleted"),
     ]
 
+
+def test_typed_memory_draft_only_consumes_compatible_followup_and_writes_atoms(tmp_path):
+    memory_path = tmp_path / "memory.json"
+
+    async def scenario():
+        app = create_app(
+            str(BUILTIN_SKILLS_ROOT), None,
+            str(memory_path), "test-realtime", "Ethan",
+        )
+        async with TestClient(TestServer(app)) as client:
+            user = await register_client(client, "typed-draft")
+            session_id = (await (await client.post("/api/sessions")).json())["session"]["id"]
+
+            async def voice(payload):
+                response = await client.post("/api/voice", json={"sessionId": session_id, **payload})
+                assert response.status == 200, await response.text()
+                return await response.json()
+
+            await voice({
+                "transcript": "帮我记一个电话号码",
+                "memoryDraft": {
+                    "mode": "start", "subject": None, "predicate": "phone",
+                    "language": "zh", "missingFields": ["subject", "value"],
+                },
+            })
+            await voice({
+                "transcript": "是小李的电话",
+                "memoryDraft": {
+                    "mode": "continue", "subject": "小李", "predicate": "phone",
+                    "language": "zh", "missingFields": ["value"],
+                },
+            })
+            await voice({
+                "transcript": "小陈的电话是12358",
+                "memoryAtoms": [{
+                    "kind": "fact", "text": "小陈的电话是12358。", "subject": "小陈",
+                    "predicate": "phone", "value": "12358", "scope": "case", "consent": "observed",
+                }],
+            })
+            await voice({
+                "transcript": "是13659892706",
+                "memoryAtoms": [{
+                    "kind": "fact", "text": "小李的电话是13659892706。", "subject": "小李",
+                    "predicate": "phone", "value": "13659892706", "scope": "case", "consent": "observed",
+                }],
+            })
+            await voice({
+                "transcript": "记住药的位置和服药规律",
+                "memoryAtoms": [
+                    {
+                        "kind": "state", "text": "维生素D3放在书桌右边的架子上。",
+                        "subject": "维生素D3", "predicate": "location", "value": "书桌右边的架子",
+                        "scope": "participant", "consent": "explicit",
+                    },
+                    {
+                        "kind": "preference", "text": "用户每天中午十二点服用两颗维生素D3。",
+                        "subject": "用户", "predicate": "medication.schedule", "value": "维生素D3两颗",
+                        "scope": "participant", "consent": "explicit",
+                    },
+                ],
+            })
+            return user["id"], session_id
+
+    user_id, session_id = asyncio.run(scenario())
+    timeline = TimelineMemory(tmp_path / "timeline.sqlite3")
+    participant = timeline.cards(user_id=user_id, scope="participant")
+    case_cards = timeline.cards(user_id=user_id, case_id=session_id, scope="case")
+    by_subject = {item["subject"]: item for item in participant}
+    assert by_subject["小李"]["value"] == "13659892706"
+    assert by_subject["小李"]["memoryKey"] == "contact:小李:phone"
+    assert next(item for item in case_cards if item["subject"] == "小陈")["value"] == "12358"
+    assert timeline.pending_draft(user_id=user_id, case_id=session_id) is None
+    assert by_subject["维生素d3"]["text"] == "维生素D3放在书桌右边的架子上。"
+    schedule = next(item for item in participant if item["predicate"] == "medication.schedule")
+    assert schedule["recurrence"]["frequency"] == "daily"
+    assert schedule["recurrence"]["localTime"] == "12:00"
 
 def test_explicit_general_preference_is_active_without_second_confirmation(tmp_path):
     async def scenario():
@@ -1144,8 +1224,8 @@ def test_realtime_transcripts_are_classified_and_committed_in_fifo_order(tmp_pat
             assert (await asyncio.wait_for(ws.receive_json(), timeout=1))["type"] == "state"
             assert (await asyncio.wait_for(ws.receive_json(), timeout=1))["type"] == "state"
             assert classifier_calls == ["first turn", "second turn"]
-            assert "first turn" in instances[0].requests[0][0]
-            assert "second turn" in instances[0].requests[1][0]
+            assert len(instances[0].requests) == 1
+            assert "second turn" in instances[0].requests[0][0]
             assert [item[0] for item in instances[0].injections[-2:]] == [
                 "current_turn_context", "current_turn_context",
             ]
@@ -1155,6 +1235,54 @@ def test_realtime_transcripts_are_classified_and_committed_in_fifo_order(tmp_pat
         entries = [json.loads(line) for line in journal.read_text(encoding="utf-8").splitlines()]
         inputs = [item["input"] for item in entries if item.get("type") == "control_decision"]
         assert inputs[-2:] == ["first turn", "second turn"]
+        assert any(
+            item.get("type") == "runtime_event"
+            and item.get("eventType") == "response.skipped.stale_user_turn"
+            for item in entries
+        )
+
+    asyncio.run(scenario())
+
+
+def test_new_vad_segment_blocks_old_answer_before_its_transcript_arrives(tmp_path, monkeypatch):
+    instances = install_queue_test_bridge(monkeypatch)
+    classification_started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def classify(_self, text, catalog):
+        classification_started.set()
+        await release.wait()
+        return semantic_result(text)
+
+    monkeypatch.setattr(run_egoassist.SemanticTurnRouter, "classify", classify)
+
+    async def scenario():
+        app = create_app(
+            str(BUILTIN_SKILLS_ROOT), None,
+            str(tmp_path / "memory.json"), "test-realtime", "Ethan",
+        )
+        async with TestClient(TestServer(app)) as client:
+            user = await register_client(client, "vad-response-gate")
+            session_id = (await (await client.post("/api/sessions")).json())["session"]["id"]
+            ws = await client.ws_connect(f"/ws/realtime?session={session_id}")
+            assert (await ws.receive_json())["type"] == "ready"
+            assert (await ws.receive_json())["type"] == "state"
+
+            instances[0].on_transcript("older completed turn")
+            await asyncio.wait_for(classification_started.wait(), timeout=1)
+            instances[0].unresolved_input = True
+            release.set()
+            assert (await asyncio.wait_for(ws.receive_json(), timeout=1))["type"] == "state"
+            assert instances[0].requests == []
+            await ws.close()
+
+        journal = tmp_path / "users" / user["id"] / "sessions" / f"{session_id}.jsonl"
+        entries = [json.loads(line) for line in journal.read_text(encoding="utf-8").splitlines()]
+        assert any(
+            item.get("type") == "runtime_event"
+            and item.get("eventType") == "response.skipped.unresolved_user_input"
+            for item in entries
+        )
 
     asyncio.run(scenario())
 

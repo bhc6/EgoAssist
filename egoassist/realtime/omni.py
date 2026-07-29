@@ -39,6 +39,16 @@ def _bounded_timeout(name: str, default: float, minimum: float, maximum: float) 
     return max(minimum, min(maximum, value))
 
 
+def _provider_error_message(payload: dict[str, Any]) -> str:
+    error = payload.get("error", {}) if isinstance(payload, dict) else {}
+    return str(error.get("message", "") if isinstance(error, dict) else error)
+
+
+def _is_media_order_error(payload: dict[str, Any]) -> bool:
+    message = _provider_error_message(payload).casefold()
+    return "append image before append audio" in message
+
+
 @dataclass(frozen=True)
 class _ResponseRequest:
     instructions: str
@@ -405,8 +415,12 @@ class OmniBrowserBridge:
         self._last_assistant_utterance_at = 0.0
         self._replayed_compaction_id: str | None = None
         self._trace_sink: Callable[..., Any] | None = None
-        self._media_lock = threading.Lock()
+        self._media_lock = threading.RLock()
         self._pending_video: str | None = None
+        self._input_speech_active = False
+        self._input_segment_sequence = 0
+        self._active_input_segment_id: str | None = None
+        self._pending_input_segments: deque[str] = deque()
         bridge = self
 
         class Callback(OmniRealtimeCallback):
@@ -419,6 +433,7 @@ class OmniBrowserBridge:
 
             def on_close(self, close_status_code=None, close_msg=None):
                 if self.generation == bridge._dialogue_generation and not bridge.closed:
+                    bridge._drop_open_input_segments("provider-session-closed")
                     bridge.connected = False
                     bridge._trace("provider.session.closed", {
                         "lane": "dialogue", "message": str(close_msg or ""),
@@ -438,8 +453,10 @@ class OmniBrowserBridge:
                 elif event_type == "conversation.item.input_audio_transcription.completed":
                     transcript = str(response.get("transcript", "")).strip()
                     if not transcript:
+                        bridge._input_segment_transcribed(None)
                         bridge._trace("audio.transcript.ignored", {"reason": "empty-provider-transcript"})
                         return
+                    bridge._input_segment_transcribed(transcript)
                     barge_action = bridge.handle_user_speech_started(trigger="transcript-fallback")
                     if barge_action == "cancelled":
                         bridge._schedule({"type": "interrupted"})
@@ -467,11 +484,14 @@ class OmniBrowserBridge:
                 elif event_type == "response.output_item.done":
                     bridge._handle_output_item_event(response)
                 elif event_type == "input_audio_buffer.speech_started":
+                    bridge._input_segment_started(response)
                     barge_action = bridge.handle_user_speech_started(trigger="provider-speech-started")
                     if barge_action == "cancelled":
                         bridge._schedule({"type": "interrupted"})
                     elif barge_action in {"deferred", "protected"}:
                         bridge._schedule({"type": "barge_in_policy", "action": barge_action})
+                elif event_type == "input_audio_buffer.speech_stopped":
+                    bridge._input_segment_stopped(response)
                 elif event_type == "error":
                     if _is_response_idle_timeout(response):
                         LOGGER.info("DashScope dialogue session reached response idle timeout; reconnecting")
@@ -484,8 +504,21 @@ class OmniBrowserBridge:
                     elif _is_no_active_response(response):
                         LOGGER.info("DashScope cancel/done race; reconciling stale response state")
                         bridge._response_absent_after_cancel()
+                    elif _is_media_order_error(response):
+                        LOGGER.error("DashScope media ordering error: %s", response)
+                        bridge._trace("provider.media.ordering_error", {
+                            "message": _provider_error_message(response),
+                            "recovery": "dialogue-reconnect",
+                        })
+                        bridge._drop_open_input_segments("provider-media-ordering-error")
+                        bridge.connected = False
+                        bridge._schedule({"type": "error", "message": _provider_error_message(response)})
+                        bridge._schedule_reconnect("media-ordering-error")
                     else:
                         LOGGER.error("DashScope realtime error: %s", response)
+                        bridge._trace("provider.error", {
+                            "message": _provider_error_message(response), "payloadType": event_type,
+                        })
                         bridge._schedule({"type": "error", "message": str(response)})
 
         self._Callback = Callback
@@ -597,6 +630,7 @@ class OmniBrowserBridge:
                 return
             await self.emit({"type": "reconnecting", "lane": "dialogue", "reason": reason})
             self._trace("provider.session.reconnecting", {"lane": "dialogue", "reason": reason})
+            self._drop_open_input_segments(f"provider-reconnect:{reason}")
             self._persist_active_interruptions(f"provider-reconnect:{reason}")
             old = self.conversation
             self.connected = False
@@ -629,6 +663,89 @@ class OmniBrowserBridge:
             self._barge_in_pending = False
         self._schedule_queued_dispatch()
 
+    def _input_segment_started(self, payload: dict[str, Any]) -> str:
+        with self._media_lock:
+            self._input_segment_sequence = getattr(self, "_input_segment_sequence", 0) + 1
+            segment_id = f"segment-{self._dialogue_generation}-{self._input_segment_sequence}"
+            self._active_input_segment_id = segment_id
+            self._input_speech_active = True
+            pending = getattr(self, "_pending_input_segments", None)
+            if pending is None:
+                pending = deque()
+                self._pending_input_segments = pending
+            pending.append(segment_id)
+        self._trace("input.segment.started", {
+            "segmentId": segment_id,
+            "providerItemId": payload.get("item_id"),
+            "audioStartMs": payload.get("audio_start_ms"),
+        })
+        self._flush_pending_video_for_active_segment()
+        return segment_id
+
+    def _flush_pending_video_for_active_segment(self) -> bool:
+        with self._media_lock:
+            if not getattr(self, "_pending_video", None) or not self._input_speech_active:
+                return False
+            frame = self._pending_video
+            try:
+                self.conversation.append_video(frame)
+                self._pending_video = None
+            except Exception as exc:
+                self.connected = False
+                self._trace("provider.media.append_failed", {
+                    "media": "video", "error": str(exc)[:240], "recovery": "dialogue-reconnect",
+                })
+                self._schedule_reconnect("media-append-failed")
+                return False
+        return True
+
+    def _input_segment_stopped(self, payload: dict[str, Any]) -> None:
+        with self._media_lock:
+            segment_id = getattr(self, "_active_input_segment_id", None)
+            self._active_input_segment_id = None
+            self._input_speech_active = False
+        self._trace("input.segment.stopped", {
+            "segmentId": segment_id,
+            "providerItemId": payload.get("item_id"),
+            "audioEndMs": payload.get("audio_end_ms"),
+        })
+
+    def _input_segment_transcribed(self, transcript: str | None) -> None:
+        with self._media_lock:
+            pending = getattr(self, "_pending_input_segments", deque())
+            segment_id = pending.popleft() if pending else None
+            if segment_id and segment_id == self._active_input_segment_id:
+                self._active_input_segment_id = None
+                self._input_speech_active = False
+        self._trace("input.segment.transcribed" if transcript else "input.segment.dropped", {
+            "segmentId": segment_id,
+            "characters": len(transcript or ""),
+            "reason": None if transcript else "empty-provider-transcript",
+        })
+
+    def _drop_open_input_segments(self, reason: str) -> None:
+        media_lock = getattr(self, "_media_lock", None)
+        if media_lock is None:
+            media_lock = threading.Lock()
+            self._media_lock = media_lock
+        with media_lock:
+            pending = getattr(self, "_pending_input_segments", deque())
+            segment_ids = list(pending)
+            pending.clear()
+            self._active_input_segment_id = None
+            self._input_speech_active = False
+        for segment_id in segment_ids:
+            self._trace("input.segment.dropped", {"segmentId": segment_id, "reason": str(reason)})
+
+    def has_unresolved_user_input(self) -> bool:
+        """Return true from VAD start until transcription or an audited drop."""
+
+        with self._media_lock:
+            return bool(
+                getattr(self, "_input_speech_active", False)
+                or getattr(self, "_pending_input_segments", ())
+            )
+
     def append_audio(self, audio_b64: str) -> bool:
         if not audio_b64:
             return False
@@ -640,7 +757,7 @@ class OmniBrowserBridge:
         try:
             with self._media_lock:
                 self.conversation.append_audio(audio_b64)
-                if self._pending_video:
+                if self._pending_video and getattr(self, "_input_speech_active", True):
                     self.conversation.append_video(self._pending_video)
                     self._pending_video = None
                     video_flushed = True
@@ -1726,6 +1843,7 @@ class OmniBrowserBridge:
     async def close(self) -> None:
         self.closed = True
         self.connected = False
+        self._drop_open_input_segments("bridge-closed")
         self._dialogue_generation += 1
         await self.perception.close()
         if self.conversation:

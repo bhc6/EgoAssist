@@ -12,6 +12,7 @@ from egoassist.realtime.omni import (
     _is_no_active_response,
     _is_response_idle_timeout,
     _is_fake_ip,
+    _is_media_order_error,
     _realtime_public_ips,
 )
 
@@ -120,6 +121,13 @@ def test_provider_response_idle_timeout_is_recoverable_session_error():
         },
     }
     assert _is_response_idle_timeout(payload)
+
+
+def test_provider_media_ordering_error_is_recoverable_protocol_error():
+    assert _is_media_order_error({
+        "type": "error",
+        "error": {"type": "invalid_request_error", "message": "Error append image before append audio."},
+    })
 
 
 def test_idle_timeout_recovery_replaces_dialogue_session_and_emits_ready():
@@ -648,3 +656,55 @@ def test_video_never_uses_a_stale_audio_append_as_ordering_credit():
 
     assert bridge.append_audio("fresh-audio")
     assert bridge.conversation.events[-2:] == [("audio", "fresh-audio"), ("video", "late-frame")]
+
+
+def test_production_video_flush_waits_for_provider_speech_segment():
+    class Conversation:
+        def __init__(self):
+            self.events = []
+
+        def append_audio(self, value):
+            self.events.append(("audio", value))
+
+        def append_video(self, value):
+            self.events.append(("video", value))
+
+    bridge = OmniBrowserBridge.__new__(OmniBrowserBridge)
+    bridge.conversation = Conversation()
+    bridge._media_lock = threading.Lock()
+    bridge._pending_video = None
+    bridge._input_speech_active = False
+    bridge._dialogue_generation = 2
+    bridge._input_segment_sequence = 0
+    bridge._pending_input_segments = __import__("collections").deque()
+    bridge._trace = lambda *args, **kwargs: None
+
+    bridge.append_video("frame")
+    assert not bridge.append_audio("pre-speech-audio")
+    assert bridge.conversation.events == [("audio", "pre-speech-audio")]
+    bridge._input_segment_started({"audio_start_ms": 10})
+    assert bridge.conversation.events[-1] == ("video", "frame")
+    assert not bridge.append_audio("speech-audio")
+    assert bridge.conversation.events[-1] == ("audio", "speech-audio")
+
+
+def test_input_segments_have_auditable_terminal_state():
+    bridge = OmniBrowserBridge.__new__(OmniBrowserBridge)
+    bridge._media_lock = threading.Lock()
+    bridge._dialogue_generation = 3
+    bridge._input_segment_sequence = 0
+    bridge._pending_input_segments = __import__("collections").deque()
+    traced = []
+    bridge._trace = lambda event, payload, response_id=None: traced.append((event, payload))
+
+    segment_id = bridge._input_segment_started({"audio_start_ms": 100})
+    assert bridge.has_unresolved_user_input()
+    bridge._input_segment_stopped({"audio_end_ms": 900})
+    assert bridge.has_unresolved_user_input()
+    bridge._input_segment_transcribed("记住这句话")
+    assert not bridge.has_unresolved_user_input()
+
+    assert [event for event, _ in traced] == [
+        "input.segment.started", "input.segment.stopped", "input.segment.transcribed",
+    ]
+    assert {payload["segmentId"] for _, payload in traced} == {segment_id}

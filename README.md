@@ -19,6 +19,10 @@ ablate in experiments.
 - Reconnectable, append-only case journals with bounded context compaction.
 - One persistent SQLite TimelineMemory for facts, events, state, preferences,
   observations, scenes, captures, and successful tool effects.
+- Server-authoritative UTC instants plus participant civil time, including DST-aware
+  date ranges and separate recording/effective timestamps.
+- Persistent typed memory drafts and entity-qualified retrieval; restart or an
+  unrelated follow-up cannot silently consume the wrong value.
 - Explicit participant and case scopes with no implicit cross-case recall.
 - Separate dialogue and perception provider sessions.
 - Observable routing, memory provenance, response scheduling, tool execution, and
@@ -129,6 +133,14 @@ responses. The perception lane receives no microphone stream and has no direct
 browser audio route. A validated `speak=true` gate may enqueue a separate proactive
 utterance; malformed, stale, or unattributed output fails closed.
 
+Dialogue video is coalesced until the provider confirms an active speech segment;
+the newest frame is then flushed after audio ordering is established. Each VAD
+segment emits started, stopped, and exactly one transcribed-or-dropped audit path.
+If the provider reports an image-before-audio protocol error, EgoAssist marks open
+segments dropped, replaces the disposable dialogue connection, and replays only
+the durable context projection. A dropped segment is observable, not invented or
+silently represented as remembered text.
+
 The local preview normally runs at the browser's camera rate. The console sends
 JPEG frames at selectable 1, 2, or 4 FPS, defaults to 2 FPS, and coalesces pending
 frames. Proactive checks are periodic snapshots, not frame-by-frame recognition.
@@ -151,6 +163,13 @@ disconnect, and shutdown invalidate or await the relevant work. This prevents
 late semantic classification from reversing a newer control action and prevents
 adjacent user turns from being submitted out of order.
 
+Transcript state and memory commits remain FIFO. Response creation follows
+latest-input-wins: when a newer completed transcript arrives before an older turn
+has requested an answer, the older turn is still journaled and committed but its
+answer is skipped. Provider speech-start events cancel or defer current playback
+according to the active turn-taking policy, so a barge-in does not wait for final
+transcription before stopping stale speech.
+
 The response scheduler also uses request sequence and generation IDs. Missing,
 duplicated, stale, or reordered provider callbacks cannot silently take ownership
 of a newer response. Watchdogs replace a disposable provider projection when a
@@ -167,6 +186,10 @@ All online behavioral memory uses `timeline.sqlite3` in WAL mode. The database i
 shared physically but every operation requires an owning `user_id`, a scope, and,
 for case-scoped data, a `case_id`.
 
+Schema v2 migrates an existing v1 database in place. Legacy `created_at` and
+`happened_at` values seed the new recorded/effective columns; old cards remain
+readable and are not reclassified by a model during migration.
+
 ```text
 <memory-root>/
 |-- identity.sqlite3
@@ -175,10 +198,34 @@ for case-scoped data, a `case_id`.
 `-- users/<user-id>/sessions/<case-id>.jsonl
 ```
 
+### Real-world time
+
+The server clock is the authority for `nowUtc` and every `recordedAt`. The browser
+sends only its IANA timezone name and current UTC offset as civil-time metadata;
+it cannot supply or move the server's current instant. The selected case persists
+that timezone, and each turn recomputes local time from a fresh server UTC reading.
+With a valid IANA zone, its rules take precedence over the reported offset, so a
+long-running case follows daylight-saving transitions.
+
+Timeline cards separate:
+
+- `recordedAt`: when EgoAssist durably accepted the claim, in UTC;
+- `effectiveAt` / `effectiveEnd`: when the claim applies, in UTC;
+- `timezone` / `utcOffsetMinutes`: the civil-time interpretation used;
+- `recurrence`: a structured daily or weekly local-time rule when present.
+
+Relative phrases such as today, yesterday, tomorrow, and explicit local dates are
+resolved deterministically against the case clock. Date-only ranges follow civil
+midnight, so a DST transition day can be 23 or 25 hours. A nonexistent local wall
+time during a spring transition is normalized forward by the zone rules. The
+semantic model receives the same clock snapshot for classification but cannot
+write its own timestamps.
+
 ### Card contract
 
-A Timeline card has a typed kind, normalized declarative text, occurrence and
-creation times, provenance, consent, status, tier, scope, and optional stable
+A Timeline card has a typed kind, normalized declarative text, recorded and
+effective times, civil timezone, provenance, consent, status, tier, scope,
+structured `subject` / `predicate` / `value`, and an optional stable
 `memory_key`. Supported producers use these kinds:
 
 ```text
@@ -191,9 +238,18 @@ Only active cards are eligible for recall or for an assistant claim such as
 cards. An explicit memory statement is active immediately. An inferred reusable
 preference remains pending until accepted.
 
-"Remember this value" without a value creates a five-minute pending capture. Only
-the next classified value in the same participant and case can consume it. Capture
-is consumed after the new card is successfully committed.
+An incomplete explicit request such as "remember a phone number" creates a
+five-minute `MemoryDraft` in SQLite. The draft records its subject, predicate,
+missing fields, language, source turns, and server-time expiry. A later turn can
+refine or consume it only in the same participant and case and only when its
+subject and predicate are compatible. Unrelated facts remain ordinary case cards.
+The draft reaches `consumed` only after the compatible long-term card commits, and
+survives an application restart until that terminal state or its real-time expiry.
+
+One transcript may produce up to three atomic cards. Independent claims, such as
+an object's location and a medication schedule, remain separate cards. Stable keys
+are generated at the storage boundary from normalized entity and relation, for
+example `contact:小李:phone`; a model-supplied generic key cannot merge two people.
 
 A stable `memory_key` supersedes an older active value only in the exact same
 scope and, for case scope, the same case. The old card remains available for audit.
@@ -222,15 +278,20 @@ or confirmation state remains visible. Retrieval still accepts active cards only
 - `long`: explicit durable cards, pending durable preferences, and deterministic
   consolidation output.
 
-Consolidation groups older short-term cards by time block and kind, records source
-card IDs, and uses deterministic IDs so retries are idempotent. It runs outside the
-turn worker but is tracked per case and awaited during service cleanup.
+Consolidation is a lossless deterministic promotion. Older short-term cards are
+copied one-for-one into the long layer with the same text, entity, value, effective
+time, timezone, recurrence, provenance, and importance; source IDs link the old
+and promoted records. The old record becomes `consolidated`. This bounds the short
+working set without summarizing away a phone number, date, or schedule. Promotion
+runs outside the turn worker, is idempotent, is tracked per case, and is awaited
+during service cleanup.
 
 ### Retrieval
 
-Retrieval first enforces status and ownership, routes explicit time language to
-eligible layers, and then ranks at most 20 auditable candidates. At most five cards
-are injected into the current turn.
+Retrieval first enforces status, participant/case ownership, structured subject and
+predicate, and effective-time overlap. Only then does it rank at most 20 auditable
+candidates; at most five cards are injected into the current turn. A point-time
+query uses an exact minute window, while a date-only query uses that civil day.
 
 The built-in hashing encoder is deterministic and dependency-light. Its vector
 score is ranking-only: a hash collision is not semantic evidence, so a candidate

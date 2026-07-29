@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from egoassist.memory.timeline import RETRIEVABLE_KINDS, TimelineMemory, looks_like_question
+from egoassist.memory.temporal import ClockContext
 
 
 class RealtimeEpisodeMemory:
@@ -76,6 +77,15 @@ class RealtimeEpisodeMemory:
         status: str = "active",
         importance: float = 0.5,
         happened_at: str | None = None,
+        recorded_at: str | None = None,
+        effective_at: str | None = None,
+        effective_end: str | None = None,
+        timezone_name: str = "UTC",
+        utc_offset_minutes: int = 0,
+        recurrence: dict[str, Any] | None = None,
+        subject: str | None = None,
+        predicate: str | None = None,
+        value: str | None = None,
         candidate_scope: str | None = None,
     ) -> dict[str, Any] | None:
         summary = " ".join(str(summary).split()).strip()[:1000]
@@ -108,6 +118,15 @@ class RealtimeEpisodeMemory:
             tier=tier,
             memory_key=memory_key,
             happened_at=happened_at,
+            recorded_at=recorded_at,
+            effective_at=effective_at,
+            effective_end=effective_end,
+            timezone_name=timezone_name,
+            utc_offset_minutes=utc_offset_minutes,
+            recurrence=recurrence,
+            subject=subject,
+            predicate=predicate,
+            value=value,
             source_ids=[evidence_event_id] if evidence_event_id else [],
             status=status,
             importance=importance,
@@ -130,6 +149,8 @@ class RealtimeEpisodeMemory:
         user_scope: str = "local-default",
         allow_cross_session: bool = False,
         referential: bool = False,
+        clock: ClockContext | None = None,
+        query_spec: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         user_id, case_id, memory_scope = self._identity(
             session_id=session_id,
@@ -143,6 +164,8 @@ class RealtimeEpisodeMemory:
             scope=memory_scope,
             limit=limit,
             kinds=RETRIEVABLE_KINDS - {"task-preference"},
+            clock=clock,
+            query_spec=query_spec,
         )
         candidates = [self._candidate(item) for item in raw["candidates"]]
         selected_ids = {item["cardId"] for item in raw["selected"]}
@@ -300,6 +323,14 @@ class RealtimeEpisodeMemory:
             "scope": card.get("scope"),
             "tier": card.get("tier"),
             "memoryKey": card.get("memoryKey"),
+            "recordedAt": card.get("recordedAt"),
+            "effectiveAt": card.get("effectiveAt"),
+            "effectiveEnd": card.get("effectiveEnd"),
+            "timezone": card.get("timezone"),
+            "recurrence": card.get("recurrence"),
+            "subject": card.get("subject"),
+            "predicate": card.get("predicate"),
+            "value": card.get("value"),
             "status": card.get("status"),
             "sourceIds": card.get("sourceIds", []),
         }

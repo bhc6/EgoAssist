@@ -14,6 +14,7 @@ from typing import Any
 from uuid import uuid4
 
 from .memory_policy import default_memory_policy, normalize_memory_policy
+from egoassist.memory.temporal import ClockContext
 
 
 _USERNAME = re.compile(r"^[\w.-]{3,32}$", re.UNICODE)
@@ -72,7 +73,9 @@ class IdentityStore:
                     label TEXT NOT NULL DEFAULT '',
                     created_at TEXT NOT NULL,
                     last_seen_at TEXT NOT NULL,
-                    memory_policy TEXT NOT NULL DEFAULT '{}'
+                    memory_policy TEXT NOT NULL DEFAULT '{}',
+                    timezone_name TEXT NOT NULL DEFAULT 'UTC',
+                    utc_offset_minutes INTEGER NOT NULL DEFAULT 0
                 );
                 CREATE INDEX IF NOT EXISTS context_sessions_user_id
                     ON context_sessions(user_id, last_seen_at DESC);
@@ -89,6 +92,14 @@ class IdentityStore:
             if "memory_policy" not in columns:
                 connection.execute(
                     "ALTER TABLE context_sessions ADD COLUMN memory_policy TEXT NOT NULL DEFAULT '{}'"
+                )
+            if "timezone_name" not in columns:
+                connection.execute(
+                    "ALTER TABLE context_sessions ADD COLUMN timezone_name TEXT NOT NULL DEFAULT 'UTC'"
+                )
+            if "utc_offset_minutes" not in columns:
+                connection.execute(
+                    "ALTER TABLE context_sessions ADD COLUMN utc_offset_minutes INTEGER NOT NULL DEFAULT 0"
                 )
 
     @staticmethod
@@ -221,7 +232,9 @@ class IdentityStore:
     def get_context_session(self, user_id: str, session_id: str) -> dict[str, Any]:
         with self._connect() as connection:
             row = connection.execute(
-                "SELECT id, user_id, label, created_at, last_seen_at, memory_policy FROM context_sessions WHERE id = ?",
+                """SELECT id, user_id, label, created_at, last_seen_at, memory_policy,
+                          timezone_name, utc_offset_minutes
+                   FROM context_sessions WHERE id = ?""",
                 (session_id,),
             ).fetchone()
         if row is None:
@@ -234,7 +247,8 @@ class IdentityStore:
         with self._connect() as connection:
             rows = connection.execute(
                 """
-                SELECT id, label, created_at, last_seen_at, memory_policy FROM context_sessions
+                SELECT id, label, created_at, last_seen_at, memory_policy,
+                       timezone_name, utc_offset_minutes FROM context_sessions
                 WHERE user_id = ? ORDER BY last_seen_at DESC LIMIT ?
                 """,
                 (user_id, max(1, min(200, int(limit)))),
@@ -249,7 +263,33 @@ class IdentityStore:
             result["memoryPolicy"] = normalize_memory_policy(json.loads(str(raw_policy) or "{}"))
         except (TypeError, ValueError, json.JSONDecodeError):
             result["memoryPolicy"] = default_memory_policy()
+        result["timezone"] = str(result.pop("timezone_name", "UTC") or "UTC")
+        result["utcOffsetMinutes"] = int(result.pop("utc_offset_minutes", 0) or 0)
         return result
+
+    def update_clock_context(
+        self,
+        user_id: str,
+        session_id: str,
+        *,
+        timezone_name: str,
+        utc_offset_minutes: int,
+    ) -> dict[str, Any]:
+        self.get_context_session(user_id, session_id)
+        clock = ClockContext.current(timezone_name, utc_offset_minutes)
+        if not -14 * 60 <= int(utc_offset_minutes) <= 14 * 60:
+            raise ValueError("invalid UTC offset")
+        with self._connect() as connection:
+            connection.execute(
+                """UPDATE context_sessions
+                   SET timezone_name=?, utc_offset_minutes=?, last_seen_at=?
+                   WHERE id=? AND user_id=?""",
+                (
+                    clock.timezone_name, clock.utc_offset_minutes, _timestamp(),
+                    str(session_id), str(user_id),
+                ),
+            )
+        return clock.prompt_payload()
 
     def update_memory_policy(
         self,
