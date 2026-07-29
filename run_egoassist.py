@@ -34,6 +34,7 @@ from egoassist.realtime import (
     TaskSpec,
     TurnTakingPolicy,
 )
+from egoassist.realtime.media_audit import MediaAuditAccumulator
 
 
 ROOT = Path(__file__).resolve().parent
@@ -1593,6 +1594,8 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                             )
             return entry
 
+        media_audit = MediaAuditAccumulator(session_trace)
+
         def session_tool_declarations() -> list[dict]:
             return (
                 session_runtime.skill.manifest.get("tools", [])
@@ -1732,13 +1735,13 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                 if kind == "audio":
                     audio_value = str(payload.get("audio", ""))
                     video_flushed = bridge.append_audio(audio_value)
-                    session_trace("media.audio.appended", "browser-microphone", {"base64Bytes": len(audio_value), "videoFlushed": video_flushed})
+                    media_audit.record_audio(len(audio_value), video_flushed=video_flushed)
                     if video_flushed:
                         interval = session_runtime.skill.manifest.get("proactive_check_seconds", 4) if session_runtime.skill else 4
                         bridge.maybe_check_proactively(float(interval))
                 elif kind == "video":
                     image_value = str(payload.get("image", ""))
-                    session_trace("media.video.latest-buffered", "browser-camera", {"base64Bytes": len(image_value), "policy": "latest-only"})
+                    media_audit.record_video(len(image_value))
                     if bridge.append_video(image_value):
                         interval = session_runtime.skill.manifest.get("proactive_check_seconds", 4) if session_runtime.skill else 4
                         bridge.maybe_check_proactively(float(interval))
@@ -1832,6 +1835,10 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
             if not ws.closed:
                 await ws.send_json({"type": "error", "message": str(exc)})
         finally:
+            try:
+                media_audit.flush()
+            except Exception:
+                LOGGER.exception("failed to flush aggregated media audit for case %s", session_id)
             if bridge:
                 live_bridges.discard(bridge)
                 await bridge.close()

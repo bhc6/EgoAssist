@@ -177,6 +177,85 @@ def test_qwen_output_item_tool_event_executes_declared_tool(tmp_path):
     assert [entry["type"] for entry in harness.journal.entries()] == ["tool_call", "tool_result"]
 
 
+def test_duplicate_tool_callbacks_execute_once(tmp_path):
+    harness = harness_at(tmp_path / "duplicate-tool.jsonl")
+    bridge = make_bridge(harness)
+    executions = []
+    bridge.set_tools([{
+        "name": "timer", "description": "Set a timer",
+        "arguments": {"type": "object", "properties": {"seconds": {"type": "integer"}}},
+    }], lambda name, arguments, confirmed: executions.append(arguments) or {"status": "scheduled"})
+    event = {
+        "call_id": "same-call", "name": "timer", "arguments": '{"seconds":5}',
+        "response_id": "response-tool",
+    }
+
+    bridge._handle_tool_call_event(event)
+    bridge._handle_output_item_event({
+        "response_id": "response-tool",
+        "item": {"type": "function_call", **event},
+    })
+
+    assert executions == [{"seconds": 5}]
+    assert len(bridge.conversation.items) == 1
+    assert len(bridge.conversation.responses) == 1
+    assert [entry["type"] for entry in harness.journal.entries()] == ["tool_call", "tool_result"]
+
+
+def test_conflicting_tool_call_id_reuse_fails_closed(tmp_path):
+    harness = harness_at(tmp_path / "conflicting-tool.jsonl")
+    bridge = make_bridge(harness)
+    executions = []
+    emitted = []
+    bridge._schedule = emitted.append
+    bridge.set_tools([{
+        "name": "timer", "description": "Set a timer",
+        "arguments": {"type": "object", "properties": {"seconds": {"type": "integer"}}},
+    }], lambda name, arguments, confirmed: executions.append(arguments) or {"status": "scheduled"})
+
+    bridge._handle_tool_call_event({
+        "call_id": "reused", "name": "timer", "arguments": '{"seconds":5}',
+    })
+    bridge._handle_tool_call_event({
+        "call_id": "reused", "name": "timer", "arguments": '{"seconds":9}',
+    })
+
+    assert executions == [{"seconds": 5}]
+    assert emitted[-1]["type"] == "error"
+    assert len([item for item in harness.journal.entries() if item["type"] == "tool_result"]) == 1
+
+
+def test_concurrent_duplicate_tool_callbacks_claim_once(tmp_path):
+    harness = harness_at(tmp_path / "concurrent-tool.jsonl")
+    bridge = make_bridge(harness)
+    executions = []
+    barrier = threading.Barrier(8)
+    errors = []
+    bridge.set_tools([{
+        "name": "timer", "description": "Set a timer",
+        "arguments": {"type": "object", "properties": {"seconds": {"type": "integer"}}},
+    }], lambda name, arguments, confirmed: executions.append(arguments) or {"status": "scheduled"})
+    event = {"call_id": "concurrent", "name": "timer", "arguments": '{"seconds":3}'}
+
+    def invoke():
+        try:
+            barrier.wait()
+            bridge._handle_tool_call_event(event)
+        except Exception as exc:
+            errors.append(exc)
+
+    threads = [threading.Thread(target=invoke) for _ in range(8)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert errors == []
+    assert executions == [{"seconds": 3}]
+    assert len(bridge.conversation.items) == 1
+    assert len(bridge.conversation.responses) == 1
+
+
 def test_confirmed_tool_waits_for_explicit_approval(tmp_path):
     harness = harness_at(tmp_path / "confirm.jsonl")
     bridge = make_bridge(harness)

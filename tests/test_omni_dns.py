@@ -42,10 +42,14 @@ def scheduler_bridge():
     bridge._response_pending = False
     bridge._active_response_ids = set()
     bridge._cancelled_response_ids = set()
+    bridge._speech_started_response_ids = set()
     bridge._queued_response = None
     bridge._inflight_response = None
     bridge._response_sequence = 0
     bridge._cancel_when_created = False
+    bridge._barge_in_pending = False
+    bridge._early_terminal_response_ids = set()
+    bridge._dialogue_generation = 0
     bridge._response_text = {}
     bridge._active_response_requests = {}
     bridge._output_channels_seen = set()
@@ -376,6 +380,29 @@ def test_conflict_requeues_inflight_until_provider_is_idle():
     assert bridge._response_pending
 
 
+def test_conflict_sentinel_accepts_terminal_event_real_response_id():
+    bridge = scheduler_bridge()
+    bridge.request_response("help now", priority=100)
+    bridge._response_conflict()
+
+    bridge._response_finished({"type": "response.done", "response": {"id": "actual-provider-id"}})
+
+    assert bridge._active_response_ids == set()
+    assert bridge._response_pending
+    assert len(bridge.conversation.created) == 2
+
+
+def test_conflict_sentinel_has_watchdog_recovery():
+    bridge = scheduler_bridge()
+    scheduled = []
+    bridge._schedule_response_watchdog = lambda *args: scheduled.append(args)
+    bridge.request_response("help now", priority=100)
+
+    bridge._response_conflict()
+
+    assert scheduled[-1] == ("finish", "provider-active", 0)
+
+
 def test_user_barge_in_drops_stale_proactive_request():
     bridge = scheduler_bridge()
     bridge._active_response_ids = {"response-active"}
@@ -466,6 +493,110 @@ def test_interrupt_waits_for_response_created_before_cancelling():
 
     bridge._response_created({"response": {"id": "response-low"}})
     assert bridge.conversation.cancelled == 1
+
+
+def test_pending_finish_clause_policy_is_preserved_before_created():
+    bridge = scheduler_bridge()
+    bridge._trace = lambda *args, **kwargs: None
+    bridge.request_response("finish this clause", speech_policy="finish-clause")
+
+    assert bridge.handle_user_speech_started() == "deferred"
+    assert bridge.conversation.cancelled == 0
+    assert bridge._barge_in_pending
+
+
+def test_create_watchdog_recovers_queue_without_replaying_orphan():
+    bridge = scheduler_bridge()
+    traced = []
+    reconnects = []
+    bridge._trace = lambda event, payload, response_id=None: traced.append((event, payload))
+    bridge._schedule_reconnect = reconnects.append
+    bridge.request_response("possibly accepted", priority=10)
+    bridge.request_response("new user turn", priority=100)
+
+    bridge._response_watchdog_fired("create", 1, 0)
+
+    assert reconnects == ["response-create-timeout"]
+    assert bridge._queued_response.instructions == "new user turn"
+    assert any(event == "response.watchdog.timeout" for event, _ in traced)
+    bridge._reset_scheduler_after_reconnect()
+    assert [item["instructions"] for item in bridge.conversation.created] == [
+        "possibly accepted", "new user turn",
+    ]
+
+
+def test_finish_watchdog_recovers_active_orphan_and_preserves_queue():
+    bridge = scheduler_bridge()
+    reconnects = []
+    bridge._trace = lambda *args, **kwargs: None
+    bridge._schedule_reconnect = reconnects.append
+    bridge.request_response("old answer")
+    bridge._response_created({"response": {"id": "orphan"}})
+    bridge.request_response("new answer", priority=100)
+
+    bridge._response_watchdog_fired("finish", "orphan", 0)
+
+    assert reconnects == ["response-finish-timeout"]
+    bridge._reset_scheduler_after_reconnect()
+    assert bridge._response_pending
+    assert bridge._inflight_response.instructions == "new answer"
+
+
+def test_provider_successor_reconciles_active_orphan():
+    bridge = scheduler_bridge()
+    traced = []
+    bridge._trace = lambda event, payload, response_id=None: traced.append((event, payload))
+    bridge.request_response("old answer")
+    bridge._response_created({"response": {"id": "old"}})
+
+    bridge._response_created({"response": {"id": "successor"}})
+
+    assert bridge._active_response_ids == {"successor"}
+    assert "old" not in bridge._active_response_requests
+    assert any(event == "response.orphan.reconciled" for event, _ in traced)
+
+
+def test_terminal_before_created_reconciles_and_dispatches_queue():
+    bridge = scheduler_bridge()
+    bridge._trace = lambda *args, **kwargs: None
+    bridge.request_response("first")
+    bridge.request_response("second", priority=100)
+
+    bridge._response_finished({"type": "response.done", "response": {"id": "first-id"}})
+    bridge._response_created({"response": {"id": "first-id"}})
+
+    assert bridge._response_pending
+    assert bridge._inflight_response.instructions == "second"
+    assert bridge._active_response_ids == set()
+
+
+def test_duplicate_created_after_finish_does_not_resurrect_response():
+    bridge = scheduler_bridge()
+    bridge._trace = lambda *args, **kwargs: None
+    bridge.request_response("answer")
+    bridge._response_created({"response": {"id": "completed"}})
+    bridge._response_finished({"type": "response.done", "response": {"id": "completed"}})
+
+    bridge._response_created({"response": {"id": "completed"}})
+
+    assert bridge._active_response_ids == set()
+    assert not bridge._response_pending
+
+
+def test_long_ordered_scheduler_replay_never_leaves_orphan_state():
+    bridge = scheduler_bridge()
+    bridge._trace = lambda *args, **kwargs: None
+    for index in range(500):
+        bridge.request_response(f"turn-{index}")
+        response_id = f"response-{index}"
+        bridge._response_created({"response": {"id": response_id}})
+        bridge._response_created({"response": {"id": response_id}})
+        bridge._response_finished({"type": "response.done", "response": {"id": response_id}})
+        bridge._response_finished({"type": "response.done", "response": {"id": response_id}})
+
+    assert not bridge._response_pending
+    assert bridge._active_response_ids == set()
+    assert bridge._queued_response is None
 
 
 def test_video_waits_for_audio_and_coalesces_pending_frames():

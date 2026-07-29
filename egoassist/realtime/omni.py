@@ -29,6 +29,14 @@ _DASHSCOPE_HOST = "dashscope.aliyuncs.com"
 LOGGER = logging.getLogger(__name__)
 
 
+def _bounded_timeout(name: str, default: float, minimum: float, maximum: float) -> float:
+    try:
+        value = float(os.getenv(name, str(default)))
+    except (TypeError, ValueError):
+        return default
+    return max(minimum, min(maximum, value))
+
+
 @dataclass(frozen=True)
 class _ResponseRequest:
     instructions: str
@@ -373,6 +381,13 @@ class OmniBrowserBridge:
         self._response_sequence = 0
         self._cancel_when_created = False
         self._barge_in_pending = False
+        self._early_terminal_response_ids: set[str] = set()
+        self._response_create_timeout = _bounded_timeout(
+            "EGOASSIST_RESPONSE_CREATE_TIMEOUT", 5.0, 1.0, 30.0,
+        )
+        self._response_finish_timeout = _bounded_timeout(
+            "EGOASSIST_RESPONSE_FINISH_TIMEOUT", 45.0, 5.0, 300.0,
+        )
         self._output_channels_seen: set[tuple[str, str]] = set()
         self._suppressed_output_channels_seen: set[tuple[str, str]] = set()
         self._response_text: dict[str, str] = {}
@@ -380,6 +395,7 @@ class OmniBrowserBridge:
         self._provider_tools: list[dict[str, Any]] = []
         self._tool_handler: Callable[[str, dict[str, Any], bool], dict[str, Any]] | None = None
         self._pending_tool_calls: dict[str, dict[str, Any]] = {}
+        self._tool_call_signatures: dict[str, tuple[str, str]] = {}
         self._assistant_transcript_buffer = ""
         self._assistant_transcript_buffers: dict[str, str] = {}
         self._last_assistant_utterance = ""
@@ -604,6 +620,7 @@ class OmniBrowserBridge:
             self._cancelled_response_ids.clear()
             self._speech_started_response_ids.clear()
             self._active_response_requests.clear()
+            self._early_terminal_response_ids.clear()
             self._inflight_response = None
             self._cancel_when_created = False
             self._barge_in_pending = False
@@ -720,7 +737,7 @@ class OmniBrowserBridge:
                 return "already-handled"
             handled.update(response_keys)
             requests = list(getattr(self, "_active_response_requests", {}).values())
-            current = max(requests, key=lambda item: item.sequence) if requests else None
+            current = max(requests, key=lambda item: item.sequence) if requests else self._inflight_response
             policy = current.speech_policy if current else "immediate"
             reason = current.reason if current else "provider-or-untracked-response"
             if policy == "protected":
@@ -930,6 +947,24 @@ class OmniBrowserBridge:
                 "callId": call_id or None, "name": name or None, "arguments": raw_arguments,
             }, response_id=response_id)
             return
+        signature = (name, json.dumps(arguments, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
+        claim, known = self._claim_tool_call(call_id, signature)
+        if claim != "new":
+            if claim == "duplicate":
+                self._trace("tool.call.duplicate_suppressed", {
+                    "callId": call_id, "name": name,
+                }, response_id=response_id)
+            else:
+                self._trace("tool.call.conflict_rejected", {
+                    "callId": call_id,
+                    "originalName": known[0],
+                    "conflictingName": name,
+                }, response_id=response_id)
+                self._schedule({
+                    "type": "error",
+                    "message": "Provider reused a tool call ID with conflicting arguments; execution was blocked.",
+                })
+            return
         if self._context_harness:
             self._context_harness.record_tool_call(
                 call_id, name, arguments, response_id=response_id,
@@ -961,6 +996,47 @@ class OmniBrowserBridge:
             })
             return
         self._complete_tool_call(call_id, name, result, False)
+
+    def _claim_tool_call(
+        self,
+        call_id: str,
+        signature: tuple[str, str],
+    ) -> tuple[str, tuple[str, str] | None]:
+        durable: tuple[str, str] | None = None
+        with self._response_lock:
+            known = getattr(self, "_tool_call_signatures", {}).get(call_id)
+        harness = getattr(self, "_context_harness", None)
+        if known is None and harness:
+            for entry in reversed(harness.journal.entries()):
+                if entry.get("type") == "tool_call" and str(entry.get("callId", "")) == call_id:
+                    durable = (
+                        str(entry.get("name", "")),
+                        json.dumps(entry.get("arguments", {}), ensure_ascii=False, sort_keys=True, separators=(",", ":")),
+                    )
+                    break
+        with self._response_lock:
+            values = getattr(self, "_tool_call_signatures", None)
+            if values is None:
+                values = {}
+                self._tool_call_signatures = values
+            known = values.get(call_id) or durable
+            if known is not None:
+                values[call_id] = known
+                return ("duplicate" if known == signature else "conflict"), known
+            values[call_id] = signature
+            while len(values) > 512:
+                values.pop(next(iter(values)))
+            return "new", None
+
+    def _remember_tool_call_signature(self, call_id: str, signature: tuple[str, str]) -> None:
+        with self._response_lock:
+            values = getattr(self, "_tool_call_signatures", None)
+            if values is None:
+                values = {}
+                self._tool_call_signatures = values
+            values[call_id] = signature
+            while len(values) > 512:
+                values.pop(next(iter(values)))
 
     def confirm_tool(self, call_id: str, accepted: bool) -> bool:
         pending = self._pending_tool_calls.pop(str(call_id), None)
@@ -1038,6 +1114,12 @@ class OmniBrowserBridge:
     def set_context_harness(self, harness: ContextHarness) -> None:
         self._context_harness = harness
         self._pending_tool_calls = harness.journal.pending_tool_confirmations()
+        for entry in harness.journal.entries()[-512:]:
+            if entry.get("type") == "tool_call" and entry.get("callId"):
+                self._remember_tool_call_signature(str(entry["callId"]), (
+                    str(entry.get("name", "")),
+                    json.dumps(entry.get("arguments", {}), ensure_ascii=False, sort_keys=True, separators=(",", ":")),
+                ))
 
     def inject_context_data(self, label: str, value: Any) -> bool:
         """Append low-trust structured data without elevating it to instructions."""
@@ -1188,6 +1270,9 @@ class OmniBrowserBridge:
                 instructions=request.instructions,
                 output_modalities=[self.modalities.TEXT] if request.output_mode == "text" else [self.modalities.AUDIO, self.modalities.TEXT],
             )
+            self._schedule_response_watchdog(
+                "create", request.sequence, getattr(self, "_dialogue_generation", 0),
+            )
         except Exception:
             with self._response_lock:
                 if self._inflight_response == request:
@@ -1195,47 +1280,131 @@ class OmniBrowserBridge:
                     self._inflight_response = None
             raise
 
+    def _schedule_response_watchdog(self, stage: str, identity: int | str, generation: int) -> None:
+        loop = getattr(self, "loop", None)
+        if not loop or not loop.is_running():
+            return
+        timeout = (
+            getattr(self, "_response_create_timeout", 5.0)
+            if stage == "create"
+            else getattr(self, "_response_finish_timeout", 45.0)
+        )
+
+        def install() -> None:
+            loop.call_later(timeout, self._response_watchdog_fired, stage, identity, generation)
+
+        loop.call_soon_threadsafe(install)
+
+    def _response_watchdog_fired(self, stage: str, identity: int | str, generation: int) -> None:
+        if self.closed or generation != getattr(self, "_dialogue_generation", 0):
+            return
+        with self._response_lock:
+            if stage == "create":
+                request = self._inflight_response
+                orphaned = bool(
+                    self._response_pending and request and request.sequence == identity
+                )
+            else:
+                orphaned = str(identity) in self._active_response_ids
+            queued = self._request_public(self._queued_response)
+        if not orphaned:
+            return
+        self._trace("response.watchdog.timeout", {
+            "stage": stage,
+            "identity": identity,
+            "generation": generation,
+            "queued": queued,
+            "recovery": "dialogue-reconnect",
+        }, response_id=str(identity) if stage == "finish" else None)
+        self._schedule_reconnect(f"response-{stage}-timeout")
+
     def _response_created(self, payload: dict[str, Any]) -> None:
         response_id = self._payload_response_id(payload)
         should_cancel = False
+        stale: list[tuple[str, _ResponseRequest | None]] = []
+        duplicate = False
+        terminal_arrived_first = False
+        should_dispatch = False
         with self._response_lock:
-            request = self._inflight_response
-            self._response_pending = False
-            self._inflight_response = None
-            provider_initiated = request is None
-            if provider_initiated:
-                self._response_sequence += 1
-                request = _ResponseRequest(
-                    instructions="", priority=50, sequence=self._response_sequence,
-                    reason="provider-auto-user-turn", requested_at=time.monotonic(),
-                    output_mode="audio", purpose="conversation",
+            if response_id and response_id in self._active_response_ids:
+                duplicate = True
+                request = self._active_response_requests.get(response_id)
+                provider_initiated = False
+            else:
+                request = self._inflight_response
+                provider_initiated = request is None
+            if duplicate:
+                pass
+            else:
+                if provider_initiated and response_id and self._active_response_ids:
+                    stale = [
+                        (item, self._active_response_requests.get(item))
+                        for item in self._active_response_ids if item != "provider-active"
+                    ]
+                    self._active_response_ids.clear()
+                    self._active_response_requests.clear()
+                    self._cancelled_response_ids.clear()
+                    self._speech_started_response_ids.clear()
+                self._response_pending = False
+                self._inflight_response = None
+                if provider_initiated:
+                    self._response_sequence += 1
+                    request = _ResponseRequest(
+                        instructions="", priority=50, sequence=self._response_sequence,
+                        reason="provider-auto-user-turn", requested_at=time.monotonic(),
+                        output_mode="audio", purpose="conversation",
+                    )
+                terminal_arrived_first = bool(
+                    response_id and response_id in getattr(self, "_early_terminal_response_ids", set())
                 )
-            if response_id:
-                self._active_response_ids.add(response_id)
-                if not hasattr(self, "_active_response_requests"):
-                    self._active_response_requests = {}
-                self._active_response_requests[response_id] = request
-                speech_started = getattr(self, "_speech_started_response_ids", set())
-                if "provider-pending" in speech_started:
-                    speech_started.discard("provider-pending")
-                    speech_started.add(response_id)
-            if response_id and request.output_mode == "text":
-                if not hasattr(self, "_response_text"):
-                    self._response_text = {}
-                self._response_text[response_id] = ""
-            should_cancel = self._cancel_when_created
-            if should_cancel and response_id:
-                cancelled = getattr(self, "_cancelled_response_ids", None)
-                if cancelled is None:
-                    cancelled = set()
-                    self._cancelled_response_ids = cancelled
-                cancelled.add(response_id)
-            self._cancel_when_created = False
+                if response_id:
+                    getattr(self, "_early_terminal_response_ids", set()).discard(response_id)
+                if response_id and not terminal_arrived_first:
+                    self._active_response_ids.add(response_id)
+                    self._active_response_requests[response_id] = request
+                    speech_started = getattr(self, "_speech_started_response_ids", set())
+                    if "provider-pending" in speech_started:
+                        speech_started.discard("provider-pending")
+                        speech_started.add(response_id)
+                if response_id and request.output_mode == "text" and not terminal_arrived_first:
+                    self._response_text[response_id] = ""
+                should_cancel = self._cancel_when_created and not terminal_arrived_first
+                if should_cancel and response_id:
+                    self._cancelled_response_ids.add(response_id)
+                self._cancel_when_created = False
+                should_dispatch = terminal_arrived_first and self._queued_response is not None
+        if duplicate:
+            self._trace("response.created.duplicate", {}, response_id=response_id)
+            return
+        for stale_id, stale_request in stale:
+            self._persist_response_interruption(stale_id, stale_request, "provider-successor-created")
+        if stale:
+            self._trace("response.orphan.reconciled", {
+                "reason": "provider-successor-created",
+                "staleResponseIds": [item[0] for item in stale],
+            }, response_id=response_id)
         self._trace(
             "response.created",
             {"sequence": request.sequence, "purpose": request.purpose, "outputMode": request.output_mode, "providerInitiated": provider_initiated},
             response_id=response_id,
         )
+        if terminal_arrived_first:
+            self._trace("response.orphan.reconciled", {
+                "reason": "terminal-arrived-before-created",
+            }, response_id=response_id)
+            if should_dispatch:
+                self._schedule_queued_dispatch()
+            return
+        if not response_id:
+            self._trace("response.created.unattributed", {
+                "recovery": "dialogue-reconnect",
+            })
+            self._schedule_reconnect("response-created-without-id")
+            return
+        if response_id:
+            self._schedule_response_watchdog(
+                "finish", response_id, getattr(self, "_dialogue_generation", 0),
+            )
         if should_cancel:
             self.conversation.cancel_response()
 
@@ -1245,19 +1414,54 @@ class OmniBrowserBridge:
         harness = getattr(self, "_context_harness", None)
         should_dispatch = False
         with self._response_lock:
-            cancelled_ids = getattr(self, "_cancelled_response_ids", set())
-            locally_cancelled = bool(response_id and response_id in cancelled_ids)
-            if response_id:
-                self._active_response_ids.discard(response_id)
-                self._active_response_ids.discard("provider-active")
+            known_response = bool(
+                response_id and (
+                    response_id in self._active_response_ids
+                    or "provider-active" in self._active_response_ids
+                )
+            )
+            if response_id and not known_response:
+                if self._response_pending:
+                    early = getattr(self, "_early_terminal_response_ids", None)
+                    if early is None:
+                        early = set()
+                        self._early_terminal_response_ids = early
+                    if len(early) >= 128:
+                        early.clear()
+                    early.add(response_id)
+                    disposition = "buffered-before-created"
+                else:
+                    disposition = "duplicate-or-unattributed"
             else:
-                self._active_response_ids.discard("provider-active")
-            request = getattr(self, "_active_response_requests", {}).pop(response_id, None) if response_id else None
-            if response_id:
-                getattr(self, "_response_text", {}).pop(response_id, None)
-                cancelled_ids.discard(response_id)
-                getattr(self, "_speech_started_response_ids", set()).discard(response_id)
-            should_dispatch = not self._response_pending and not self._active_response_ids and self._queued_response is not None
+                disposition = None
+            if disposition:
+                request = None
+            else:
+                cancelled_ids = getattr(self, "_cancelled_response_ids", set())
+                locally_cancelled = bool(response_id and response_id in cancelled_ids)
+                if response_id:
+                    terminal = getattr(self, "_early_terminal_response_ids", None)
+                    if terminal is None:
+                        terminal = set()
+                        self._early_terminal_response_ids = terminal
+                    if len(terminal) >= 128:
+                        terminal.clear()
+                    terminal.add(response_id)
+                    self._active_response_ids.discard(response_id)
+                    self._active_response_ids.discard("provider-active")
+                else:
+                    self._active_response_ids.discard("provider-active")
+                request = getattr(self, "_active_response_requests", {}).pop(response_id, None) if response_id else None
+                if response_id:
+                    getattr(self, "_response_text", {}).pop(response_id, None)
+                    cancelled_ids.discard(response_id)
+                    getattr(self, "_speech_started_response_ids", set()).discard(response_id)
+                should_dispatch = not self._response_pending and not self._active_response_ids and self._queued_response is not None
+        if disposition:
+            self._trace("response.terminal.reconciled", {
+                "disposition": disposition, "status": event_type,
+            }, response_id=response_id)
+            return
         fragment = self._pop_assistant_transcript(response_id)
         purpose = request.purpose if request else "conversation"
         interrupted = locally_cancelled or event_type in {"response.cancelled", "response.failed"}
@@ -1358,16 +1562,27 @@ class OmniBrowserBridge:
                 if response_id != "provider-active"
             ]
         for response_id, request in active:
-            fragment = self._pop_assistant_transcript(response_id)
-            purpose = request.purpose if request else "conversation"
-            if fragment and purpose in {"conversation", "proactive-utterance"}:
-                harness.record_assistant(
-                    fragment,
-                    response_id=response_id,
-                    status="interrupted",
-                    purpose=purpose,
-                )
-            harness.record_interruption(response_id, reason=reason)
+            self._persist_response_interruption(response_id, request, reason)
+
+    def _persist_response_interruption(
+        self,
+        response_id: str,
+        request: _ResponseRequest | None,
+        reason: str,
+    ) -> None:
+        harness = getattr(self, "_context_harness", None)
+        if harness is None:
+            return
+        fragment = self._pop_assistant_transcript(response_id)
+        purpose = request.purpose if request else "conversation"
+        if fragment and purpose in {"conversation", "proactive-utterance"}:
+            harness.record_assistant(
+                fragment,
+                response_id=response_id,
+                status="interrupted",
+                purpose=purpose,
+            )
+        harness.record_interruption(response_id, reason=reason)
 
     def _response_conflict(self) -> None:
         with self._response_lock:
@@ -1383,6 +1598,9 @@ class OmniBrowserBridge:
             if not self._active_response_ids:
                 self._active_response_ids.add("provider-active")
         self._trace("response.conflict.requeued", {"sequence": inflight.sequence if inflight else None})
+        self._schedule_response_watchdog(
+            "finish", "provider-active", getattr(self, "_dialogue_generation", 0),
+        )
 
     def _response_absent_after_cancel(self) -> None:
         """Reconcile a benign cancel/done race reported by the provider."""

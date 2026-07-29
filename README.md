@@ -92,6 +92,36 @@ Provider event names are not visibility permissions. Each dialogue response ID i
 
 A Qwen `response idle timeout` or provider close triggers bounded microphone buffering and automatic dialogue-session replacement. The browser WebSocket stays open and shows `reconnecting` followed by a new `ready` event. Perception-session recovery is independent, so one lane cannot corrupt the other's scheduler state.
 
+### Realtime liveness contract
+
+Provider callbacks are treated as at-least-once, possibly missing, duplicated, or reordered events. A dispatched request
+must either receive `response.created` within the create deadline and a terminal event within the finish deadline, or
+the disposable dialogue projection is replaced. Generation plus request sequence/response ID makes stale watchdogs
+no-ops. Reconnect preserves only the highest-priority queued request; it does not replay an orphan that may already have
+spoken. A provider-created successor reconciles older active IDs, and terminal-before-created plus duplicate callbacks
+are explicitly audited without blocking the queue.
+
+```text
+EGOASSIST_RESPONSE_CREATE_TIMEOUT=5
+EGOASSIST_RESPONSE_FINISH_TIMEOUT=45
+```
+
+The bounds are engineering controls, not conversational policies. `immediate`, `finish-clause`, and `protected` still
+decide whether user speech interrupts an attributable response, including while it is waiting for `response.created`.
+No natural-language stop phrase is hard-coded. Tool callback delivery uses an atomic canonical `call_id` claim: exact
+duplicates are suppressed, conflicting reuse fails closed, and the case journal restores idempotency across reconnects.
+
+Microphone chunks and latest-only camera frames are transport telemetry rather than individual semantic observations.
+They are journaled as bounded `media.audio.batch` and `media.video.batch` totals and flushed when the WebSocket closes;
+transcripts, decisions, memory events, tool effects, response transitions, and checkpoints remain individually durable.
+This avoids an `fsync` for every media chunk without removing counts or byte-volume auditability.
+
+The original freezes recurred because earlier tests assumed one ordered `created -> done` pair, while the real provider
+omitted terminal events, delayed `created`, and emitted duplicate tool callbacks. Per-chunk synchronous audit writes
+also added avoidable event-loop pressure. The release gate now includes production-timeline replay for missing,
+duplicate, and reordered transitions, concurrent tool-call delivery, long scheduler sequences, and high-volume media
+aggregation. A passing happy-path suite alone is not considered evidence of realtime liveness.
+
 Turn-taking is Skill-configurable:
 
 - `immediate`: stop ordinary guidance on user speech;
