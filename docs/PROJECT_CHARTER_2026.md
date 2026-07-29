@@ -341,7 +341,7 @@ is marked complete only after its exit gate and regression suite pass.
 | Milestone | Status | Evidence |
 |---|---|---|
 | M0 Truth reset | Complete | Capability catalog drives prompts, provider tools, APIs, and the Task Center; unavailable adapters return `unsupported` or `demo-only`; the local pseudo-scheduler is disabled; full regression and frontend syntax checks pass. |
-| M1 Foundation | In progress | Contracts, ports, migrations, and tracing are not yet the runtime source of truth. |
+| M1 Foundation | Complete | Pydantic contracts, typed infrastructure ports, SQLAlchemy models, reversible Alembic migration `b0688201c8ee`, OpenTelemetry ID filtering, and an idempotent JSONL compatibility projector are implemented and tested. Runtime state now projects each case journal into the product DB without replacing TimelineMemory. |
 | M2 Reliable timer | Not started | Timer delivery remains unavailable. |
 | M3 Interaction transport | Not started | Existing provider bridge remains active pending LiveKit migration. |
 | M4 Artifacts and human help | Not started | Both remain unavailable or demo-only. |

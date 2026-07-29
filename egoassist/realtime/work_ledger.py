@@ -80,6 +80,7 @@ class CaseWorkLedger:
                 "providerItemId": str(provider_item_id) if provider_item_id else None,
                 "sequence": int(sequence) if sequence is not None else None,
                 "status": "received",
+                "correlation": {"turnId": stable_id},
             },
             idempotency_key=f"turn-inbox:{stable_id}",
         )
@@ -156,6 +157,7 @@ class CaseWorkLedger:
             "payload": dict(payload or {}),
             "skillRef": dict(skill_ref or {}),
             "status": status,
+            "correlation": {"turnId": str(turn_id), "intentId": stable_id},
         }, idempotency_key=f"intent:{stable_id}")
 
     def set_intent_status(
@@ -259,12 +261,22 @@ class CaseWorkLedger:
         if str(intent_id) not in self.intents():
             raise ValueError(f"unknown intent: {intent_id}")
         stable_id = str(job_id or uuid4().hex[:16])
+        intent = self.intents()[str(intent_id)]
+        job_payload = dict(payload or {})
+        correlation = {
+            "turnId": str(intent.get("turnId", "")),
+            "intentId": str(intent_id),
+            "jobId": stable_id,
+        }
+        if job_payload.get("workflowId"):
+            correlation["workflowId"] = str(job_payload["workflowId"])
         return self.journal.append("job_ledger", {
             "jobId": stable_id,
             "intentId": str(intent_id),
             "kind": str(kind),
-            "payload": dict(payload or {}),
+            "payload": job_payload,
             "status": status,
+            "correlation": correlation,
         }, idempotency_key=f"job:{stable_id}")
 
     def set_job_status(
@@ -337,6 +349,18 @@ class CaseWorkLedger:
         if job_id is not None and str(job_id) not in self.jobs():
             raise ValueError(f"unknown job: {job_id}")
         stable_id = str(result_id or uuid4().hex[:16])
+        intent = self.intents()[str(intent_id)]
+        correlation = {
+            "turnId": str(intent.get("turnId", "")),
+            "intentId": str(intent_id),
+            "resultId": stable_id,
+        }
+        if job_id is not None:
+            job = self.jobs()[str(job_id)]
+            correlation["jobId"] = str(job_id)
+            workflow_id = (job.get("payload") or {}).get("workflowId")
+            if workflow_id:
+                correlation["workflowId"] = str(workflow_id)
         return self.journal.append("result_inbox", {
             "resultId": stable_id,
             "intentId": str(intent_id),
@@ -345,6 +369,7 @@ class CaseWorkLedger:
             "priority": int(priority),
             "delivery": str(delivery),
             "status": "pending",
+            "correlation": correlation,
         }, idempotency_key=f"result:{stable_id}")
 
     def set_result_status(

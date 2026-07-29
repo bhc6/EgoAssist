@@ -48,6 +48,7 @@ from egoassist.realtime import (
 )
 from egoassist.realtime.media_audit import MediaAuditAccumulator
 from egoassist.realtime.tools import tool_result_succeeded
+from egoassist.product import ProductDatabase
 
 
 ROOT = Path(__file__).resolve().parent
@@ -205,6 +206,8 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
         owner_user_id="local-default", scope="participant",
     )
     identity = IdentityStore(Path(memory_path).with_name("identity.sqlite3"))
+    product_database = ProductDatabase(Path(memory_path).with_name("product.sqlite3"))
+    product_database.create_schema()
     user_memory_root = Path(memory_path).with_name("users")
     user_memories: dict[str, PreferenceMemory] = {}
     case_memories: dict[tuple[str, str], PreferenceMemory] = {}
@@ -846,6 +849,12 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
         preference_settings = active_policy["components"]["preference"]
         episodic_settings = active_policy["components"]["episodic"]
         harness_snapshot = harness_override.snapshot() if harness_override else None
+        product_projection = None
+        if harness_override is not None:
+            product_projection = product_database.project_journal(
+                harness_override.journal,
+                user_id=user_scope,
+            )
         work_ledger_snapshot = (
             CaseWorkLedger(harness_override.journal).snapshot()
             if harness_override else {
@@ -995,6 +1004,11 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                 "sessionId": visible_session_id,
                 "scheduler": scheduler,
                 "workLedger": work_ledger_snapshot,
+                "productPersistence": {
+                    "status": "projected" if product_projection is not None else "idle",
+                    "projection": product_projection,
+                    "source": "session-journal-compatible-projector",
+                },
                 "capabilityCatalog": capability_catalog,
                 "turnTakingPolicy": {
                     **default_policy.public(),
