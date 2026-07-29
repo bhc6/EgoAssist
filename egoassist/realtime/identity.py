@@ -5,12 +5,15 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 import hashlib
 import hmac
+import json
 import re
 import secrets
 import sqlite3
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
+
+from .memory_policy import default_memory_policy, normalize_memory_policy
 
 
 _USERNAME = re.compile(r"^[\w.-]{3,32}$", re.UNICODE)
@@ -68,7 +71,8 @@ class IdentityStore:
                     user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
                     label TEXT NOT NULL DEFAULT '',
                     created_at TEXT NOT NULL,
-                    last_seen_at TEXT NOT NULL
+                    last_seen_at TEXT NOT NULL,
+                    memory_policy TEXT NOT NULL DEFAULT '{}'
                 );
                 CREATE INDEX IF NOT EXISTS context_sessions_user_id
                     ON context_sessions(user_id, last_seen_at DESC);
@@ -81,6 +85,10 @@ class IdentityStore:
             if "label" not in columns:
                 connection.execute(
                     "ALTER TABLE context_sessions ADD COLUMN label TEXT NOT NULL DEFAULT ''"
+                )
+            if "memory_policy" not in columns:
+                connection.execute(
+                    "ALTER TABLE context_sessions ADD COLUMN memory_policy TEXT NOT NULL DEFAULT '{}'"
                 )
 
     @staticmethod
@@ -194,8 +202,8 @@ class IdentityStore:
                 raise PermissionError("context session belongs to another user")
             if row is None:
                 connection.execute(
-                    "INSERT INTO context_sessions (id, user_id, label, created_at, last_seen_at) VALUES (?, ?, ?, ?, ?)",
-                    (chosen, user_id, case_label, now, now),
+                    "INSERT INTO context_sessions (id, user_id, label, created_at, last_seen_at, memory_policy) VALUES (?, ?, ?, ?, ?, ?)",
+                    (chosen, user_id, case_label, now, now, json.dumps(default_memory_policy(), separators=(",", ":"))),
                 )
             else:
                 if label is None:
@@ -213,25 +221,51 @@ class IdentityStore:
     def get_context_session(self, user_id: str, session_id: str) -> dict[str, Any]:
         with self._connect() as connection:
             row = connection.execute(
-                "SELECT id, user_id, label, created_at, last_seen_at FROM context_sessions WHERE id = ?",
+                "SELECT id, user_id, label, created_at, last_seen_at, memory_policy FROM context_sessions WHERE id = ?",
                 (session_id,),
             ).fetchone()
         if row is None:
             raise KeyError("unknown experiment case")
         if str(row["user_id"]) != user_id:
             raise PermissionError("context session belongs to another user")
-        return dict(row)
+        return self._public_context_session(row)
 
     def list_context_sessions(self, user_id: str, *, limit: int = 50) -> list[dict[str, Any]]:
         with self._connect() as connection:
             rows = connection.execute(
                 """
-                SELECT id, label, created_at, last_seen_at FROM context_sessions
+                SELECT id, label, created_at, last_seen_at, memory_policy FROM context_sessions
                 WHERE user_id = ? ORDER BY last_seen_at DESC LIMIT ?
                 """,
                 (user_id, max(1, min(200, int(limit)))),
             ).fetchall()
-        return [dict(row) for row in rows]
+        return [self._public_context_session(row) for row in rows]
+
+    @staticmethod
+    def _public_context_session(row: sqlite3.Row) -> dict[str, Any]:
+        result = dict(row)
+        raw_policy = result.pop("memory_policy", "{}")
+        try:
+            result["memoryPolicy"] = normalize_memory_policy(json.loads(str(raw_policy) or "{}"))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            result["memoryPolicy"] = default_memory_policy()
+        return result
+
+    def update_memory_policy(
+        self,
+        user_id: str,
+        session_id: str,
+        value: dict[str, Any],
+    ) -> dict[str, Any]:
+        policy = normalize_memory_policy(value)
+        self.get_context_session(user_id, session_id)
+        now = _timestamp()
+        with self._connect() as connection:
+            connection.execute(
+                "UPDATE context_sessions SET memory_policy = ?, last_seen_at = ? WHERE id = ? AND user_id = ?",
+                (json.dumps(policy, separators=(",", ":")), now, session_id, user_id),
+            )
+        return policy
 
 
 class SessionId:

@@ -19,6 +19,9 @@ from egoassist.realtime import (
     ContextHarness,
     ContextLayer,
     ContextSettings,
+    default_memory_policy,
+    memory_profiles,
+    normalize_memory_policy,
     PreferenceMemory,
     RealtimeEpisodeMemory,
     EventLedger,
@@ -96,6 +99,9 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
     identity = IdentityStore(Path(memory_path).with_name("identity.sqlite3"))
     user_memory_root = Path(memory_path).with_name("users")
     user_memories: dict[str, PreferenceMemory] = {}
+    case_memories: dict[tuple[str, str], PreferenceMemory] = {}
+    user_episodics: dict[str, RealtimeEpisodeMemory] = {}
+    case_episodics: dict[tuple[str, str], RealtimeEpisodeMemory] = {}
     user_runtimes: dict[str, SkillRuntime] = {}
     user_routing: dict[str, dict] = {}
     user_tools: dict[str, SkillToolExecutor] = {}
@@ -107,6 +113,52 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                 event_sink=trace_event,
             )
         return user_memories[user_id]
+
+    def episodic_for_user(user_id: str) -> RealtimeEpisodeMemory:
+        if user_id not in user_episodics:
+            user_episodics[user_id] = RealtimeEpisodeMemory(
+                user_memory_root / user_id / "episodes.json",
+                event_sink=trace_event,
+            )
+        return user_episodics[user_id]
+
+    def episodic_for_case(user_id: str, session_id: str) -> RealtimeEpisodeMemory:
+        key = (user_id, session_id)
+        if key not in case_episodics:
+            case_episodics[key] = RealtimeEpisodeMemory(
+                user_memory_root / user_id / "cases" / session_id / "episodes.json",
+                event_sink=trace_event,
+            )
+        return case_episodics[key]
+
+    def memory_for_case(user_id: str, session_id: str) -> PreferenceMemory:
+        key = (user_id, session_id)
+        if key not in case_memories:
+            case_memories[key] = PreferenceMemory(
+                user_memory_root / user_id / "cases" / session_id / "preferences.json",
+                event_sink=trace_event,
+            )
+        return case_memories[key]
+
+    def scoped_preference_memory(
+        user_id: str,
+        session_id: str | None,
+        policy: dict,
+    ) -> PreferenceMemory:
+        scope = policy["components"]["preference"]["scope"]
+        if scope == "case" and session_id:
+            return memory_for_case(user_id, session_id)
+        return memory_for_user(user_id)
+
+    def scoped_episodic_memory(
+        user_id: str,
+        session_id: str | None,
+        policy: dict,
+    ) -> RealtimeEpisodeMemory:
+        scope = policy["components"]["episodic"]["scope"]
+        if scope == "case" and session_id:
+            return episodic_for_case(user_id, session_id)
+        return episodic_for_user(user_id)
 
     def runtime_for_user(user_id: str) -> SkillRuntime:
         if user_id not in user_runtimes:
@@ -247,9 +299,17 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
         *,
         emit: bool = False,
         preference_memory: PreferenceMemory | None = None,
+        enabled: bool = True,
     ) -> dict:
         active_runtime = target_runtime or runtime
         active_memory = preference_memory or memory
+        if not enabled:
+            return {
+                "method": "disabled-by-memory-policy",
+                "query": {"task": None, "checkpoint": None},
+                "selected": None,
+                "candidates": [],
+            }
         if active_runtime.task is None:
             return {
                 "method": "exact-trigger-v1",
@@ -271,10 +331,11 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
         emit: bool = False,
         target_runtime: SkillRuntime | None = None,
         preference_memory: PreferenceMemory | None = None,
+        enabled: bool = True,
     ) -> dict | None:
         del memory_state
         selected = memory_retrieval(
-            target_runtime, emit=emit, preference_memory=preference_memory,
+            target_runtime, emit=emit, preference_memory=preference_memory, enabled=enabled,
         ).get("selected")
         return selected["record"] if selected else None
 
@@ -282,12 +343,14 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
         target_runtime: SkillRuntime | None = None,
         *,
         preference_memory: PreferenceMemory | None = None,
+        enabled: bool = True,
     ) -> tuple[dict | None, bool]:
         active_runtime = target_runtime or runtime
-        if active_runtime.task is None:
+        if active_runtime.task is None or not enabled:
             return None, False
         hint = find_memory_hint(
             emit=True, target_runtime=active_runtime, preference_memory=preference_memory,
+            enabled=enabled,
         )
         already_used = bool(hint and hint["id"] in active_runtime.task.announced_memory_ids)
         active_runtime.task.apply_memory_hint(hint)
@@ -301,13 +364,19 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
         harness_override: ContextHarness | None = None,
         tools_override: SkillToolExecutor | None = None,
         memory_override: PreferenceMemory | None = None,
+        episodic_override: RealtimeEpisodeMemory | None = None,
         media_override: dict | None = None,
         user_scope: str = "local-default",
+        memory_policy_override: dict | None = None,
     ):
         active_runtime = target_runtime or runtime
         active_routing = routing_override or routing_state
         active_tools = tools_override or tools
         active_memory = memory_override or memory
+        active_episodic = episodic_override or episodic
+        active_policy = normalize_memory_policy(memory_policy_override or default_memory_policy())
+        preference_settings = active_policy["components"]["preference"]
+        episodic_settings = active_policy["components"]["episodic"]
         harness_snapshot = harness_override.snapshot() if harness_override else None
         visible_events = (
             [{
@@ -350,19 +419,45 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
             "echoControl": "browser-webrtc-aec",
             "claimBoundary": "Logical channels are distinct; residual acoustic echo is observable but speaker identity is not guaranteed.",
         }
-        episodic_state = episodic.snapshot(
+        episodic_state = active_episodic.snapshot(
             session_id=harness_override.session_id if harness_override else None,
             user_scope=user_scope,
+            allow_cross_session=episodic_settings["scope"] == "participant",
         )
+        if not episodic_settings["enabled"]:
+            episodic_state = {
+                **episodic_state,
+                "retrieval": {
+                    "method": "disabled-by-memory-policy",
+                    "query": "",
+                    "scope": {
+                        "user": user_scope,
+                        "session": harness_override.session_id if harness_override else None,
+                        "allowCrossSession": episodic_settings["scope"] == "participant",
+                    },
+                    "minimumScore": None,
+                    "candidates": [],
+                    "selected": [],
+                    "injection": {"status": "disabled", "episodeIds": [], "evidence": []},
+                    "claimBoundary": "Episodic persistence, retrieval, and injection are disabled for this case.",
+                },
+            }
         if active_runtime.task is None:
             candidate = memory_state.get("candidate")
             generic_memory = {
-                "policy": "explicit-confirmation",
+                "policy": "explicit-confirmation" if preference_settings["enabled"] else "disabled-by-memory-policy",
                 "scope": {"skill": active_runtime.skill.name if active_runtime.skill else None, "task": None, "contextAnchor": None},
                 "evidence": {"status": "waiting", "text": "等待实时对话或感知证据", "source": "realtime-session"},
                 "candidate": {"status": "pending" if candidate else "none", "text": candidate.get("evidence") if candidate else "没有待确认候选"},
                 "confirmation": {"status": "none", "text": "尚无活动任务范围", "count": 0},
-                "retrieval": {"status": "no-match", "text": "确定任务后才执行精确偏好召回", **memory_retrieval(active_runtime, preference_memory=active_memory)},
+                "retrieval": {
+                    "status": "no-match" if preference_settings["enabled"] else "disabled",
+                    "text": "确定任务后才执行精确偏好召回" if preference_settings["enabled"] else "本案例已关闭确认偏好记忆",
+                    **memory_retrieval(
+                        active_runtime, preference_memory=active_memory,
+                        enabled=preference_settings["enabled"],
+                    ),
+                },
                 "impact": {"status": "none", "text": "不改变当前决策"},
                 "lastDecision": memory_state["decision"],
             }
@@ -374,6 +469,8 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
             }
             return {
                 "memory": memory_state,
+                "memoryPolicy": active_policy,
+                "memoryProfiles": memory_profiles(),
                 "memoryMechanism": generic_memory,
                 "task": None,
                 "genericDecision": generic_decision,
@@ -396,8 +493,8 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                 },
                 "memorySystems": [
                     {"id": "working", "name": "工作记忆", "status": "live" if bridges else "idle", "implementation": "Realtime 会话上下文与最近结构化事件"},
-                    {"id": "preference", "name": "偏好记忆", "status": "waiting-scope", "implementation": "任务确定后使用用户确认的精确触发"},
-                    {"id": "episodic", "name": "情景记忆", "status": "connected-summary", "implementation": "实时场景/话语摘要索引；不保存原始媒体"},
+                    {"id": "preference", "name": "偏好记忆", "status": "waiting-scope" if preference_settings["enabled"] else "disabled", "implementation": "任务确定后使用用户确认的精确触发"},
+                    {"id": "episodic", "name": "情景记忆", "status": "connected-summary" if episodic_settings["enabled"] else "disabled", "implementation": "实时场景/话语摘要索引；不保存原始媒体"},
                     {"id": "knowledge", "name": "知识记忆", "status": "unloaded", "implementation": "领域 Skill 尚未加载"},
                 ],
                 "knowledgeMechanism": {
@@ -421,7 +518,10 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
         task = active_runtime.task
         spec = active_runtime.task.spec
         task_state = task.snapshot()
-        retrieval = memory_retrieval(active_runtime, preference_memory=active_memory)
+        retrieval = memory_retrieval(
+            active_runtime, preference_memory=active_memory,
+            enabled=preference_settings["enabled"],
+        )
         hint = retrieval["selected"]["record"] if retrieval["selected"] else None
         hint_was_used = bool(hint and hint["id"] in task.announced_memory_ids)
         task_records = [
@@ -431,7 +531,7 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
         observation = task_state.get("observation") or {}
         candidate = memory_state.get("candidate")
         memory_mechanism = {
-            "policy": "explicit-confirmation",
+            "policy": "explicit-confirmation" if preference_settings["enabled"] else "disabled-by-memory-policy",
             "scope": {
                 "skill": active_runtime.skill.name,
                 "task": spec.id,
@@ -452,8 +552,8 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                 "count": len(task_records),
             },
             "retrieval": {
-                "status": "matched" if hint else "no-match",
-                "text": hint.get("prompt") if hint else "当前情境没有匹配记忆",
+                "status": "matched" if hint else "no-match" if preference_settings["enabled"] else "disabled",
+                "text": hint.get("prompt") if hint else "当前情境没有匹配记忆" if preference_settings["enabled"] else "本案例已关闭确认偏好记忆",
                 "memoryId": hint.get("id") if hint else None,
                 "method": retrieval["method"],
                 "query": retrieval["query"],
@@ -473,6 +573,8 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
         }
         return {
             "memory": memory_state,
+            "memoryPolicy": active_policy,
+            "memoryProfiles": memory_profiles(),
             "memoryMechanism": memory_mechanism,
             "task": task_state,
             "realtimeModel": model,
@@ -494,8 +596,8 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
             },
             "memorySystems": [
                 {"id": "working", "name": "工作记忆", "status": "live" if bridges else "idle", "implementation": "Realtime 会话上下文与最近结构化观测"},
-                {"id": "preference", "name": "偏好记忆", "status": "connected", "implementation": "用户确认 JSON + 精确触发"},
-                {"id": "episodic", "name": "情景记忆", "status": "connected-summary", "implementation": "实时场景/话语摘要索引；层次视觉后端仍为可替换离线实现"},
+                {"id": "preference", "name": "偏好记忆", "status": "connected" if preference_settings["enabled"] else "disabled", "implementation": "用户确认 JSON + 精确触发"},
+                {"id": "episodic", "name": "情景记忆", "status": "connected-summary" if episodic_settings["enabled"] else "disabled", "implementation": "实时场景/话语摘要索引；层次视觉后端仍为可替换离线实现"},
                 {"id": "knowledge", "name": "知识记忆", "status": "static-injection", "implementation": "Skill/Task 静态上下文，尚无运行时语义检索"},
             ],
             "knowledgeMechanism": {
@@ -704,6 +806,51 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
             "session": identity.get_context_session(user_id, session_id),
         }, status=201)
 
+    async def post_memory_policy(request):
+        user = request[user_key]
+        user_id = user["id"]
+        payload = await request.json()
+        session_id = str(payload.get("sessionId", "")).strip()
+        if not session_id:
+            raise ValueError("memory policy requires an experiment case id")
+        experiment_case = identity.get_context_session(user_id, session_id)
+        previous = experiment_case["memoryPolicy"]
+        requested = payload.get("policy")
+        if requested is None:
+            requested = {
+                "profile": payload.get("profile", "all-online"),
+                "components": payload.get("components", {}),
+            }
+        if not isinstance(requested, dict):
+            raise ValueError("memory policy must be an object")
+        updated = identity.update_memory_policy(user_id, session_id, requested)
+        try:
+            if updated != previous:
+                journal = live_harnesses.get(session_id).journal if session_id in live_harnesses else SessionJournal.open_in(
+                    user_memory_root / user_id / "sessions",
+                    session_id,
+                    metadata={
+                        "model": model,
+                        "voice": voice,
+                        "userId": user_id,
+                        "caseLabel": experiment_case.get("label", ""),
+                        "initialMemoryPolicy": previous,
+                    },
+                )
+                journal.append("memory_policy_changed", {
+                    "previous": previous,
+                    "policy": updated,
+                    "source": "research-console",
+                })
+        except Exception:
+            identity.update_memory_policy(user_id, session_id, previous)
+            raise
+        return web.json_response({
+            "session": identity.get_context_session(user_id, session_id),
+            "memoryPolicy": updated,
+            "profiles": memory_profiles(),
+        })
+
     async def get_state(request):
         user = request[user_key]
         user_id = user["id"]
@@ -713,6 +860,7 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
             routing_override=user_routing[user_id],
             tools_override=user_tools[user_id],
             memory_override=memory_for_user(user_id),
+            episodic_override=episodic_for_user(user_id),
             user_scope=user_id,
         ))
 
@@ -785,10 +933,16 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
         preference_memory: PreferenceMemory | None = None,
         user_scope: str = "local-default",
         semantic_decision: dict | None = None,
+        memory_policy: dict | None = None,
+        episodic_memory: RealtimeEpisodeMemory | None = None,
     ) -> dict:
         nonlocal routing_state, active_episode_injection
         active_runtime = target_runtime or runtime
         active_memory = preference_memory or memory
+        active_episodic = episodic_memory or episodic
+        active_policy = normalize_memory_policy(memory_policy or default_memory_policy())
+        preference_enabled = active_policy["components"]["preference"]["enabled"]
+        episodic_settings = active_policy["components"]["episodic"]
         if harness:
             transcript_entry = harness.record_user(
                 transcript,
@@ -803,13 +957,34 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
         speech_control = semantic_decision.get("speechControl")
         task_control = semantic_decision.get("taskControl")
         selected_by_semantic = semantic_decision.get("selectedSkill")
-        episodic_retrieval = episodic.retrieve(
-            transcript,
-            session_id=harness.session_id if harness else None,
-            user_scope=user_scope,
-            referential=semantic_decision.get("memoryQuery") == "referential",
-        )
-        turn_episode_injection = episodic.mark_injected(episodic_retrieval)
+        if episodic_settings["enabled"]:
+            episodic_retrieval = active_episodic.retrieve(
+                transcript,
+                session_id=harness.session_id if harness else None,
+                user_scope=user_scope,
+                allow_cross_session=episodic_settings["scope"] == "participant",
+                referential=semantic_decision.get("memoryQuery") == "referential",
+            )
+            turn_episode_injection = active_episodic.mark_injected(episodic_retrieval)
+        else:
+            episodic_retrieval = {
+                "method": "disabled-by-memory-policy",
+                "query": transcript,
+                "referential": False,
+                "scope": {
+                    "user": user_scope,
+                    "session": harness.session_id if harness else None,
+                    "allowCrossSession": episodic_settings["scope"] == "participant",
+                },
+                "minimumScore": None,
+                "candidates": [],
+                "selected": [],
+                "injection": {"status": "disabled", "episodeIds": [], "evidence": []},
+                "claimBoundary": "Episodic persistence, retrieval, and injection are disabled for this case.",
+            }
+            turn_episode_injection = {
+                "status": "disabled", "query": transcript, "episodeIds": [], "evidence": [],
+            }
         if target_runtime is None:
             active_episode_injection = turn_episode_injection
         if harness and turn_episode_injection.get("evidence"):
@@ -917,22 +1092,24 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                         "runtime.task.selected", "intent-router", {"task": selected_task},
                         [route_event["eventId"]],
                     )
-        episodic.remember(
-            transcript,
-            kind="utterance",
-            source="input-audio-transcript",
-            skill=active_runtime.skill.name if active_runtime.skill else None,
-            task=active_runtime.task.spec.id if active_runtime.task else None,
-            evidence_event_id=transcript_event["eventId"],
-            session_id=harness.session_id if harness else None,
-            user_scope=user_scope,
-        )
+        if episodic_settings["enabled"]:
+            active_episodic.remember(
+                transcript,
+                kind="utterance",
+                source="input-audio-transcript",
+                skill=active_runtime.skill.name if active_runtime.skill else None,
+                task=active_runtime.task.spec.id if active_runtime.task else None,
+                evidence_event_id=transcript_event["eventId"],
+                session_id=harness.session_id if harness else None,
+                user_scope=user_scope,
+            )
         if active_runtime.task and not speech_control:
             active_runtime.task.apply_voice_intent(task_control, transcript)
         if harness:
             harness.journal.append_state_checkpoint(runtime_checkpoint(active_runtime), reason="user-turn")
         if (
             active_runtime.task
+            and preference_enabled
             and not speech_control
             and semantic_decision.get("preferenceIntent") == "propose-durable"
         ):
@@ -947,9 +1124,12 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                 scope_reason=f"话语发生时活动范围为 task={active_runtime.task.spec.id}, checkpoint={step.id}",
             )
         hint, recalled = apply_memory_hint(
-            active_runtime, preference_memory=active_memory,
+            active_runtime, preference_memory=active_memory, enabled=preference_enabled,
         ) if harness or live_bridges else (
-            find_memory_hint(target_runtime=active_runtime, preference_memory=active_memory), False,
+            find_memory_hint(
+                target_runtime=active_runtime, preference_memory=active_memory,
+                enabled=preference_enabled,
+            ), False,
         )
         if harness and hint:
             harness.journal.append_retrieval_evidence(
@@ -978,6 +1158,7 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
             "memoryRecalled": recalled,
             "episodicRetrieval": episodic_retrieval,
             "episodicInjection": turn_episode_injection,
+            "memoryPolicy": active_policy,
             "routingState": turn_routing,
             "control": speech_control,
             "taskControl": task_control,
@@ -1018,6 +1199,7 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
             transcript,
             target_runtime=active_runtime,
             preference_memory=active_memory,
+            episodic_memory=episodic_for_user(user_id),
             user_scope=user_id,
             semantic_decision=api_semantic,
         )
@@ -1031,7 +1213,7 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
             raise ValueError("no active task for structured observation")
         observation = await request.json()
         active_runtime.task.ingest(observation)
-        episodic.remember(
+        episodic_for_user(user_id).remember(
             observation.get("summary", ""), kind="observation",
             source=str(observation.get("source", "external-observation")),
             skill=active_runtime.skill.name, task=active_runtime.task.spec.id,
@@ -1047,7 +1229,7 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
             raise ValueError("no active task for replay observation")
         observation = active_runtime.task.replay_observation(str((await request.json()).get("kind", "progress")))
         active_runtime.task.ingest(observation)
-        episodic.remember(
+        episodic_for_user(user_id).remember(
             observation.get("summary", ""), kind="observation",
             source=str(observation.get("source", "research-replay")),
             skill=active_runtime.skill.name, task=active_runtime.task.spec.id,
@@ -1058,13 +1240,26 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
 
     async def post_candidate(request):
         user_id = request[user_key]["id"]
-        active_memory = memory_for_user(user_id)
-        accepted = bool((await request.json()).get("accepted"))
+        payload = await request.json()
+        session_id = str(payload.get("sessionId", "")).strip() or None
+        policy = (
+            identity.get_context_session(user_id, session_id)["memoryPolicy"]
+            if session_id else default_memory_policy()
+        )
+        active_memory = scoped_preference_memory(user_id, session_id, policy)
+        accepted = bool(payload.get("accepted"))
         active_memory.resolve_candidate(accepted)
         return await get_state(request)
 
     async def post_delete(request):
-        memory_for_user(request[user_key]["id"]).delete_memory(str((await request.json()).get("id", "")))
+        user_id = request[user_key]["id"]
+        payload = await request.json()
+        session_id = str(payload.get("sessionId", "")).strip() or None
+        policy = (
+            identity.get_context_session(user_id, session_id)["memoryPolicy"]
+            if session_id else default_memory_policy()
+        )
+        scoped_preference_memory(user_id, session_id, policy).delete_memory(str(payload.get("id", "")))
         return await get_state(request)
 
     async def post_reset(request):
@@ -1124,6 +1319,7 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
 
         bridge = None
         experiment_case = identity.get_context_session(user_id, session_id)
+        session_memory_policy = experiment_case["memoryPolicy"]
         sessions_root = user_memory_root / user_id / "sessions"
         try:
             journal = SessionJournal.open_in(
@@ -1134,6 +1330,7 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                     "voice": voice,
                     "userId": user_id,
                     "caseLabel": experiment_case.get("label", ""),
+                    "initialMemoryPolicy": session_memory_policy,
                 },
             )
         except ValueError as exc:
@@ -1148,7 +1345,6 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
         ))
         live_harnesses[session_id] = harness
         session_tools = SkillToolExecutor()
-        session_memory = memory_for_user(user_id)
         seed_runtime = (
             runtime_for_user(user_id)
             if requested_session_exists
@@ -1160,6 +1356,15 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
         session_media_configuration: dict = {}
         semantic_router = SemanticTurnRouter(api_key)
         initial_context = harness.build(harness_layers(session_runtime))
+
+        def current_memory_policy() -> dict:
+            return identity.get_context_session(user_id, session_id)["memoryPolicy"]
+
+        def current_preference_memory(policy: dict | None = None) -> PreferenceMemory:
+            return scoped_preference_memory(user_id, session_id, policy or current_memory_policy())
+
+        def current_episodic_memory(policy: dict | None = None) -> RealtimeEpisodeMemory:
+            return scoped_episodic_memory(user_id, session_id, policy or current_memory_policy())
 
         def session_trace(event_type, source, payload, parent_event_ids=None, **metadata):
             parents = list(parent_event_ids or [])
@@ -1220,9 +1425,11 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                 text,
                 harness,
                 session_runtime,
-                preference_memory=session_memory,
+                preference_memory=current_preference_memory(),
+                episodic_memory=current_episodic_memory(),
                 user_scope=user_id,
                 semantic_decision=semantic,
+                memory_policy=current_memory_policy(),
             )
             resolve_semantic_turn(text, result, semantic)
             session_routing = result["routingState"]
@@ -1264,9 +1471,11 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                         bridge_override=bridge,
                         harness_override=harness,
                         tools_override=session_tools,
-                        memory_override=session_memory,
+                        memory_override=current_preference_memory(),
+                        episodic_override=current_episodic_memory(),
                         media_override=session_media_configuration,
                         user_scope=user_id,
+                        memory_policy_override=current_memory_policy(),
                     )})
                 asyncio.create_task(push_state())
 
@@ -1287,7 +1496,9 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
             await bridge.connect()
             refresh_harness_context(bridge, harness, session_runtime)
             initial_hint, initial_recall = apply_memory_hint(
-                session_runtime, preference_memory=session_memory,
+                session_runtime,
+                preference_memory=current_preference_memory(),
+                enabled=current_memory_policy()["components"]["preference"]["enabled"],
             )
             if initial_recall:
                 request_memory_speech(initial_hint, target_bridge=bridge, target_runtime=session_runtime)
@@ -1297,9 +1508,11 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                 bridge_override=bridge,
                 harness_override=harness,
                 tools_override=session_tools,
-                memory_override=session_memory,
+                memory_override=current_preference_memory(),
+                episodic_override=current_episodic_memory(),
                 media_override=session_media_configuration,
                 user_scope=user_id,
+                memory_policy_override=current_memory_policy(),
             )})
             async for message in ws:
                 if message.type != WSMsgType.TEXT:
@@ -1341,9 +1554,11 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                         transcript,
                         harness,
                         session_runtime,
-                        preference_memory=session_memory,
+                        preference_memory=current_preference_memory(),
+                        episodic_memory=current_episodic_memory(),
                         user_scope=user_id,
                         semantic_decision=semantic,
+                        memory_policy=current_memory_policy(),
                     )
                     resolve_semantic_turn(transcript, result, semantic)
                     session_routing = result["routingState"]
@@ -1362,9 +1577,11 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                         bridge_override=bridge,
                         harness_override=harness,
                         tools_override=session_tools,
-                        memory_override=session_memory,
+                        memory_override=current_preference_memory(),
+                        episodic_override=current_episodic_memory(),
                         media_override=session_media_configuration,
                         user_scope=user_id,
+                        memory_policy_override=current_memory_policy(),
                     )})
                     await ws.send_json({"type": "interrupted"})
                     if result.get("control") == "stop-speaking":
@@ -1395,9 +1612,11 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                         bridge_override=bridge,
                         harness_override=harness,
                         tools_override=session_tools,
-                        memory_override=session_memory,
+                        memory_override=current_preference_memory(),
+                        episodic_override=current_episodic_memory(),
                         media_override=session_media_configuration,
                         user_scope=user_id,
+                        memory_policy_override=current_memory_policy(),
                     )})
         except Exception as exc:
             if not ws.closed:
@@ -1452,6 +1671,7 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
         web.get("/api/auth/me", get_me),
         web.get("/api/sessions", get_sessions),
         web.post("/api/sessions", post_session),
+        web.post("/api/sessions/memory-policy", post_memory_policy),
         web.get("/api/state", get_state),
         web.post("/api/skills/activate", post_activate),
         web.post("/api/tasks/select", post_task_select),

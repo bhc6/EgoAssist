@@ -226,24 +226,33 @@ class RealtimeEpisodeMemory:
         *,
         session_id: str | None = None,
         user_scope: str = "local-default",
+        allow_cross_session: bool = False,
     ) -> dict[str, Any]:
         with self._lock:
             visible = [
                 item for item in self._records
                 if item.get("userScope", "local-default") == user_scope
                 and (
-                    item.get("sessionId") is None if session_id is None
-                    else item.get("sessionId") == session_id
+                    allow_cross_session
+                    or (item.get("sessionId") is None if session_id is None
+                        else item.get("sessionId") == session_id)
                 )
             ]
             retrieval = self._last_retrieval_by_session.get(session_id or "__default__")
-            if retrieval is None:
-                retrieval = self.retrieve("", emit=False, session_id=session_id, user_scope=user_scope)
+            if (
+                retrieval is None
+                or bool(retrieval.get("scope", {}).get("allowCrossSession")) != allow_cross_session
+            ):
+                retrieval = self.retrieve(
+                    "", emit=False, session_id=session_id, user_scope=user_scope,
+                    allow_cross_session=allow_cross_session,
+                )
             return {
                 "path": str(self.path),
                 "count": len(visible),
                 "recent": [dict(item) for item in reversed(visible[-12:])],
                 "retrieval": retrieval,
+                "scope": "participant" if allow_cross_session else "case",
                 "retainsRawMedia": False,
             }
 

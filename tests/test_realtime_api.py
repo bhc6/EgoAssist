@@ -240,6 +240,9 @@ def test_authenticated_users_have_isolated_runtime_preferences_episodes_and_sess
                 bob_state = await (await bob_client.get(base + "/api/state")).json()
                 assert bob_state["activeSkill"] is None
                 assert bob_state["memory"]["records"] == []
+                assert alice_state["episodicMemory"]["path"] != bob_state["episodicMemory"]["path"]
+                assert alice["id"] in alice_state["episodicMemory"]["path"]
+                assert bob["id"] in bob_state["episodicMemory"]["path"]
                 bob_recall = await (await bob_client.post(
                     base + "/api/voice", json={"transcript": "我刚才让你记住的数字是什么来着"},
                 )).json()
@@ -421,6 +424,110 @@ def test_quick_control_uses_the_realtime_websocket(tmp_path, monkeypatch):
             )
             assert decision["decision"]["speechControl"] == "stop-speaking"
             assert decision["decision"]["method"] == "semantic-turn-router-v2"
+
+    asyncio.run(scenario())
+
+
+def test_case_memory_policy_is_audited_and_gates_realtime_plugins(tmp_path, monkeypatch):
+    class FakeBridge:
+        def __init__(self, api_key, model, voice, instructions, emit, on_transcript):
+            self.emit = emit
+            self.requests = []
+
+        async def connect(self):
+            await self.emit({"type": "ready"})
+
+        def update_context(self, instructions):
+            self.instructions = instructions
+
+        def request_response(self, instructions, priority=50, interrupt=False):
+            self.requests.append((instructions, priority, interrupt))
+
+        def append_audio(self, value):
+            return False
+
+        def append_video(self, value):
+            return False
+
+        def cancel_response(self, **kwargs):
+            return False
+
+        async def close(self):
+            return None
+
+    async def classify(_self, text, catalog):
+        return {
+            "method": "semantic-turn-router-v2",
+            "model": "test-router",
+            "status": "classified",
+            "speechControl": None,
+            "taskControl": None,
+            "preferenceIntent": "propose-durable" if text.startswith("以后") else None,
+            "memoryQuery": None,
+            "selectedSkill": None,
+            "skillStatus": "no-match",
+            "rawOutput": "{}",
+            "latencyMs": 0.1,
+            "policyVersion": "semantic-turn-router-v2",
+            "claimBoundary": "test classifier",
+        }
+
+    monkeypatch.setenv("QWEN_API_KEY", "test-key")
+    monkeypatch.setattr("egoassist.realtime.omni.OmniBrowserBridge", FakeBridge)
+    monkeypatch.setattr(run_egoassist.SemanticTurnRouter, "classify", classify)
+
+    async def scenario():
+        app = create_app(
+            str(BUILTIN_SKILLS_ROOT), "kitchen-coach",
+            str(tmp_path / "memory.json"), "test-realtime", "Ethan",
+        )
+        async with TestClient(TestServer(app)) as client:
+            user = await register_client(client, "memory-policy-user")
+            created = await (await client.post(
+                "/api/sessions", json={"label": "B0 context-only"},
+            )).json()
+            session_id = created["session"]["id"]
+            assert created["session"]["memoryPolicy"]["profile"] == "all-online"
+
+            configured = await (await client.post(
+                "/api/sessions/memory-policy",
+                json={"sessionId": session_id, "policy": {"profile": "context-only"}},
+            )).json()
+            assert configured["memoryPolicy"]["profile"] == "context-only"
+
+            ws = await client.ws_connect(f"/ws/realtime?session={session_id}")
+            assert (await ws.receive_json())["type"] == "ready"
+            initial = (await ws.receive_json())["state"]
+            assert initial["memoryPolicy"]["profile"] == "context-only"
+            assert session_id in initial["episodicMemory"]["path"]
+            assert initial["episodicMemory"]["retrieval"]["injection"]["status"] == "disabled"
+
+            await ws.send_json({"type": "control", "transcript": "以后每次提醒我慢一点"})
+            disabled_turn = [await ws.receive_json() for _ in range(3)]
+            disabled_state = next(item["state"] for item in disabled_turn if item["type"] == "state")
+            assert disabled_state["memory"]["candidate"] is None
+            assert disabled_state["episodicMemory"]["count"] == 0
+
+            enabled = await (await client.post(
+                "/api/sessions/memory-policy",
+                json={"sessionId": session_id, "policy": {"profile": "lexical-episodic"}},
+            )).json()
+            assert enabled["memoryPolicy"]["profile"] == "lexical-episodic"
+            await ws.send_json({"type": "refresh"})
+            assert (await ws.receive_json())["state"]["memoryPolicy"]["profile"] == "lexical-episodic"
+
+            await ws.send_json({"type": "control", "transcript": "普通实验话语"})
+            enabled_turn = [await ws.receive_json() for _ in range(3)]
+            enabled_state = next(item["state"] for item in enabled_turn if item["type"] == "state")
+            assert enabled_state["episodicMemory"]["count"] == 1
+            await ws.close()
+
+            journal_path = tmp_path / "users" / user["id"] / "sessions" / f"{session_id}.jsonl"
+            entries = [json.loads(line) for line in journal_path.read_text(encoding="utf-8").splitlines()]
+            changes = [item for item in entries if item.get("type") == "memory_policy_changed"]
+            assert [item["policy"]["profile"] for item in changes] == [
+                "context-only", "lexical-episodic",
+            ]
 
     asyncio.run(scenario())
 

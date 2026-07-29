@@ -17,7 +17,7 @@ cd D:\DEMO\EgoAssist
 
 Open <http://127.0.0.1:8770>, start the full-duplex session, and allow camera and microphone access. Configure `QWEN_API_KEY` or `DASHSCOPE_API_KEY` in `.env`.
 
-The local login is a research identity and audit mechanism, not a production authentication claim. It separates participants, confirmed preferences, episodic summaries, and named experiment cases. Each case owns an append-only journal whose header records the participant ID and case label; production deployment would require a separate security review and identity system.
+The local login is a research identity and audit mechanism, not a production authentication claim. It separates participants and named experiment cases. Each case owns an append-only journal whose header records the participant ID, case label, and initial memory policy; later policy changes are appended as events. Preference and episodic memory can independently use case or participant scope, so cross-case recall is never implicit. Production deployment would require a separate security review and identity system.
 
 The default startup mode is general and unloaded:
 
@@ -58,7 +58,7 @@ The complete research control panel visualizes observable artifacts, not private
 - intent candidates, evidence, scores, rejection reasons, and activation;
 - structured observations and checkpoint hypotheses;
 - loaded knowledge source and claim boundary;
-- preference and episodic retrieval candidates;
+- memory profile, independent plugin switches/scopes, and preference/episodic retrieval candidates;
 - intervention policy, response queue, cancellation, and provider IDs;
 - prompt hash, causal parent IDs, latency, and raw event JSON.
 
@@ -167,9 +167,21 @@ EgoAssist exposes distinct memory claims:
 - hierarchical visual memory: the original frame-segment, embedding, consolidation, temporal localization, and abstention pipeline used by the offline EgoLife benchmark;
 - knowledge memory: no domain injection in general mode; static Skill/task injection after activation.
 
-Selected realtime episodes are injected into the same user turn before response creation. The injected block includes episode ID, timestamp, source, score, and summary; the model is instructed to use only relevant evidence and abstain when evidence is insufficient. The UI displays both retrieval reasons and `generation impact`, so persisted-but-unused memory is distinguishable from evidence that actually affected generation.
+The behavioral realtime memory plugins are controlled per experiment case. The default `all-online` profile enables confirmed preferences at participant scope and lexical episodic memory at case scope. The control panel can select a named profile or independently change each plugin and its scope:
 
-The realtime summary adapter and offline hierarchical visual backend intentionally share a conceptual contract without forcing a second visual model into the latency-sensitive dialogue loop. Future research can replace the summary index with the hierarchical backend and evaluate the trade-off explicitly.
+| Profile | Context journal | Confirmed preference | Lexical episodic |
+| --- | --- | --- | --- |
+| `all-online` (default) | required | on, participant | on, case |
+| `context-only` | required | off | off |
+| `confirmed-preference` | required | on, participant | off |
+| `lexical-episodic` | required | off | on, case |
+| `custom` | required | explicit | explicit |
+
+Disabling a plugin gates its persistence, retrieval, and injection without deleting existing records. Case-scoped preference and episodic stores are physically partitioned so capacity eviction cannot leak across cases; participant scope uses a separate long-term store. The append-only context journal and deterministic compaction are recovery/audit infrastructure, not a behavioral memory treatment, and therefore remain enabled in every profile. The selected policy is versioned in SQLite, returned in runtime state, and appended to the case journal on every change. Changes apply to subsequent turns; a clean benchmark should set the policy before collecting a case rather than switch it mid-case.
+
+Selected realtime episodes are injected into the same user turn before response creation. The injected block includes episode ID, timestamp, source, score, and summary; the model is instructed to use only relevant evidence and abstain when evidence is insufficient. The UI reports `context injection`, not causal generation impact: injection is observable, while proving that an output changed requires a counterfactual experiment.
+
+The realtime summary adapter and offline hierarchical visual backend intentionally share a conceptual contract without forcing a second visual model into the latency-sensitive dialogue loop. The hierarchical backend is an offline research method, not a realtime control-panel plugin. Future research can implement that adapter and evaluate the trade-off explicitly instead of presenting an unavailable toggle.
 
 ## Skills
 

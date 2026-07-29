@@ -6,6 +6,7 @@ let playbackTime = 0, assistantText = "";
 let connectingPromise = null;
 let selectedEventId = null, pipelineDetails = [];
 let currentUser = null, selectedSessionId = null, authMode = "login";
+let sessionCatalog = [], memoryPolicySaving = false;
 const playbackSources = new Set();
 
 async function request(path, options = {}) {
@@ -55,12 +56,72 @@ async function refreshSessionList(preferredId = selectedSessionId) {
     sessions = (await request("/api/sessions")).sessions || [];
   }
   selectedSessionId = sessions.some(item => item.id === preferredId) ? preferredId : sessions[0].id;
+  sessionCatalog = sessions;
   $("#sessionSelect").innerHTML = sessions.map(item => {
     const seen = item.last_seen_at ? item.last_seen_at.replace("T", " ").slice(0, 19) : "";
     const label = item.label || "未命名案例";
     return "<option value='" + esc(item.id) + "'>" + esc(label + " · " + item.id + (seen ? " · " + seen : "")) + "</option>";
   }).join("");
   $("#sessionSelect").value = selectedSessionId;
+  const selected = sessions.find(item => item.id === selectedSessionId);
+  if (selected?.memoryPolicy) renderMemoryPolicy(selected.memoryPolicy, state?.memoryProfiles || []);
+}
+
+function renderMemoryPolicy(policy, profiles = []) {
+  if (!policy) return;
+  const profileOptions = [...profiles];
+  if (policy.profile === "custom" && !profileOptions.some(item => item.id === "custom")) {
+    profileOptions.push({id: "custom", label: "自定义组合"});
+  }
+  $("#memoryProfile").innerHTML = profileOptions.map(item =>
+    "<option value='" + esc(item.id) + "'>" + esc(item.label) + "</option>"
+  ).join("");
+  $("#memoryProfile").value = policy.profile;
+  const preference = policy.components.preference;
+  const episodic = policy.components.episodic;
+  $("#preferenceEnabled").checked = preference.enabled;
+  $("#preferenceScope").value = preference.scope;
+  $("#preferenceScope").disabled = !preference.enabled || memoryPolicySaving;
+  $("#episodicEnabled").checked = episodic.enabled;
+  $("#episodicScope").value = episodic.scope;
+  $("#episodicScope").disabled = !episodic.enabled || memoryPolicySaving;
+  $("#memoryProfile").disabled = memoryPolicySaving;
+  $("#preferenceEnabled").disabled = memoryPolicySaving;
+  $("#episodicEnabled").disabled = memoryPolicySaving;
+  $("#memoryPolicyStatus").textContent = memoryPolicySaving
+    ? "正在保存实验配置…"
+    : "policy v" + policy.version + " · context journal 始终用于恢复与审计 · 变更从后续轮次生效";
+}
+
+function customMemoryPolicy() {
+  return {
+    profile: "custom",
+    components: {
+      preference: {enabled: $("#preferenceEnabled").checked, scope: $("#preferenceScope").value},
+      episodic: {enabled: $("#episodicEnabled").checked, scope: $("#episodicScope").value},
+    },
+  };
+}
+
+async function saveMemoryPolicy(policy) {
+  if (!selectedSessionId || memoryPolicySaving) return;
+  const before = state?.memoryPolicy || sessionCatalog.find(item => item.id === selectedSessionId)?.memoryPolicy;
+  memoryPolicySaving = true;
+  renderMemoryPolicy(before, state?.memoryProfiles || []);
+  try {
+    const result = await post("/api/sessions/memory-policy", {sessionId: selectedSessionId, policy});
+    const session = sessionCatalog.find(item => item.id === selectedSessionId);
+    if (session) session.memoryPolicy = result.memoryPolicy;
+    if (state) state.memoryPolicy = result.memoryPolicy;
+    renderMemoryPolicy(result.memoryPolicy, result.profiles || state?.memoryProfiles || []);
+    if (socket && socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify({type: "refresh"}));
+  } catch (error) {
+    alert(error.message);
+  } finally {
+    memoryPolicySaving = false;
+    const current = state?.memoryPolicy || sessionCatalog.find(item => item.id === selectedSessionId)?.memoryPolicy;
+    renderMemoryPolicy(current, state?.memoryProfiles || []);
+  }
 }
 
 async function enterConsole(user) {
@@ -71,6 +132,8 @@ async function enterConsole(user) {
   await refreshSessionList(localStorage.getItem("egoassist.session." + user.id));
   localStorage.setItem("egoassist.session." + user.id, selectedSessionId);
   render(await request("/api/state"));
+  const selected = sessionCatalog.find(item => item.id === selectedSessionId);
+  if (selected?.memoryPolicy) renderMemoryPolicy(selected.memoryPolicy, state.memoryProfiles || []);
 }
 
 async function boot() {
@@ -84,7 +147,7 @@ const memoryStageName = key => ({evidence: "证据", candidate: "候选", confir
 const memoryStatusName = status => ({
   observed: "已有证据", waiting: "等待中", pending: "待确认", confirmed: "已确认",
   matched: "已匹配", ready: "待语音提醒", reused: "已注入", "already-used": "已抑制重复",
-  "no-match": "无匹配", none: "无"
+  "no-match": "无匹配", none: "无", disabled: "已关闭"
 }[status] || status);
 
 const eventClass = type => type.startsWith("media.") || type.startsWith("audio.") || type.startsWith("perception.") ? "input" : type.startsWith("memory.") ? "memory" : type.startsWith("response.") || type.startsWith("barge_in.") ? "response" : type.includes("decision") || type.startsWith("task.") ? "decision" : "";
@@ -164,6 +227,7 @@ function render(next) {
   $("#knowledge").innerHTML = "<b>" + esc(state.knowledgeMechanism.method) + "</b><br>selected: " + esc(step ? step.id + " / " + step.source : "none") + "<br><span>边界：" + esc(state.knowledgeMechanism.claimBoundary) + "</span>";
   $("#vision").textContent = task?.observation ? task.observation.summary + " · " + Math.round(task.observation.confidence * 100) + "% · " + task.observation.source : "无结构化视觉观测；模型视觉上下文不会伪装为已提交事件";
   $("#memoryScope").textContent = "exact-trigger-lookup · " + (mechanism.scope.skill || "general") + " / " + (mechanism.scope.task || "unscoped");
+  renderMemoryPolicy(state.memoryPolicy, state.memoryProfiles || []);
   $("#memorySystems").innerHTML = state.memorySystems.map(item => "<article class='system-card " + esc(item.status) + "'><b>" + esc(item.name) + "</b><span>" + esc(item.status + " · " + item.implementation) + "</span></article>").join("");
   $("#memoryFlow").innerHTML = ["evidence", "candidate", "confirmation", "retrieval", "impact"].map(key => {
     const stage = mechanism[key];
@@ -176,12 +240,12 @@ function render(next) {
   const episodic = state.episodicMemory || {recent: [], retrieval: {candidates: []}};
   const episodeCandidates = episodic.retrieval?.candidates || [];
   const episodeInjection = episodic.retrieval?.injection || {status: "not-injected", episodeIds: []};
-  $("#episodicRetrieval").innerHTML = "<b>EPISODIC RETRIEVAL · " + esc(episodic.retrieval?.method || "none") + "</b><p>generation impact: " + esc(episodeInjection.status) + " · " + esc((episodeInjection.episodeIds || []).join(", ") || "none") + "</p>" + (episodeCandidates.length ? episodeCandidates.slice(0, 6).map(item => "<div class='rank-row " + (item.selected ? "selected" : "") + "'><b>" + esc(item.episodeId) + "</b><span>score " + Number(item.score || 0).toFixed(2) + " · " + esc(item.selected ? (item.retrievalReasons || ["selected"]).join(", ") : (item.rejectionReasons || []).join(", ")) + "</span><small>" + esc(item.record.kind + " / " + item.record.source) + "</small></div>").join("") : "<p>无情景召回候选</p>");
+  $("#episodicRetrieval").innerHTML = "<b>EPISODIC RETRIEVAL · " + esc(episodic.retrieval?.method || "none") + "</b><p>context injection: " + esc(episodeInjection.status) + " · " + esc((episodeInjection.episodeIds || []).join(", ") || "none") + "</p>" + (episodeCandidates.length ? episodeCandidates.slice(0, 6).map(item => "<div class='rank-row " + (item.selected ? "selected" : "") + "'><b>" + esc(item.episodeId) + "</b><span>score " + Number(item.score || 0).toFixed(2) + " · " + esc(item.selected ? (item.retrievalReasons || ["selected"]).join(", ") : (item.rejectionReasons || []).join(", ")) + "</span><small>" + esc(item.record.kind + " / " + item.record.source) + "</small></div>").join("") : "<p>无情景召回候选</p>");
   $("#episodicEpisodes").innerHTML = "<b>RECENT EPISODES · raw media retained: " + esc(episodic.retainsRawMedia) + "</b>" + (episodic.recent?.length ? episodic.recent.map(item => "<article><b>" + esc(item.summary) + "</b><small>" + esc(item.kind + " · " + item.source) + "</small><span>" + esc(item.task || "general") + "</span></article>").join("") : "<p>暂无实时情景摘要</p>");
   $("#toolAudit").innerHTML = state.toolAudit.length ? state.toolAudit.map(item => "<article><b>" + esc(item.tool || item.action || "tool") + "</b><p>" + esc(JSON.stringify(item.arguments || item.result || {})) + "</p><small>" + esc(item.time || item.timestamp || "") + "</small></article>").join("") : "<span class='muted'>暂无工具调用</span>";
-  $$("[data-delete]").forEach(button => button.onclick = () => run(button, post("/api/memory/delete", {id: button.dataset.delete})));
+  $$("[data-delete]").forEach(button => button.onclick = () => runMemoryMutation(button, post("/api/memory/delete", {id: button.dataset.delete, sessionId: selectedSessionId})));
   $("#memoryCandidate").innerHTML = memory.candidate ? "<div class='candidate'><b>要记住这个提示偏好吗？</b><p>" + esc(memory.candidate.preference) + "</p><button data-accept='true'>确认保存</button><button data-accept='false'>不要保存</button></div>" : "";
-  $$("[data-accept]").forEach(button => button.onclick = () => run(button, post("/api/candidate", {accepted: button.dataset.accept === "true"})));
+  $$("[data-accept]").forEach(button => button.onclick = () => runMemoryMutation(button, post("/api/candidate", {accepted: button.dataset.accept === "true", sessionId: selectedSessionId})));
   const scheduler = state.scheduler;
   $("#scheduler").innerHTML = "<b>Response scheduler</b><br>active: " + esc((scheduler.activeResponseIds || []).join(", ") || "none") + "<br>queued: " + esc(JSON.stringify(scheduler.queued)) + "<br>inflight: " + esc(JSON.stringify(scheduler.inflight)) + "<br>barge-in pending: " + esc(scheduler.bargeInPending) + "<br><b>Policy source</b>: " + esc(state.turnTakingPolicy.source) + "<br>selected: " + esc(JSON.stringify(state.turnTakingPolicy.currentSelection)) + "<br>protected max: " + esc(state.turnTakingPolicy.maxProtectionMs) + " ms";
   $("#intentRouting").textContent = JSON.stringify(state.intentRouting, null, 2);
@@ -230,6 +294,24 @@ async function run(button, promise) {
     if (socket && socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify({type: "refresh"}));
   } catch (error) { alert(error.message); }
   finally { if (button) button.disabled = false; }
+}
+
+async function runMemoryMutation(button, promise) {
+  if (button) button.disabled = true;
+  try {
+    await promise;
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      socket.send(JSON.stringify({type: "refresh"}));
+    } else {
+      render(await request("/api/state"));
+      const selected = sessionCatalog.find(item => item.id === selectedSessionId);
+      if (selected?.memoryPolicy) renderMemoryPolicy(selected.memoryPolicy, state.memoryProfiles || []);
+    }
+  } catch (error) {
+    alert(error.message);
+  } finally {
+    if (button) button.disabled = false;
+  }
 }
 
 async function ensureMedia() {
@@ -462,6 +544,13 @@ $$("[data-say]").forEach(button => button.onclick = () => sendControl(button));
 $("#reset").onclick = event => switchRuntime(event.currentTarget, "/api/task/reset", {});
 $("#skillSelect").onchange = event => switchRuntime(event.currentTarget, "/api/skills/activate", {skill: event.currentTarget.value});
 $("#taskSelect").onchange = event => { if (event.currentTarget.value) switchRuntime(event.currentTarget, "/api/tasks/select", {task: event.currentTarget.value}); };
+$("#memoryProfile").onchange = event => {
+  if (event.currentTarget.value !== "custom") saveMemoryPolicy({profile: event.currentTarget.value});
+};
+$("#preferenceEnabled").onchange = () => saveMemoryPolicy(customMemoryPolicy());
+$("#preferenceScope").onchange = () => saveMemoryPolicy(customMemoryPolicy());
+$("#episodicEnabled").onchange = () => saveMemoryPolicy(customMemoryPolicy());
+$("#episodicScope").onchange = () => saveMemoryPolicy(customMemoryPolicy());
 $$('[data-replay]').forEach(button => button.onclick = () => run(button, post("/api/replay/observe", {kind: button.dataset.replay})));
 $("#newTask").onclick = () => $("#taskDialog").showModal();
 $("#cancelTask").onclick = () => $("#taskDialog").close();
@@ -524,6 +613,8 @@ $("#sessionSelect").onchange = async event => {
   if (pendingConnection) await pendingConnection.catch(() => {});
   selectedSessionId = event.currentTarget.value;
   if (currentUser) localStorage.setItem("egoassist.session." + currentUser.id, selectedSessionId);
+  const selected = sessionCatalog.find(item => item.id === selectedSessionId);
+  if (selected?.memoryPolicy) renderMemoryPolicy(selected.memoryPolicy, state?.memoryProfiles || []);
   if (wasRealtime) await connectRealtime();
 };
 boot().catch(error => { showLogin(); $("#authError").textContent = error.message; });

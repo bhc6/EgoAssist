@@ -36,11 +36,17 @@ def test_frontend_exposes_memory_pipeline_and_treats_steps_as_reference_map():
     assert 'id="memoryFlow"' in html
     assert 'id="assistantCaption"' in html
     assert 'id="memoryScope"' in html
+    assert 'id="memoryProfile"' in html
+    assert 'id="preferenceEnabled"' in html
+    assert 'id="episodicEnabled"' in html
     assert 'id="mapStatus"' in html
     assert 'id="progress"' not in html
     assert "task.steps.filter" not in script
     assert "可选证据锚点" in script
     assert "助手语音字幕" in script
+    assert "/api/sessions/memory-policy" in script
+    assert "generation impact" not in script
+    assert "context injection" in script
 
 
 def test_frontend_prioritizes_pipeline_and_event_provenance():

@@ -12,6 +12,9 @@ from .context_harness import (
     ContextHarness, ContextLayer, ContextSettings, SessionJournal, estimate_tokens,
 )
 from .identity import IdentityStore
+from .memory_policy import (
+    MEMORY_POLICY_VERSION, default_memory_policy, memory_profiles, normalize_memory_policy,
+)
 from .semantic import SemanticTurnRouter, TURN_ROUTER_POLICY_VERSION
 
 __all__ = [
@@ -20,5 +23,6 @@ __all__ = [
     "SkillRuntime", "SkillToolExecutor", "EventLedger", "TurnTakingPolicy",
     "ContextHarness", "ContextLayer", "ContextSettings", "SessionJournal", "estimate_tokens",
     "IdentityStore",
+    "MEMORY_POLICY_VERSION", "default_memory_policy", "memory_profiles", "normalize_memory_policy",
     "SemanticTurnRouter", "TURN_ROUTER_POLICY_VERSION",
 ]
