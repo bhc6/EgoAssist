@@ -11,6 +11,32 @@ perfect semantic memory, or guaranteed model correctness. Its goal is to make th
 important state transitions observable, deterministic where possible, and safe to
 ablate in experiments.
 
+## 2026 Product Re-foundation
+
+The project is being re-founded around dependable user outcomes rather than
+internal state alone. The accepted charter, target architecture, data boundaries,
+migration gates, and outcome tests are in
+[docs/PROJECT_CHARTER_2026.md](docs/PROJECT_CHARTER_2026.md). The supporting open
+source review was verified on 2026-07-30 and is recorded in
+[docs/OSS_RESEARCH_2026-07-30.md](docs/OSS_RESEARCH_2026-07-30.md).
+
+Current capability truth:
+
+- full-duplex media, interruption, durable transcripts, scoped memory, and tool
+  confirmation are implemented research infrastructure;
+- Work Ledger records and projects lifecycle state but is not a background task
+  executor;
+- timers/reminders, remote human help, reference display, automatic structured
+  task perception, and online outcome evaluation are not production features;
+- bundled local acknowledgement and deadline handlers are demo or unsupported
+  adapters and must not be interpreted as completed real-world effects.
+
+The selected migration foundations are LiveKit for realtime transport, Temporal
+for durable execution, MCP for external connector boundaries, SQLAlchemy/Alembic
+and Pydantic for product data contracts, OpenTelemetry for correlation, and
+explicit notification and artifact adapters. EgoAssist continues to own the
+differentiating memory, interaction, intent, and safety policies.
+
 ## Highlights
 
 - Full-duplex browser audio with camera context and natural barge-in.
