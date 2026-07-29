@@ -4,6 +4,9 @@ const esc = value => String(value ?? "").replace(/[&<>"']/g, character => ({"&":
 let state, stream, socket, audioContext, microphoneSource, processor, videoTimer;
 let playbackTime = 0, assistantText = "";
 let connectingPromise = null;
+let connectionGeneration = 0;
+let mediaPromise = null;
+let mediaGeneration = 0;
 let selectedEventId = null, pipelineDetails = [];
 let currentUser = null, selectedSessionId = null, authMode = "login";
 let sessionCatalog = [], memoryPolicySaving = false;
@@ -241,12 +244,18 @@ function render(next) {
   $("#retrievalCandidates").innerHTML = "<b>RETRIEVAL CANDIDATES</b>" + (candidates.length ? candidates.map(item => "<div class='rank-row " + (item.selected ? "selected" : "") + "'><b>" + esc(item.memoryId) + "</b><span>score " + item.score.toFixed(2) + " · " + esc(item.selected ? "selected" : item.rejectionReasons.join(", ")) + "</span><small>task=" + item.match.task + " checkpoint=" + item.match.checkpoint + "</small></div>").join("") : "<p>无候选记录</p>");
   $("#memories").innerHTML = memory.records.length ? memory.records.map(item => "<article><b>" + esc(item.preference) + "</b><small>trigger " + esc(item.trigger.task) + " / " + esc(item.trigger.step) + "</small><button data-delete='" + esc(item.id) + "'>删除</button></article>").join("") : "<span>暂无已确认偏好</span>";
   const episodic = state.episodicMemory || {recent: [], retrieval: {candidates: []}};
+  const timelineViews = episodic.timelineViews || {};
+  const visibleCards = [
+    ...(timelineViews.participant?.recent || []),
+    ...(timelineViews.case?.recent || []),
+  ].filter((item, index, values) => values.findIndex(other => other.id === item.id) === index);
   const episodeCandidates = episodic.retrieval?.candidates || [];
   const episodeInjection = episodic.retrieval?.injection || {status: "not-injected", episodeIds: []};
-  $("#episodicRetrieval").innerHTML = "<b>EPISODIC RETRIEVAL · " + esc(episodic.retrieval?.method || "none") + "</b><p>context injection: " + esc(episodeInjection.status) + " · " + esc((episodeInjection.episodeIds || []).join(", ") || "none") + "</p>" + (episodeCandidates.length ? episodeCandidates.slice(0, 6).map(item => "<div class='rank-row " + (item.selected ? "selected" : "") + "'><b>" + esc(item.episodeId) + "</b><span>score " + Number(item.score || 0).toFixed(2) + " · " + esc(item.selected ? (item.retrievalReasons || ["selected"]).join(", ") : (item.rejectionReasons || []).join(", ")) + "</span><small>" + esc(item.record.kind + " / " + item.record.source) + "</small></div>").join("") : "<p>无情景召回候选</p>");
-  $("#episodicEpisodes").innerHTML = "<b>RECENT EPISODES · raw media retained: " + esc(episodic.retainsRawMedia) + "</b>" + (episodic.recent?.length ? episodic.recent.map(item => "<article><b>" + esc(item.summary) + "</b><small>" + esc(item.kind + " · " + item.source) + "</small><span>" + esc(item.task || "general") + "</span></article>").join("") : "<p>暂无实时情景摘要</p>");
+  $("#episodicRetrieval").innerHTML = "<b>TIMELINE RETRIEVAL · " + esc(episodic.retrieval?.method || "none") + "</b><p>current-turn injection: " + esc(episodeInjection.status) + " · " + esc((episodeInjection.episodeIds || []).join(", ") || "none") + "</p>" + (episodeCandidates.length ? episodeCandidates.slice(0, 6).map(item => "<div class='rank-row " + (item.selected ? "selected" : "") + "'><b>" + esc(item.episodeId) + "</b><span>score " + Number(item.score || 0).toFixed(2) + " · " + esc(item.selected ? (item.retrievalReasons || ["selected"]).join(", ") : (item.rejectionReasons || []).join(", ")) + "</span><small>" + esc(item.record.kind + " / " + item.record.source) + "</small></div>").join("") : "<p>无时间线召回候选</p>");
+  $("#episodicEpisodes").innerHTML = "<b>RECENT CARDS · raw media retained: " + esc(episodic.retainsRawMedia) + "</b>" + (visibleCards.length ? visibleCards.map(item => "<article><b>" + esc(item.text) + "</b><small>" + esc(item.kind + " · " + item.scope + " · " + item.tier) + "</small><button data-delete-card='" + esc(item.id) + "'>删除</button></article>").join("") : "<p>暂无活动时间线卡片</p>");
   $("#toolAudit").innerHTML = state.toolAudit.length ? state.toolAudit.map(item => "<article><b>" + esc(item.tool || item.action || "tool") + "</b><p>" + esc(JSON.stringify(item.arguments || item.result || {})) + "</p><small>" + esc(item.time || item.timestamp || "") + "</small></article>").join("") : "<span class='muted'>暂无工具调用</span>";
   $$("[data-delete]").forEach(button => button.onclick = () => runMemoryMutation(button, post("/api/memory/delete", {id: button.dataset.delete, sessionId: selectedSessionId})));
+  $$("[data-delete-card]").forEach(button => button.onclick = () => runMemoryMutation(button, post("/api/memory/delete", {id: button.dataset.deleteCard, sessionId: selectedSessionId})));
   $("#memoryCandidate").innerHTML = memory.candidate ? "<div class='candidate'><b>要记住这个提示偏好吗？</b><p>" + esc(memory.candidate.preference) + "</p><button data-accept='true'>确认保存</button><button data-accept='false'>不要保存</button></div>" : "";
   $$("[data-accept]").forEach(button => button.onclick = () => runMemoryMutation(button, post("/api/candidate", {accepted: button.dataset.accept === "true", sessionId: selectedSessionId})));
   const scheduler = state.scheduler;
@@ -275,7 +284,9 @@ async function executeTool(button) {
   if (!confirmed) return;
   const arguments = defaultToolArguments(declaration);
   try {
-    const payload = await post("/api/tools/execute", {tool, arguments, confirmed});
+    const payload = await post("/api/tools/execute", {
+      tool, arguments, confirmed, sessionId: selectedSessionId
+    });
     $("#toolResult").textContent = JSON.stringify(payload.result);
     render(payload.state);
   } catch (error) { alert(error.message); }
@@ -286,7 +297,8 @@ function renderManualSteps() {
   $("#manualSteps").innerHTML = state.task ? state.task.steps.map(item => "<button data-step='" + esc(item.id) + "'>外部观察：" + esc(item.title) + "</button>").join("") : "";
   $$("[data-step]").forEach(button => button.onclick = () => run(button, post("/api/task/observe", {
     step: button.dataset.step, completed: false, confidence: 0.92,
-    summary: "外部感知：" + button.dataset.step, hazards: [], source: "manual/ui"
+    summary: "外部感知：" + button.dataset.step, hazards: [], source: "manual/ui",
+    sessionId: selectedSessionId
   })));
 }
 
@@ -318,19 +330,33 @@ async function runMemoryMutation(button, promise) {
 }
 
 async function ensureMedia() {
-  if (stream) return;
-  stream = await navigator.mediaDevices.getUserMedia({
-    video: {facingMode: {ideal: "environment"}, width: {ideal: 1280}, frameRate: {ideal: 30}},
-    audio: {channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true}
-  });
-  $("#video").srcObject = stream;
-  applyCameraOrientation();
-  $("#cameraEmpty").hidden = true;
-  $("#cameraState").textContent = "摄像头与麦克风在线";
-  $("#cameraButton").textContent = "关闭设备";
+  if (stream) return stream;
+  if (mediaPromise) return mediaPromise;
+  const generation = mediaGeneration;
+  const attempt = (async () => {
+    const acquired = await navigator.mediaDevices.getUserMedia({
+      video: {facingMode: {ideal: "environment"}, width: {ideal: 1280}, frameRate: {ideal: 30}},
+      audio: {channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true}
+    });
+    if (generation !== mediaGeneration) {
+      acquired.getTracks().forEach(track => track.stop());
+      throw Error("设备访问已取消");
+    }
+    stream = acquired;
+    $("#video").srcObject = stream;
+    applyCameraOrientation();
+    $("#cameraEmpty").hidden = true;
+    $("#cameraState").textContent = "摄像头与麦克风在线";
+    $("#cameraButton").textContent = "关闭设备";
+    return stream;
+  })();
+  mediaPromise = attempt;
+  try { return await attempt; }
+  finally { if (mediaPromise === attempt) mediaPromise = null; }
 }
 
 function stopMedia() {
+  mediaGeneration += 1;
   if (videoTimer) clearInterval(videoTimer);
   videoTimer = null;
   if (processor) processor.disconnect();
@@ -444,31 +470,44 @@ function stopPlayback() {
 async function connectRealtime() {
   if (socket && socket.readyState === WebSocket.OPEN && !connectingPromise) return;
   if (connectingPromise) return connectingPromise;
-  connectingPromise = connectRealtimeSession();
-  try { await connectingPromise; }
-  finally { connectingPromise = null; }
+  const generation = ++connectionGeneration;
+  const attempt = connectRealtimeSession(generation);
+  connectingPromise = attempt;
+  try { await attempt; }
+  finally { if (connectingPromise === attempt) connectingPromise = null; }
 }
 
-async function connectRealtimeSession() {
+async function connectRealtimeSession(generation) {
   if (!selectedSessionId) await refreshSessionList();
+  if (generation !== connectionGeneration) return;
+  const connectionSessionId = selectedSessionId;
   await ensureMedia();
+  if (generation !== connectionGeneration) return;
   await startAudioCapture();
+  if (generation !== connectionGeneration) {
+    stopAudioCapture();
+    return;
+  }
   const scheme = location.protocol === "https:" ? "wss:" : "ws:";
-  const ws = new WebSocket(scheme + "//" + location.host + "/ws/realtime?session=" + encodeURIComponent(selectedSessionId));
+  const ws = new WebSocket(scheme + "//" + location.host + "/ws/realtime?session=" + encodeURIComponent(connectionSessionId));
+  if (generation !== connectionGeneration) {
+    ws.close();
+    return;
+  }
   socket = ws;
   let ready = false;
   let restartAfterClose = false;
   let resolveReady, rejectReady;
   const readyPromise = new Promise((resolve, reject) => { resolveReady = resolve; rejectReady = reject; });
   ws.onopen = () => {
-    if (socket !== ws) return;
+    if (socket !== ws || generation !== connectionGeneration) { ws.close(); return; }
     $("#duplexState").textContent = "正在连接实时模型…";
     const fps = Number($("#videoFps").value);
     if (videoTimer) clearInterval(videoTimer);
     videoTimer = setInterval(sendVideoFrame, 1000 / fps);
   };
   ws.onmessage = event => {
-    if (socket !== ws) return;
+    if (socket !== ws || generation !== connectionGeneration) return;
     const message = JSON.parse(event.data);
     if (message.type === "ready") {
       ready = true;
@@ -506,30 +545,37 @@ async function connectRealtimeSession() {
       alert(message.message);
     }
   };
-  ws.onerror = () => { if (!ready) rejectReady(Error("实时 WebSocket 连接失败")); };
+  ws.onerror = () => { if (!ready && generation === connectionGeneration) rejectReady(Error("实时 WebSocket 连接失败")); };
   ws.onclose = () => {
-    if (!ready) rejectReady(Error("实时模型连接在就绪前关闭"));
+    if (generation !== connectionGeneration) { resolveReady(); return; }
+    if (!ready && generation === connectionGeneration) rejectReady(Error("实时模型连接在就绪前关闭"));
     if (socket !== ws) return;
     $("#duplexState").textContent = "实时会话已结束";
     $("#realtimeButton").textContent = "启动全双工陪练";
     socket = null;
-    if (restartAfterClose && stream) {
+    if (restartAfterClose && stream && generation === connectionGeneration) {
       setTimeout(() => connectRealtime().catch(error => alert("重连失败：" + error.message)), 0);
     }
   };
   return readyPromise;
 }
 
+function stopAudioCapture() {
+  if (processor) processor.disconnect();
+  if (microphoneSource) microphoneSource.disconnect();
+  processor = microphoneSource = null;
+}
+
 function disconnectRealtime() {
+  connectionGeneration += 1;
+  if (mediaPromise) mediaGeneration += 1;
   stopPlayback();
   const ws = socket;
   socket = null;
   if (ws) ws.close();
   if (videoTimer) clearInterval(videoTimer);
   videoTimer = null;
-  if (processor) processor.disconnect();
-  if (microphoneSource) microphoneSource.disconnect();
-  processor = microphoneSource = null;
+  stopAudioCapture();
   $("#duplexState").textContent = "实时会话已结束";
   $("#realtimeButton").textContent = "启动全双工陪练";
 }
@@ -551,14 +597,14 @@ async function switchRuntime(button, path, payload) {
   if (pendingConnection) await pendingConnection.catch(() => {});
   button.disabled = true;
   try {
-    render(await post(path, payload));
+    render(await post(path, {...payload, sessionId: selectedSessionId}));
     if (wasRealtime) await connectRealtime();
   } catch (error) { alert(error.message); }
   finally { button.disabled = false; }
 }
 
-$("#realtimeButton").onclick = async () => { try { socket ? disconnectRealtime() : await connectRealtime(); } catch (error) { alert("启动失败：" + error.message); disconnectRealtime(); } };
-$("#cameraButton").onclick = async () => { try { stream ? stopMedia() : await ensureMedia(); } catch (error) { alert("设备访问失败：" + error.message); } };
+$("#realtimeButton").onclick = async () => { try { socket || connectingPromise ? disconnectRealtime() : await connectRealtime(); } catch (error) { alert("启动失败：" + error.message); disconnectRealtime(); } };
+$("#cameraButton").onclick = async () => { try { stream || mediaPromise ? stopMedia() : await ensureMedia(); } catch (error) { alert("设备访问失败：" + error.message); } };
 $("#videoFps").onchange = () => { if (!socket) return; clearInterval(videoTimer); videoTimer = setInterval(sendVideoFrame, 1000 / Number($("#videoFps").value)); };
 $("#mirrorCamera").checked = mirrorCamera;
 applyCameraOrientation();
@@ -579,7 +625,9 @@ $("#preferenceEnabled").onchange = () => saveMemoryPolicy(customMemoryPolicy());
 $("#preferenceScope").onchange = () => saveMemoryPolicy(customMemoryPolicy());
 $("#episodicEnabled").onchange = () => saveMemoryPolicy(customMemoryPolicy());
 $("#episodicScope").onchange = () => saveMemoryPolicy(customMemoryPolicy());
-$$('[data-replay]').forEach(button => button.onclick = () => run(button, post("/api/replay/observe", {kind: button.dataset.replay})));
+$$('[data-replay]').forEach(button => button.onclick = () => run(button, post("/api/replay/observe", {
+  kind: button.dataset.replay, sessionId: selectedSessionId
+})));
 $("#newTask").onclick = () => $("#taskDialog").showModal();
 $("#cancelTask").onclick = () => $("#taskDialog").close();
 $("#taskDialog").onclose = () => $("#taskForm").reset();
@@ -592,7 +640,7 @@ $("#taskForm").onsubmit = async event => {
     const pendingConnection = connectingPromise;
     if (wasRealtime) disconnectRealtime();
     if (pendingConnection) await pendingConnection.catch(() => {});
-    render(await post("/api/tasks/create", {title, steps}));
+    render(await post("/api/tasks/create", {title, steps, sessionId: selectedSessionId}));
     $("#taskDialog").close();
     if (wasRealtime) await connectRealtime();
   } catch (error) { alert(error.message); }

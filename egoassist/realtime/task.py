@@ -39,39 +39,77 @@ class TaskSpec:
     @classmethod
     def from_dict(cls, payload: dict[str, Any], provenance: str = "api") -> "TaskSpec":
         required = {"id", "title", "version", "role", "steps"}
-        if not isinstance(payload, dict) or not required.issubset(payload) or not payload["steps"]:
+        if not isinstance(payload, dict) or not required.issubset(payload):
             raise ValueError("invalid task specification")
-        if not re.fullmatch(r"[a-z0-9][a-z0-9_-]{1,63}", str(payload["id"])):
+        task_id = cls._bounded_text(payload["id"], "task id", 64)
+        if not re.fullmatch(r"[a-z0-9][a-z0-9_-]{1,63}", task_id):
             raise ValueError("task id must use 2-64 lowercase letters, digits, hyphens or underscores")
-        if not isinstance(payload["steps"], list) or len(payload["steps"]) > 16:
+        title = cls._bounded_text(payload["title"], "task title", 160)
+        version = cls._bounded_text(payload["version"], "task version", 64)
+        role = cls._bounded_text(payload["role"], "task role", 600)
+        if not isinstance(payload["steps"], list) or not payload["steps"] or len(payload["steps"]) > 16:
             raise ValueError("task requires 1-16 steps")
         steps: list[TaskStep] = []
         seen: set[str] = set()
         for raw in payload["steps"]:
             if not isinstance(raw, dict):
                 raise ValueError("each task step must be an object")
+            unknown = set(raw) - {"id", "title", "instruction", "completion", "risk", "source"}
+            if unknown:
+                raise ValueError(f"unknown task step field(s): {', '.join(sorted(unknown))}")
             missing = {"id", "title", "instruction", "completion"} - set(raw)
             if missing:
                 raise ValueError(f"task step missing: {', '.join(sorted(missing))}")
-            step = TaskStep(**raw)
-            if step.id in seen or not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,63}", step.id):
-                raise ValueError(f"invalid or duplicate step id: {step.id}")
-            if step.risk not in {"low", "medium", "high"}:
-                raise ValueError(f"invalid risk level: {step.risk}")
-            if not all((step.title.strip(), step.instruction.strip(), step.completion.strip())):
-                raise ValueError("task step text cannot be empty")
-            seen.add(step.id)
+            step_id = cls._bounded_text(raw["id"], "task step id", 64)
+            if step_id in seen or not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,63}", step_id):
+                raise ValueError(f"invalid or duplicate step id: {step_id}")
+            risk = cls._bounded_text(raw.get("risk", "low"), "task step risk", 16)
+            if risk not in {"low", "medium", "high"}:
+                raise ValueError(f"invalid risk level: {risk}")
+            source = raw.get("source", "")
+            if not isinstance(source, str) or len(source) > 300:
+                raise ValueError("task step source must be a string of at most 300 characters")
+            step = TaskStep(
+                id=step_id,
+                title=cls._bounded_text(raw["title"], "task step title", 160),
+                instruction=cls._bounded_text(raw["instruction"], "task step instruction", 1200),
+                completion=cls._bounded_text(raw["completion"], "task step completion", 600),
+                risk=risk,
+                source=source.strip(),
+            )
+            seen.add(step_id)
             steps.append(step)
+        safety_policy = payload.get("safety_policy", [])
+        if not isinstance(safety_policy, list) or len(safety_policy) > 16:
+            raise ValueError("task safety_policy must contain at most 16 strings")
+        aliases = payload.get("aliases", [])
+        if not isinstance(aliases, list) or len(aliases) > 32:
+            raise ValueError("task aliases must contain at most 32 strings")
+        resolved_provenance = payload.get("provenance", provenance)
         return cls(
-            id=str(payload["id"]),
-            title=str(payload["title"]),
-            version=str(payload["version"]),
-            role=str(payload["role"]),
-            safety_policy=tuple(map(str, payload.get("safety_policy", []))),
+            id=task_id,
+            title=title,
+            version=version,
+            role=role,
+            safety_policy=tuple(
+                cls._bounded_text(item, "task safety policy item", 500)
+                for item in safety_policy
+            ),
             steps=tuple(steps),
-            aliases=tuple(map(str, payload.get("aliases", []))),
-            provenance=str(payload.get("provenance", provenance)),
+            aliases=tuple(cls._bounded_text(item, "task alias", 120) for item in aliases),
+            provenance=cls._bounded_text(resolved_provenance, "task provenance", 200),
         )
+
+    @staticmethod
+    def _bounded_text(value: Any, field: str, maximum: int) -> str:
+        if not isinstance(value, str):
+            raise ValueError(f"{field} must be a string")
+        text = value.strip()
+        if not text:
+            raise ValueError(f"{field} cannot be empty")
+        if len(text) > maximum:
+            raise ValueError(f"{field} must be at most {maximum} characters")
+        return text
 
     def realtime_instructions(self, memories: list[dict[str, Any]]) -> str:
         steps = "\n".join(
@@ -116,6 +154,9 @@ class TaskSession:
         self.spec = spec
         self._event_sink = event_sink
         self.reset()
+
+    def set_event_sink(self, event_sink: Callable[..., Any] | None) -> None:
+        self._event_sink = event_sink
 
     def reset(self) -> dict[str, Any]:
         self.step_index = 0

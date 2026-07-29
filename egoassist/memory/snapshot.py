@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any, Mapping
 
 import numpy as np
 
@@ -12,7 +13,12 @@ FORMAT_VERSION = 2
 SUPPORTED_VERSIONS = {1, FORMAT_VERSION}
 
 
-def save_memory(memory: HierarchicalMemory, directory: str | Path) -> Path:
+def save_memory(
+    memory: HierarchicalMemory,
+    directory: str | Path,
+    *,
+    provenance: Mapping[str, Any] | None = None,
+) -> Path:
     from PIL import Image
 
     root = Path(directory)
@@ -70,6 +76,8 @@ def save_memory(memory: HierarchicalMemory, directory: str | Path) -> Path:
         "long_term_ids": [item.id for item in memory.long_term],
         "items": records,
     }
+    if provenance is not None:
+        manifest["provenance"] = dict(provenance)
     manifest_path = root / "manifest.json"
     manifest_path.write_text(
         json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8"
@@ -77,7 +85,12 @@ def save_memory(memory: HierarchicalMemory, directory: str | Path) -> Path:
     return manifest_path
 
 
-def load_memory(memory: HierarchicalMemory, directory: str | Path) -> int:
+def load_memory(
+    memory: HierarchicalMemory,
+    directory: str | Path,
+    *,
+    expected_provenance: Mapping[str, Any] | None = None,
+) -> int:
     from PIL import Image
 
     root = Path(directory)
@@ -86,6 +99,8 @@ def load_memory(memory: HierarchicalMemory, directory: str | Path) -> int:
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     if manifest.get("format") != "egoassist-memory-snapshot":
         raise ValueError("Not an EgoAssist memory snapshot")
+    if expected_provenance is not None and manifest.get("provenance") != dict(expected_provenance):
+        raise ValueError("Memory snapshot provenance does not match the requested run")
     version = manifest.get("version")
     if version not in SUPPORTED_VERSIONS:
         raise ValueError(f"Unsupported memory snapshot version: {manifest.get('version')}")

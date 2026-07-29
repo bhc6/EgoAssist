@@ -91,3 +91,19 @@ def test_memory_snapshot_loads_v1_with_interpolated_times(tmp_path):
         assert item.keyframe_times[0] == item.t_start
         if len(item.keyframes) > 1:
             assert item.keyframe_times[-1] == item.t_end
+
+
+def test_memory_snapshot_validates_optional_provenance(tmp_path):
+    source = HierarchicalMemory(MockBackend(seed=0), Config())
+    provenance = {"runFingerprint": "run-1", "videoSha256": "abc"}
+    save_memory(source, tmp_path / "snapshot-provenance", provenance=provenance)
+
+    assert load_memory(
+        source, tmp_path / "snapshot-provenance", expected_provenance=provenance,
+    ) == 0
+    with pytest.raises(ValueError, match="provenance"):
+        load_memory(
+            source,
+            tmp_path / "snapshot-provenance",
+            expected_provenance={"runFingerprint": "run-2", "videoSha256": "abc"},
+        )

@@ -33,8 +33,8 @@ def memory_profiles() -> list[dict[str, Any]]:
     labels = {
         "all-online": "全部在线记忆",
         "context-only": "仅会话上下文",
-        "confirmed-preference": "上下文 + 确认偏好",
-        "lexical-episodic": "上下文 + 词法情景记忆",
+        "confirmed-preference": "上下文 + 参与者时间线",
+        "lexical-episodic": "上下文 + 案例时间线",
     }
     return [
         {

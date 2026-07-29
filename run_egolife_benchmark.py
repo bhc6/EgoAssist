@@ -12,7 +12,6 @@ import random
 import time
 from pathlib import Path
 
-import cv2
 import numpy as np
 
 from egoassist.abstention import ConformalAbstention
@@ -20,8 +19,11 @@ from egoassist.backends import build_backend
 from egoassist.capture.stream import VideoFileStream
 from egoassist.config import Config
 from egoassist.eval.real_metrics import exact_match, temporal_iou, token_f1
-from egoassist.memory import load_memory, save_memory
+from egoassist.memory import TimelineMemory, import_visual_items, load_memory, save_memory
 from egoassist.qa import StreamingMemoryAssistant
+
+
+RUN_MANIFEST_VERSION = 1
 
 
 def read_json(path: Path):
@@ -55,11 +57,63 @@ def sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def fingerprint_payload(payload: dict) -> str:
+    encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def ensure_run_manifest(path: Path, manifest: dict, *, artifacts_exist: bool) -> str:
+    expected = dict(manifest)
+    fingerprint = fingerprint_payload(expected)
+    expected["fingerprint"] = fingerprint
+    if path.exists():
+        existing = read_json(path)
+        if existing != expected:
+            raise RuntimeError(
+                f"Benchmark output provenance mismatch at {path}. "
+                "Use a new --output-dir or remove the stale output artifacts."
+            )
+    elif artifacts_exist:
+        raise RuntimeError(
+            f"Benchmark output contains results or memory without provenance: {path.parent}. "
+            "Use a new --output-dir or remove the stale output artifacts."
+        )
+    else:
+        path.write_text(json.dumps(expected, ensure_ascii=False, indent=2), encoding="utf-8")
+    return fingerprint
+
+
+def validate_existing_results(
+    rows: list[dict],
+    expected_keys: set[str],
+    video_hashes: dict[str, str],
+) -> set[str]:
+    keys = [str(row.get("key", "")) for row in rows]
+    seen: set[str] = set()
+    duplicates: set[str] = set()
+    for key in keys:
+        if key in seen:
+            duplicates.add(key)
+        seen.add(key)
+    if duplicates:
+        raise RuntimeError(f"Duplicate benchmark result key(s): {', '.join(sorted(duplicates)[:5])}")
+    unexpected = sorted(set(keys) - expected_keys)
+    if unexpected:
+        raise RuntimeError(f"Out-of-scope benchmark result key(s): {', '.join(unexpected[:5])}")
+    for row in rows:
+        video_id = str(row.get("video_id", ""))
+        if video_id not in video_hashes or row.get("video_sha256") != video_hashes[video_id]:
+            raise RuntimeError(f"Benchmark result source provenance mismatch for key: {row.get('key')}")
+    return set(keys)
+
+
 def clean_question(value: str) -> str:
     return value.replace("<speech>\n<image>\n", "").strip()
 
 
 def video_metadata(path: Path) -> tuple[float, int, float]:
+    import cv2
+
     capture = cv2.VideoCapture(str(path))
     fps = float(capture.get(cv2.CAP_PROP_FPS) or 0.0)
     frames = int(capture.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
@@ -150,6 +204,8 @@ def main():
     progress_path = args.output_dir / "progress.jsonl"
     results_path = args.output_dir / "results.jsonl"
     summary_path = args.output_dir / "summary.json"
+    run_manifest_path = args.output_dir / "run-manifest.json"
+    timeline_path = args.output_dir / "timeline.sqlite3"
     qa_path = args.data_dir / "EgoLife_QA.json"
     videos = sorted(args.data_dir.glob("*.mp4"))
     if args.video_id:
@@ -175,7 +231,41 @@ def main():
             grouped[video_id], args.max_questions_per_video, args.seed
         )
 
-    completed = {row["key"] for row in read_jsonl(results_path)}
+    video_hashes = {video.stem: sha256(video) for video in videos}
+    run_manifest = {
+        "schemaVersion": RUN_MANIFEST_VERSION,
+        "backend": args.backend,
+        "model": args.model_id if args.backend == "local" else args.api_model,
+        "precision": args.precision,
+        "encoderDevice": args.encoder_device,
+        "sampleFps": args.fps,
+        "sampling": {
+            "seed": args.seed,
+            "maxVideos": args.max_videos,
+            "maxQuestionsPerVideo": args.max_questions_per_video,
+            "alpha": args.alpha,
+            "calibrationRatio": args.calibration_ratio,
+        },
+        "qaSha256": sha256(qa_path),
+        "videos": [
+            {"id": video.stem, "name": video.name, "sha256": video_hashes[video.stem]}
+            for video in videos
+        ],
+    }
+    artifacts_exist = (
+        results_path.exists()
+        or summary_path.exists()
+        or timeline_path.exists()
+        or any((args.output_dir / "memory").glob("*/manifest.json"))
+    )
+    run_fingerprint = ensure_run_manifest(
+        run_manifest_path, run_manifest, artifacts_exist=artifacts_exist,
+    )
+    expected_keys = {
+        row["key"] for rows_for_video in grouped.values() for row in rows_for_video
+    }
+    existing_results = read_jsonl(results_path)
+    completed = validate_existing_results(existing_results, expected_keys, video_hashes)
     total = sum(len(rows) for rows in grouped.values())
     append_jsonl(progress_path, {
         "event": "start", "time": time.time(), "total": total,
@@ -209,22 +299,40 @@ def main():
         ingest_started = time.perf_counter()
         assistant = StreamingMemoryAssistant(backend, cfg)
         snapshot_dir = args.output_dir / "memory" / video.stem
+        snapshot_provenance = {
+            "runFingerprint": run_fingerprint,
+            "videoId": video.stem,
+            "videoSha256": video_hashes[video.stem],
+            "sampleFps": args.fps,
+        }
         if (snapshot_dir / "manifest.json").exists():
-            segment_count = load_memory(assistant.memory, snapshot_dir)
+            segment_count = load_memory(
+                assistant.memory,
+                snapshot_dir,
+                expected_provenance=snapshot_provenance,
+            )
             memory_reused = True
         else:
             segment_count = assistant.ingest(VideoFileStream(str(video), fps=args.fps))
             memory_reused = False
         ingest_seconds = time.perf_counter() - ingest_started
         memories = assistant.memory.all_items()
+        timeline_cards = import_visual_items(
+            TimelineMemory(timeline_path),
+            memories,
+            user_id="egolife-benchmark",
+            case_id=video.stem,
+            source=f"egolife:{video.stem}:{video_hashes[video.stem]}",
+        )
         caption = " | ".join(item.caption for item in memories)
         invalid_caption = "[invalid visual caption]" in caption
         snapshot_path = save_memory(
-            assistant.memory, snapshot_dir
+            assistant.memory, snapshot_dir, provenance=snapshot_provenance,
         )
         append_jsonl(progress_path, {
             "event": "memory_saved", "time": time.time(), "video": video.name,
             "manifest": str(snapshot_path), "items": len(memories),
+            "timeline": str(timeline_path), "timeline_cards": len(timeline_cards),
             "reused": memory_reused,
         })
         for row in pending:
@@ -239,7 +347,7 @@ def main():
             }
             output = {
                 "key": row["key"], "video_id": video.stem, "video": video.name,
-                "video_sha256": sha256(video), "source_fps": fps,
+                "video_sha256": video_hashes[video.stem], "source_fps": fps,
                 "source_frames": frame_count, "source_seconds": duration,
                 "question": row["question"], "reference": row["answer"],
                 "prediction": result.answered_text,
@@ -280,7 +388,9 @@ def main():
             "invalid_caption": invalid_caption,
         })
 
-    all_results = read_jsonl(results_path)
+    all_results = [
+        row for row in read_jsonl(results_path) if row.get("key") in expected_keys
+    ]
     summary = build_summary(all_results, args.alpha, args.seed, args.calibration_ratio)
     summary.update({
         "model": evaluated_model,
@@ -291,6 +401,7 @@ def main():
         "encoder_device": args.encoder_device,
         "api_usage": getattr(backend, "usage", None),
         "results_path": str(results_path),
+        "run_fingerprint": run_fingerprint,
     })
     with summary_path.open("w", encoding="utf-8") as handle:
         json.dump(summary, handle, ensure_ascii=False, indent=2)

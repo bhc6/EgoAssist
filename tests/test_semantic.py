@@ -21,6 +21,12 @@ def decision(**overrides):
         "taskControl": "none",
         "preferenceIntent": "none",
         "memoryQuery": "none",
+        "memoryKind": "none",
+        "memoryText": "none",
+        "memoryKey": "none",
+        "memoryScope": "none",
+        "memoryConsent": "none",
+        "skillControl": "none",
         "skill": "none",
     }
     value.update(overrides)
@@ -87,6 +93,36 @@ def test_semantic_router_validates_skill_against_disclosed_catalog():
     assert result["selectedSkill"] == "kitchen-coach"
 
 
+def test_semantic_router_accepts_typed_skill_deactivation():
+    router = SemanticTurnRouter(
+        "test-key",
+        generation_call=lambda **_: provider_response(
+            decision(skillControl="deactivate"),
+        ),
+    )
+
+    result = asyncio.run(router.classify("return to general mode", []))
+
+    assert result["skillControl"] == "deactivate"
+    assert result["selectedSkill"] is None
+
+
+def test_semantic_router_rejects_deactivation_with_skill_selection():
+    router = SemanticTurnRouter(
+        "test-key",
+        generation_call=lambda **_: provider_response(
+            decision(skillControl="deactivate", skill="kitchen-coach"),
+        ),
+    )
+    catalog = [{"name": "kitchen-coach", "description": "Cooking guidance"}]
+
+    result = asyncio.run(router.classify("conflicting control", catalog))
+
+    assert result["status"] == "invalid"
+    assert result["skillControl"] is None
+    assert result["selectedSkill"] is None
+
+
 def test_semantic_router_exposes_all_auditable_turn_labels():
     router = SemanticTurnRouter(
         "test-key",
@@ -102,6 +138,42 @@ def test_semantic_router_exposes_all_auditable_turn_labels():
     assert result["taskControl"] == "repeat"
     assert result["preferenceIntent"] == "propose-durable"
     assert result["memoryQuery"] == "referential"
+
+
+def test_semantic_router_accepts_explicit_participant_fact_card():
+    router = SemanticTurnRouter(
+        "test-key",
+        generation_call=lambda **_: provider_response(decision(
+            memoryKind="fact",
+            memoryText="小李的电话号码是13657352908",
+            memoryKey="contact:小李:phone",
+            memoryScope="participant",
+            memoryConsent="explicit",
+        )),
+    )
+
+    result = asyncio.run(router.classify("帮我记住，小李电话是13657352908", []))
+
+    assert result["memoryKind"] == "fact"
+    assert result["memoryText"] == "小李的电话号码是13657352908"
+    assert result["memoryConsent"] == "explicit"
+
+
+def test_semantic_router_rejects_question_disguised_as_memory_card_scope():
+    router = SemanticTurnRouter(
+        "test-key",
+        generation_call=lambda **_: provider_response(decision(
+            memoryKind="event",
+            memoryText="用户今天吃过药",
+            memoryScope="participant",
+            memoryConsent="observed",
+        )),
+    )
+
+    result = asyncio.run(router.classify("我今天吃过药了吗？", []))
+
+    assert result["status"] == "invalid"
+    assert result["memoryKind"] is None
 
 
 def test_semantic_router_rejects_extra_fields():
@@ -132,3 +204,4 @@ def test_semantic_router_timeout_fails_open_without_state_labels():
     assert result["taskControl"] is None
     assert result["preferenceIntent"] is None
     assert result["memoryQuery"] is None
+    assert result["memoryKind"] is None

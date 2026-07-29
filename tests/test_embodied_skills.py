@@ -55,7 +55,8 @@ def test_skill_changes_tool_surface_and_confirmation_policy():
     assembly_tools = registry.get("assembly-coach").manifest["tools"]
 
     timer = executor.execute("set_timer", {"seconds": 2}, kitchen_tools)
-    assert timer["status"] == "scheduled"
+    assert timer["status"] == "unsupported"
+    assert "no persistent alarm" in timer["reason"]
     pending = executor.execute("request_human_help", {}, kitchen_tools)
     assert pending["status"] == "confirmation_required"
     with pytest.raises(ValueError, match="not available"):

@@ -64,3 +64,21 @@ def test_research_replay_uses_active_task_step_ids():
     assert observed["observation"]["step"] == session.current_step.id
     assert observed["observation"]["source"] == "research-replay/deterministic"
     assert observed["decision"]["action"] == "ask"
+
+
+@pytest.mark.parametrize("mutation, message", [
+    (lambda payload: payload.update(title="x" * 161), "task title"),
+    (lambda payload: payload["steps"][0].update(instruction="x" * 1201), "instruction"),
+    (lambda payload: payload["steps"][0].update(unexpected=True), "unknown task step"),
+    (lambda payload: payload.update(aliases=["alias"] * 33), "aliases"),
+])
+def test_dynamic_task_validation_bounds_required_context(mutation, message):
+    payload = {
+        "id": "dynamic-task", "title": "Dynamic", "version": "1", "role": "coach",
+        "steps": [{
+            "id": "one", "title": "One", "instruction": "Do one", "completion": "Done",
+        }],
+    }
+    mutation(payload)
+    with pytest.raises(ValueError, match=message):
+        TaskSpec.from_dict(payload)

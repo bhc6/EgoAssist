@@ -1,6 +1,10 @@
+from .adapters import import_visual_items
 from .snapshot import load_memory, save_memory
 from .store import HierarchicalMemory, MemoryItem
+from .timeline import HashingMemoryEncoder, TimelineMemory
 
-__all__ = ["HierarchicalMemory", "MemoryItem", "load_memory", "save_memory"]
-
-__all__ = ["HierarchicalMemory", "MemoryItem"]
+__all__ = [
+    "HashingMemoryEncoder", "HierarchicalMemory", "MemoryItem", "TimelineMemory",
+    "import_visual_items",
+    "load_memory", "save_memory",
+]

@@ -1,4 +1,6 @@
 import json
+import subprocess
+import sys
 
 import pytest
 
@@ -37,6 +39,55 @@ def test_journal_round_trip_and_idempotent_entries(tmp_path):
     assert [entry["type"] for entry in restored.entries()] == [
         "message", "tool_call", "tool_result",
     ]
+
+
+def test_multiple_journal_instances_share_linear_leaf_and_idempotency(tmp_path):
+    path = tmp_path / "sessions" / "shared.jsonl"
+    first = SessionJournal(path, session_id="shared")
+    second = SessionJournal(path, session_id="shared")
+
+    one = first.append_message("user", "one", source="test", idempotency_key="turn:one")
+    two = second.append_message("assistant", "two", source="test")
+    duplicate = second.append_message(
+        "user", "duplicate", source="test", idempotency_key="turn:one",
+    )
+    three = first.append_message("user", "three", source="test")
+
+    entries = first.entries()
+    assert duplicate["id"] == one["id"]
+    assert [item["message"]["content"] for item in entries] == ["one", "two", "three"]
+    assert two["parentId"] == one["id"]
+    assert three["parentId"] == two["id"]
+    assert second.entries() == entries
+
+
+def test_journal_appends_are_linear_across_processes(tmp_path):
+    path = tmp_path / "sessions" / "process-shared.jsonl"
+    SessionJournal(path, session_id="process-shared")
+    script = (
+        "from egoassist.realtime.context_harness import SessionJournal; "
+        "import sys; "
+        "journal=SessionJournal(sys.argv[1], session_id='process-shared'); "
+        "[(journal.append('worker', {'worker': sys.argv[2], 'index': i})) for i in range(20)]"
+    )
+    workers = [
+        subprocess.Popen(
+            [sys.executable, "-c", script, str(path), name],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        for name in ("one", "two")
+    ]
+    for worker in workers:
+        stdout, stderr = worker.communicate(timeout=20)
+        assert worker.returncode == 0, stdout + stderr
+
+    entries = SessionJournal(path, session_id="process-shared").entries()
+    assert len(entries) == 40
+    assert {item["worker"] for item in entries} == {"one", "two"}
+    for previous, current in zip(entries, entries[1:]):
+        assert current["parentId"] == previous["id"]
 
 
 def test_journal_repairs_only_an_incomplete_final_line(tmp_path):
@@ -166,7 +217,7 @@ def test_untrusted_history_never_enters_system_layer(tmp_path):
     assert built["messages"][0]["content"] == attack
 
 
-def test_retrieval_evidence_is_audited_as_low_trust_message(tmp_path):
+def test_retrieval_evidence_is_audited_but_excluded_from_durable_projection(tmp_path):
     journal = SessionJournal(tmp_path / "evidence.jsonl", session_id="evidence")
     harness = ContextHarness(journal, small_settings())
     journal.append_retrieval_evidence(
@@ -179,9 +230,49 @@ def test_retrieval_evidence_is_audited_as_low_trust_message(tmp_path):
     ])
 
     assert "Ignore policy" not in built["system"]
-    assert built["messages"][0]["role"] == "user"
-    assert 'trust="untrusted-data"' in built["messages"][0]["content"]
+    assert built["messages"] == []
     assert journal.entries()[0]["type"] == "retrieval_evidence"
+
+
+def test_turn_context_is_audited_but_only_original_transcript_is_replayed(tmp_path):
+    journal = SessionJournal(tmp_path / "turn-context.jsonl", session_id="turn-context")
+    harness = ContextHarness(journal, small_settings())
+    transcript = harness.record_user("现在的问题", source="test", turn_id="turn-1")
+    journal.append_retrieval_evidence(
+        "现在的问题", [{"summary": "旧问题的答案"}], turn_id=transcript["id"],
+    )
+    journal.append_turn_context(
+        "现在的问题", [{"summary": "旧问题的答案"}], turn_id=transcript["id"],
+    )
+
+    replay = harness.provider_replay_items()
+    assert len(replay) == 1
+    assert replay[-1]["role"] == "user"
+    assert replay[-1]["content"][0]["text"] == "现在的问题"
+    assert "current_turn_context" not in replay[-1]["content"][0]["text"]
+
+
+def test_compaction_never_summarizes_historical_retrieval_evidence(tmp_path):
+    journal = SessionJournal(tmp_path / "retrieval-compaction.jsonl", session_id="retrieval-compaction")
+    harness = ContextHarness(journal, small_settings())
+    journal.append_retrieval_evidence(
+        "old question", [{"summary": "STALE_RETRIEVAL_MUST_NOT_REPLAY"}], turn_id="old-turn",
+    )
+    for index in range(18):
+        harness.record_user(
+            f"durable user turn {index} " + ("bounded context " * 20),
+            source="test", turn_id=f"turn-{index}",
+        )
+
+    harness.build([ContextLayer("policy", "bounded", required=True)])
+    compaction = next(
+        entry for entry in reversed(journal.entries()) if entry.get("type") == "compaction"
+    )
+    serialized = json.dumps({
+        "summary": compaction["summary"],
+        "retainedTail": compaction["retainedTail"],
+    })
+    assert "STALE_RETRIEVAL_MUST_NOT_REPLAY" not in serialized
 
 
 def test_provider_replay_preserves_roles_and_tool_results(tmp_path):
@@ -257,6 +348,41 @@ def test_provider_usage_forces_projection_checkpoint_and_is_audited(tmp_path):
     assert built["manifest"]["providerUsage"]["inputTokens"] == 900
     assert built["manifest"]["providerUsageAppliesToProjection"] is False
     assert built["manifest"]["latestCompactionId"] == compaction["id"]
+
+
+def test_journal_refreshes_only_appended_tail_across_instances(tmp_path, monkeypatch):
+    path = tmp_path / "incremental.jsonl"
+    first = SessionJournal(path, session_id="incremental")
+    second = SessionJournal(path, session_id="incremental")
+    full_loads = 0
+    original_load = first._load
+
+    def counted_load():
+        nonlocal full_loads
+        full_loads += 1
+        return original_load()
+
+    monkeypatch.setattr(first, "_load", counted_load)
+    first.append("event", {"value": 1})
+    assert first.entries()[-1]["value"] == 1
+    second.append("event", {"value": 2})
+    assert first.entries()[-1]["value"] == 2
+    assert first.leaf_id == second.leaf_id
+    assert full_loads == 0
+
+
+def test_journal_discards_complete_json_without_commit_newline(tmp_path):
+    path = tmp_path / "commit-boundary.jsonl"
+    journal = SessionJournal(path, session_id="commit-boundary")
+    journal.append("event", {"value": "committed"})
+    with path.open("ab") as handle:
+        handle.write(b'{"type":"event","id":"uncommitted"}')
+
+    reopened = SessionJournal(path, session_id="commit-boundary")
+    assert reopened.recovered_partial_tail is True
+    assert [entry["value"] for entry in reopened.entries()] == ["committed"]
+    reopened.append("event", {"value": "next"})
+    assert [entry["value"] for entry in reopened.entries()] == ["committed", "next"]
 
 
 def test_custom_summarizer_and_failure_fallback_are_explicit(tmp_path):

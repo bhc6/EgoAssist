@@ -15,7 +15,7 @@
   "tools": [
     {
       "name": "set_timer",
-      "description": "Set a cooking timer with a spoken label",
+      "description": "Check a relative cooking deadline; the local adapter will explicitly report that alarm delivery is unsupported",
       "requires_confirmation": false,
       "handler": "builtin.relative-deadline.v1",
       "arguments": {

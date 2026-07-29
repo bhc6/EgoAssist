@@ -47,12 +47,12 @@ def test_frontend_exposes_memory_pipeline_and_treats_steps_as_reference_map():
     assert "/api/sessions/memory-policy" in script
     assert '"?session=" + encodeURIComponent(selectedSessionId)' in script
     assert 'id="mirrorCamera"' in html
-    assert 'app.js?v=20260729-mirror' in html
+    assert 'app.js?v=20260729-timeline-memory' in html
     assert 'context.translate(canvas.width, 0)' in script
     assert 'coordinateConvention: mirrorCamera ? "horizontally-mirrored" : "camera-native"' in script
     assert 'classList.toggle("mirrored", mirrorCamera)' in script
     assert "generation impact" not in script
-    assert "context injection" in script
+    assert "current-turn injection" in script
 
 
 def test_frontend_prioritizes_pipeline_and_event_provenance():
@@ -83,3 +83,13 @@ def test_frontend_tool_invocation_is_manifest_driven():
     assert "declaration.arguments?.properties" in script
     assert 'tool === "set_timer"' not in script
     assert "state.activeSkill?.allowCustomTasks" in script
+    assert "{...payload, sessionId: selectedSessionId}" in script
+    assert script.count("sessionId: selectedSessionId") >= 5
+    assert "let connectionGeneration = 0" in script
+    assert "generation !== connectionGeneration" in script
+    assert "const connectionSessionId = selectedSessionId" in script
+    assert "let mediaPromise = null" in script
+    assert "let mediaGeneration = 0" in script
+    assert "generation !== mediaGeneration" in script
+    assert "acquired.getTracks().forEach(track => track.stop())" in script
+    assert "socket || connectingPromise ? disconnectRealtime()" in script

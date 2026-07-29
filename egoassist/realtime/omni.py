@@ -20,6 +20,8 @@ from uuid import uuid4
 
 import requests
 
+from .tools import tool_result_succeeded
+
 if TYPE_CHECKING:
     from .context_harness import ContextHarness
 
@@ -394,6 +396,7 @@ class OmniBrowserBridge:
         self._context_harness: ContextHarness | None = None
         self._provider_tools: list[dict[str, Any]] = []
         self._tool_handler: Callable[[str, dict[str, Any], bool], dict[str, Any]] | None = None
+        self._tool_result_handler: Callable[[str, str, Any, bool, dict[str, Any] | None], Any] | None = None
         self._pending_tool_calls: dict[str, dict[str, Any]] = {}
         self._tool_call_signatures: dict[str, tuple[str, str]] = {}
         self._assistant_transcript_buffer = ""
@@ -1066,8 +1069,19 @@ class OmniBrowserBridge:
         is_error: bool,
         provider_call_active: bool = True,
     ) -> None:
+        journal_entry = None
         if self._context_harness:
-            self._context_harness.record_tool_result(call_id, name, result, is_error=is_error)
+            journal_entry = self._context_harness.record_tool_result(
+                call_id, name, result, is_error=is_error,
+            )
+        tool_result_handler = getattr(self, "_tool_result_handler", None)
+        if tool_result_handler:
+            try:
+                tool_result_handler(call_id, name, result, is_error, journal_entry)
+            except Exception as exc:
+                self._trace("timeline.memory.tool-effect.failed", {
+                    "callId": call_id, "name": name, "error": str(exc)[:240],
+                })
         self._trace("tool.result.committed", {
             "callId": call_id, "name": name, "result": result, "isError": is_error,
         })
@@ -1083,8 +1097,15 @@ class OmniBrowserBridge:
                 "callId": call_id, "name": name, "result": result, "isError": is_error,
             })
         if self.conversation and self.connected:
+            succeeded = tool_result_succeeded(result, is_error=is_error)
+            outcome_instruction = (
+                "The committed tool_result reports success; state only its exact effect and limits."
+                if succeeded else
+                "The committed tool_result does not report success; do not claim the action was completed."
+            )
             self.request_response(
-                "Continue the current user turn using the committed tool result. Do not repeat the tool call.",
+                "Continue the current user turn using the committed tool result. Do not repeat the tool call. "
+                + outcome_instruction,
                 priority=100,
                 reason="tool-result",
                 purpose="conversation",
@@ -1110,6 +1131,12 @@ class OmniBrowserBridge:
         self._tool_handler = handler
         if self.connected and self.conversation:
             self._configure_dialogue(self.conversation)
+
+    def set_tool_result_handler(
+        self,
+        handler: Callable[[str, str, Any, bool, dict[str, Any] | None], Any] | None,
+    ) -> None:
+        self._tool_result_handler = handler
 
     def set_context_harness(self, harness: ContextHarness) -> None:
         self._context_harness = harness

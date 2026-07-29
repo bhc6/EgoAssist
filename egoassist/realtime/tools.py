@@ -13,9 +13,10 @@ ToolHandler = Callable[[dict[str, Any], dict[str, Any]], dict[str, Any]]
 def _relative_deadline(arguments: dict[str, Any], declaration: dict[str, Any]) -> dict[str, Any]:
     seconds = arguments["seconds"]
     return {
-        "status": "scheduled",
+        "status": "unsupported",
         "label": arguments.get("label", "")[:80],
         "dueAt": (datetime.now(timezone.utc) + timedelta(seconds=seconds)).isoformat(timespec="seconds"),
+        "reason": "The local adapter can calculate a deadline but has no persistent alarm delivery scheduler.",
     }
 
 
@@ -33,12 +34,25 @@ DEFAULT_HANDLERS: dict[str, ToolHandler] = {
 }
 
 
+def tool_result_succeeded(result: Any, *, is_error: bool = False) -> bool:
+    if is_error or not isinstance(result, dict):
+        return False
+    return str(result.get("status", "")).casefold() in {
+        "accepted", "completed", "ok", "scheduled", "success", "succeeded",
+    }
+
+
 class SkillToolExecutor:
     """Validate a Skill-owned contract, then dispatch to a registered adapter."""
 
-    def __init__(self, handlers: Mapping[str, ToolHandler] | None = None) -> None:
+    def __init__(
+        self,
+        handlers: Mapping[str, ToolHandler] | None = None,
+        *,
+        audit: list[dict[str, Any]] | None = None,
+    ) -> None:
         self._handlers = dict(DEFAULT_HANDLERS if handlers is None else handlers)
-        self.audit: list[dict[str, Any]] = []
+        self.audit: list[dict[str, Any]] = [dict(item) for item in (audit or [])]
 
     def register_handler(self, name: str, handler: ToolHandler) -> None:
         if not name or name in self._handlers:

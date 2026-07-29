@@ -28,7 +28,7 @@ def test_exact_memory_retrieval_exposes_rejection_reasons(tmp_path):
     memory.propose_preference(task="research-task", step="a", prompt="说慢一点", evidence="quote")
     memory.resolve_candidate(True)
     result = memory.retrieve("research-task", "b", emit=False)
-    assert result["method"] == "exact-trigger-lookup-v1"
+    assert result["method"] == "timeline-exact-task-trigger-v1"
     assert result["selected"] is None
     assert result["candidates"][0]["rejectionReasons"] == ["checkpoint-mismatch"]
 

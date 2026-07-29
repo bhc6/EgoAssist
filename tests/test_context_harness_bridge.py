@@ -123,6 +123,12 @@ def test_completed_transcript_buffer_is_not_recommitted_at_response_end(tmp_path
 def test_declared_tool_executes_and_commits_result_before_continuation(tmp_path):
     harness = harness_at(tmp_path / "tool.jsonl")
     bridge = make_bridge(harness)
+    committed = []
+    bridge.set_tool_result_handler(
+        lambda call_id, name, result, is_error, entry: committed.append(
+            (call_id, name, result, is_error, entry["type"]),
+        ),
+    )
     bridge.set_tools([
         {
             "name": "timer",
@@ -149,7 +155,48 @@ def test_declared_tool_executes_and_commits_result_before_continuation(tmp_path)
     assert bridge.conversation.items[-1]["type"] == "function_call_output"
     assert json.loads(bridge.conversation.items[-1]["output"])["status"] == "scheduled"
     assert [entry["type"] for entry in harness.journal.entries()] == ["tool_call", "tool_result"]
+    assert committed == [("call-1", "timer", {"status": "scheduled", "seconds": 5}, False, "tool_result")]
     assert bridge.conversation.responses[-1]["instructions"].startswith("Continue the current user turn")
+    assert "reports success" in bridge.conversation.responses[-1]["instructions"]
+
+
+def test_failed_tool_result_cannot_authorize_success_claim(tmp_path):
+    harness = harness_at(tmp_path / "failed-tool.jsonl")
+    bridge = make_bridge(harness)
+    bridge.set_tools([{
+        "name": "timer", "description": "Set a timer",
+        "arguments": {"type": "object", "properties": {}},
+    }], lambda name, arguments, confirmed: {"status": "unsupported", "reason": "no scheduler"})
+
+    bridge._handle_tool_call_event({
+        "call_id": "call-no-timer", "name": "timer", "arguments": "{}",
+    })
+
+    instruction = bridge.conversation.responses[-1]["instructions"]
+    assert "does not report success" in instruction
+    assert "do not claim the action was completed" in instruction
+
+
+def test_tool_effect_memory_failure_does_not_rewrite_committed_tool_outcome(tmp_path):
+    harness = harness_at(tmp_path / "tool-effect-failure.jsonl")
+    bridge = make_bridge(harness)
+    bridge.set_tool_result_handler(
+        lambda *args: (_ for _ in ()).throw(RuntimeError("memory unavailable")),
+    )
+    bridge.set_tools([{
+        "name": "helper", "description": "Local helper",
+        "arguments": {"type": "object", "properties": {}},
+    }], lambda name, arguments, confirmed: {"status": "accepted", "message": "queued locally"})
+
+    bridge._handle_tool_call_event({
+        "call_id": "call-memory-failure", "name": "helper", "arguments": "{}",
+    })
+
+    result_entries = [entry for entry in harness.journal.entries() if entry["type"] == "tool_result"]
+    assert len(result_entries) == 1
+    assert result_entries[0]["result"]["status"] == "accepted"
+    assert json.loads(bridge.conversation.items[-1]["output"])["status"] == "accepted"
+    assert "reports success" in bridge.conversation.responses[-1]["instructions"]
 
 
 def test_qwen_output_item_tool_event_executes_declared_tool(tmp_path):

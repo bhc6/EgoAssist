@@ -71,3 +71,20 @@ def test_pending_candidates_are_isolated_by_experiment_case(tmp_path):
 
     memory.resolve_candidate(True, candidate_scope="case-a")
     assert memory.matching_record("task-a", "step-a")["preference"] == "案例 A 的偏好"
+
+
+def test_pending_candidate_survives_restart_and_remains_case_scoped(tmp_path):
+    path = tmp_path / "memory.json"
+    PreferenceMemory(path).propose_preference(
+        task="task-a",
+        step="step-a",
+        prompt="persist me",
+        evidence="explicit request",
+        candidate_scope="case-a",
+    )
+
+    restarted = PreferenceMemory(path)
+    assert restarted.snapshot(candidate_scope="case-a")["candidate"]["prompt"] == "persist me"
+    assert restarted.snapshot(candidate_scope="case-b")["candidate"] is None
+    restarted.resolve_candidate(False, candidate_scope="case-a")
+    assert PreferenceMemory(path).snapshot(candidate_scope="case-a")["candidate"] is None

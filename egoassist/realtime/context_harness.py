@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
+from contextlib import contextmanager
 import hashlib
 import json
 import os
@@ -21,6 +22,44 @@ from uuid import uuid4
 JOURNAL_VERSION = 1
 _VALID_SESSION_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
 _MESSAGE_ROLES = {"user", "assistant"}
+_PATH_LOCKS: dict[str, threading.RLock] = {}
+_PATH_LOCKS_GUARD = threading.Lock()
+
+
+def _path_lock(path: Path) -> threading.RLock:
+    key = os.path.normcase(str(path.resolve(strict=False)))
+    with _PATH_LOCKS_GUARD:
+        return _PATH_LOCKS.setdefault(key, threading.RLock())
+
+
+@contextmanager
+def _file_lock(path: Path):
+    """Serialize journal transactions across processes on Windows and POSIX."""
+    lock_path = path.with_name(path.name + ".lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("a+b") as handle:
+        handle.seek(0, os.SEEK_END)
+        if handle.tell() == 0:
+            handle.write(b"\0")
+            handle.flush()
+        handle.seek(0)
+        if os.name == "nt":
+            import msvcrt
+
+            msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
+            try:
+                yield
+            finally:
+                handle.seek(0)
+                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
 def _now() -> str:
@@ -79,26 +118,28 @@ class SessionJournal:
         metadata: Mapping[str, Any] | None = None,
     ) -> None:
         self.path = Path(path)
-        self._lock = threading.RLock()
+        self._lock = _path_lock(self.path)
         self.recovered_partial_tail = False
         self._entries: list[dict[str, Any]] = []
         self._idempotency: dict[str, str] = {}
-        if self.path.exists():
-            self._load()
-            if session_id is not None and session_id != self.session_id:
-                raise ValueError("journal session id does not match requested session")
-        else:
-            chosen = session_id or uuid4().hex
-            self._validate_session_id(chosen)
-            self.session_id = chosen
-            self.header = {
-                "type": "session",
-                "version": JOURNAL_VERSION,
-                "id": self.session_id,
-                "createdAt": _now(),
-                "metadata": dict(metadata or {}),
-            }
-            self._append_line(self.header)
+        self._loaded_size = 0
+        with self._lock, _file_lock(self.path):
+            if self.path.exists():
+                self._load()
+                if session_id is not None and session_id != self.session_id:
+                    raise ValueError("journal session id does not match requested session")
+            else:
+                chosen = session_id or uuid4().hex
+                self._validate_session_id(chosen)
+                self.session_id = chosen
+                self.header = {
+                    "type": "session",
+                    "version": JOURNAL_VERSION,
+                    "id": self.session_id,
+                    "createdAt": _now(),
+                    "metadata": dict(metadata or {}),
+                }
+                self._append_line(self.header)
 
     @classmethod
     def open_in(cls, root: str | Path, session_id: str, **kwargs: Any) -> "SessionJournal":
@@ -111,18 +152,21 @@ class SessionJournal:
             raise ValueError("invalid session id")
 
     def _load(self) -> None:
+        self.recovered_partial_tail = False
+        self._entries = []
+        self._idempotency = {}
         raw = self.path.read_bytes()
         lines = raw.splitlines(keepends=True)
         values: list[dict[str, Any]] = []
         valid_bytes = 0
         for index, line in enumerate(lines):
             complete = line.endswith((b"\n", b"\r"))
+            if index == len(lines) - 1 and not complete:
+                self.recovered_partial_tail = True
+                break
             try:
                 value = json.loads(line.decode("utf-8"))
             except (UnicodeDecodeError, json.JSONDecodeError):
-                if index == len(lines) - 1 and not complete:
-                    self.recovered_partial_tail = True
-                    break
                 raise ValueError(f"invalid session journal at line {index + 1}: {self.path}")
             if not isinstance(value, dict):
                 raise ValueError(f"invalid session entry at line {index + 1}: {self.path}")
@@ -145,6 +189,49 @@ class SessionJournal:
             key = entry.get("idempotencyKey")
             if key:
                 self._idempotency[str(key)] = str(entry["id"])
+        self._loaded_size = valid_bytes
+
+    def _refresh(self) -> None:
+        """Parse only bytes appended since this instance's last consistent view."""
+        try:
+            current_size = self.path.stat().st_size
+        except FileNotFoundError:
+            raise ValueError(f"missing session journal: {self.path}") from None
+        if current_size == self._loaded_size:
+            return
+        if current_size < self._loaded_size:
+            self._load()
+            return
+        with self.path.open("rb") as handle:
+            handle.seek(self._loaded_size)
+            raw = handle.read()
+        lines = raw.splitlines(keepends=True)
+        valid_tail_bytes = 0
+        self.recovered_partial_tail = False
+        for index, line in enumerate(lines):
+            complete = line.endswith((b"\n", b"\r"))
+            if index == len(lines) - 1 and not complete:
+                self.recovered_partial_tail = True
+                break
+            try:
+                value = json.loads(line.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                raise ValueError(f"invalid appended session journal data: {self.path}") from None
+            if not isinstance(value, dict):
+                raise ValueError(f"invalid appended session entry: {self.path}")
+            if value.get("type") == "session":
+                raise ValueError(f"unexpected appended session header: {self.path}")
+            self._entries.append(value)
+            key = value.get("idempotencyKey")
+            if key:
+                self._idempotency[str(key)] = str(value["id"])
+            valid_tail_bytes += len(line)
+        self._loaded_size += valid_tail_bytes
+        if self.recovered_partial_tail:
+            with self.path.open("r+b") as handle:
+                handle.truncate(self._loaded_size)
+                handle.flush()
+                os.fsync(handle.fileno())
 
     def _append_line(self, value: Mapping[str, Any]) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -153,6 +240,7 @@ class SessionJournal:
             handle.write(payload)
             handle.flush()
             os.fsync(handle.fileno())
+        self._loaded_size += len(payload)
 
     def append(
         self,
@@ -162,14 +250,17 @@ class SessionJournal:
         idempotency_key: str | None = None,
         parent_id: str | None = None,
     ) -> dict[str, Any]:
-        with self._lock:
+        with self._lock, _file_lock(self.path):
+            self._refresh()
             if idempotency_key and idempotency_key in self._idempotency:
                 existing_id = self._idempotency[idempotency_key]
                 return dict(next(item for item in self._entries if item["id"] == existing_id))
             entry = {
                 "type": entry_type,
                 "id": uuid4().hex[:16],
-                "parentId": parent_id if parent_id is not None else self.leaf_id,
+                "parentId": parent_id if parent_id is not None else (
+                    str(self._entries[-1]["id"]) if self._entries else None
+                ),
                 "timestamp": _now(),
                 **dict(payload),
             }
@@ -183,10 +274,13 @@ class SessionJournal:
 
     @property
     def leaf_id(self) -> str | None:
-        return str(self._entries[-1]["id"]) if self._entries else None
+        with self._lock, _file_lock(self.path):
+            self._refresh()
+            return str(self._entries[-1]["id"]) if self._entries else None
 
     def entries(self) -> list[dict[str, Any]]:
-        with self._lock:
+        with self._lock, _file_lock(self.path):
+            self._refresh()
             return [dict(item) for item in self._entries]
 
     def append_message(
@@ -264,17 +358,41 @@ class SessionJournal:
     ) -> dict[str, Any]:
         return self.append(
             "retrieval_evidence",
-            {"query": str(query), "evidence": [dict(item) for item in evidence], "trust": "untrusted-data"},
+            {
+                "query": str(query),
+                "evidence": [dict(item) for item in evidence],
+                "trust": "untrusted-data",
+                "turnId": str(turn_id),
+            },
             idempotency_key=f"retrieval-evidence:{turn_id}",
+        )
+
+    def append_turn_context(
+        self,
+        transcript: str,
+        evidence: list[Mapping[str, Any]],
+        *,
+        turn_id: str,
+    ) -> dict[str, Any]:
+        return self.append(
+            "turn_context",
+            {
+                "transcript": str(transcript),
+                "retrievalEvidence": [dict(item) for item in evidence],
+                "trust": "untrusted-user-data",
+                "turnId": str(turn_id),
+            },
+            idempotency_key=f"turn-context:{turn_id}",
         )
 
     def pending_tool_confirmations(self) -> dict[str, dict[str, Any]]:
         pending: dict[str, dict[str, Any]] = {}
+        entries = self.entries()
         completed = {
-            str(entry.get("callId")) for entry in self._entries
+            str(entry.get("callId")) for entry in entries
             if entry.get("type") == "tool_result"
         }
-        for entry in self._entries:
+        for entry in entries:
             if entry.get("type") == "tool_confirmation" and entry.get("status") == "pending":
                 call_id = str(entry.get("callId", ""))
                 if call_id and call_id not in completed:
@@ -403,16 +521,11 @@ class ContextHarness:
                 "callId": entry.get("callId"),
             }
         if entry_type == "retrieval_evidence":
-            return {
-                "role": "user",
-                "content": "<retrieval_evidence trust=\"untrusted-data\">\n"
-                + json.dumps({
-                    "query": entry.get("query"), "evidence": entry.get("evidence", []),
-                }, ensure_ascii=False, sort_keys=True)
-                + "\n</retrieval_evidence>",
-                "entryId": entry.get("id"),
-                "status": "completed",
-            }
+            # Retrieval is a per-turn projection. Keep its durable audit event,
+            # but never replay stale evidence or fold it into compaction.
+            return None
+        if entry_type == "turn_context":
+            return None
         return None
 
     def _context_messages(self) -> tuple[list[dict[str, Any]], str | None]:

@@ -187,6 +187,11 @@ class SkillRuntime:
     def active(self) -> bool:
         return self.skill is not None
 
+    def set_event_sink(self, event_sink: Callable[..., Any] | None) -> None:
+        self._event_sink = event_sink
+        if self.task is not None:
+            self.task.set_event_sink(event_sink)
+
     def activate(self, name: str, *, select_default: bool = True) -> None:
         self.skill = self.registry.get(name)
         self.custom_tasks = {}
