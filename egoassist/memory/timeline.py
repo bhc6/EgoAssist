@@ -24,6 +24,8 @@ MEMORY_KINDS = {
     "scene", "observation", "tool-effect", "capture", "legacy",
 }
 RETRIEVABLE_KINDS = MEMORY_KINDS - {"capture"}
+DEFAULT_RETRIEVABLE_KINDS = RETRIEVABLE_KINDS - {"legacy", "scene"}
+DEFAULT_RETRIEVAL_MIN_SCORE = 0.18
 MEMORY_STATUSES = {"active", "pending", "consolidated", "superseded", "deleted", "consumed"}
 MEMORY_SCOPES = {"case", "participant"}
 MEMORY_TIERS = {"short", "long"}
@@ -700,7 +702,7 @@ class TimelineMemory:
         query_vector = np.asarray(self.encoder(query), dtype=np.float32).reshape(-1)
         if np.linalg.norm(query_vector):
             query_vector = query_vector / np.linalg.norm(query_vector)
-        requested_kinds = set(kinds or RETRIEVABLE_KINDS)
+        requested_kinds = set(DEFAULT_RETRIEVABLE_KINDS if kinds is None else kinds)
         requested_kinds.discard("capture")
         clauses = ["user_id=?", "scope=?", "status='active'"]
         values: list[Any] = [str(user_id), scope]
@@ -760,12 +762,26 @@ class TimelineMemory:
             )
             digit_bonus = 0.12 if set(_DIGITS.findall(query_normalized)) & set(_DIGITS.findall(card["normalizedText"])) else 0.0
             kind_bonus = 0.08 if card["kind"] in {"fact", "state", "tool-effect"} else 0.04 if card["kind"] in {"event", "preference", "task-preference"} else 0.0
+            structured_bonus = (
+                0.24 if query_subject and query_predicate and subject_eligible and predicate_eligible
+                else 0.14 if (query_subject and subject_eligible) or (query_predicate and predicate_eligible)
+                else 0.0
+            )
+            time_bonus = 0.08 if wants_today and time_eligible and card["dayKey"] == today_key else 0.0
             recency = math.exp(-age_seconds / (7 * 86400.0)) * 0.08
-            score = max(0.0, 0.62 * semantic + 0.26 * lexical + digit_bonus + kind_bonus + recency - layer_penalty)
+            score = max(
+                0.0,
+                0.62 * semantic + 0.26 * lexical + digit_bonus + kind_bonus
+                + structured_bonus + time_bonus + recency - layer_penalty,
+            )
             structured_match = bool(query_subject or query_predicate) and subject_eligible and predicate_eligible
+            fallback_card = card.get("metadata", {}).get("source") == "semantic-memory-fallback"
+            fallback_match = fallback_card and lexical >= 0.18
             eligible = time_eligible and subject_eligible and predicate_eligible and (
                 structured_match or overlap > 0 or semantic_evidence
             )
+            if fallback_match and time_eligible:
+                eligible = True
             reasons = []
             if overlap:
                 reasons.append("term-overlap")
@@ -800,7 +816,9 @@ class TimelineMemory:
             key=lambda item: (item["score"], item["card"]["happenedAt"]),
             reverse=True,
         )
-        selected = [item for item in candidates if item["score"] >= 0.08][:max(1, int(limit))]
+        selected = [
+            item for item in candidates if item["score"] >= DEFAULT_RETRIEVAL_MIN_SCORE
+        ][:max(1, int(limit))]
         selected_ids = {item["cardId"] for item in selected}
         for item in candidates:
             item["selected"] = item["cardId"] in selected_ids
@@ -818,6 +836,7 @@ class TimelineMemory:
                 "clock": clock.prompt_payload(),
                 "querySpec": {"subject": query_subject, "predicate": query_predicate},
             },
+            "minimumScore": DEFAULT_RETRIEVAL_MIN_SCORE,
             "candidates": candidates[:20],
             "selected": selected,
             "injection": {"status": "not-injected", "cardIds": []},

@@ -6,7 +6,10 @@ import json
 from pathlib import Path
 from typing import Any, Callable
 
-from egoassist.memory.timeline import RETRIEVABLE_KINDS, TimelineMemory, looks_like_question
+from egoassist.memory.timeline import (
+    DEFAULT_RETRIEVABLE_KINDS, DEFAULT_RETRIEVAL_MIN_SCORE, TimelineMemory,
+    looks_like_question,
+)
 from egoassist.memory.temporal import ClockContext
 
 
@@ -163,7 +166,7 @@ class RealtimeEpisodeMemory:
             case_id=case_id,
             scope=memory_scope,
             limit=limit,
-            kinds=RETRIEVABLE_KINDS - {"task-preference"},
+            kinds=DEFAULT_RETRIEVABLE_KINDS - {"task-preference"},
             clock=clock,
             query_spec=query_spec,
         )
@@ -181,7 +184,7 @@ class RealtimeEpisodeMemory:
                 "memoryScope": memory_scope,
             },
             "routing": raw["routing"],
-            "minimumScore": 0.08,
+            "minimumScore": raw["minimumScore"],
             "candidates": candidates,
             "selected": selected,
             "injection": {"status": "not-injected", "episodeIds": []},
@@ -357,7 +360,7 @@ class RealtimeEpisodeMemory:
             "referential": False,
             "scope": {},
             "routing": {"recent": False, "today": False, "longTerm": False, "layers": []},
-            "minimumScore": 0.08,
+            "minimumScore": DEFAULT_RETRIEVAL_MIN_SCORE,
             "candidates": [],
             "selected": [],
             "injection": {"status": "not-injected", "episodeIds": []},

@@ -8,6 +8,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
+from .capabilities import (
+    executable_tool_declarations,
+    public_tool_declaration,
+    skill_capability_truth,
+)
 from .task import TaskSession, TaskSpec
 
 
@@ -72,7 +77,7 @@ class SkillPackage:
         )
 
     def realtime_instructions(self, task_spec: TaskSpec, memories: list[dict[str, Any]]) -> str:
-        tools = self.manifest.get("tools", [])
+        tools = executable_tool_declarations(self.manifest.get("tools", []))
         tool_text = "\n".join(
             f"- {tool['name']}: {tool.get('description', '')}; 需要确认={tool.get('requires_confirmation', True)}"
             for tool in tools
@@ -93,8 +98,12 @@ class SkillPackage:
                 {"id": task.id, "title": task.title, "version": task.version, "provenance": task.provenance}
                 for task in self.task_specs.values()
             ],
-            "tools": self.manifest.get("tools", []),
+            "tools": [
+                public_tool_declaration(tool)
+                for tool in self.manifest.get("tools", [])
+            ],
             "capabilities": self.manifest.get("capabilities", []),
+            "capabilityTruth": skill_capability_truth(self.manifest),
         }
 
 

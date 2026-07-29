@@ -6,6 +6,8 @@ from collections.abc import Callable, Mapping
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+from .capabilities import tool_truth
+
 
 ToolHandler = Callable[[dict[str, Any], dict[str, Any]], dict[str, Any]]
 
@@ -23,8 +25,8 @@ def _relative_deadline(arguments: dict[str, Any], declaration: dict[str, Any]) -
 def _local_acknowledgement(arguments: dict[str, Any], declaration: dict[str, Any]) -> dict[str, Any]:
     configured = declaration.get("result", {})
     return {
-        "status": str(configured.get("status", "accepted")),
-        "message": str(configured.get("message", "The request was accepted by the local adapter.")),
+        "status": str(configured.get("status", "demo-only")),
+        "message": str(configured.get("message", "No external product connector is configured.")),
     }
 
 
@@ -72,6 +74,21 @@ class SkillToolExecutor:
         if not isinstance(arguments, dict):
             raise ValueError("tool arguments must be an object")
         validated = self._validate_arguments(arguments, declaration.get("arguments", {}))
+        availability = tool_truth(declaration)
+        if not availability["executable"]:
+            result = {
+                "status": availability["status"],
+                "tool": str(tool),
+                "reason": availability["reason"],
+            }
+            self.audit.append({
+                "time": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                "tool": tool,
+                "handler": str(declaration.get("handler", "")),
+                "arguments": validated,
+                "result": result,
+            })
+            return result
         if declaration.get("requires_confirmation", True) and not confirmed:
             return {"status": "confirmation_required", "tool": tool, "arguments": validated}
         handler_name = str(declaration.get("handler", ""))

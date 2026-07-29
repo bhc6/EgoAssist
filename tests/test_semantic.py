@@ -2,7 +2,10 @@ import asyncio
 import json
 from types import SimpleNamespace
 
-from egoassist.realtime import SemanticTurnRouter, TURN_ROUTER_POLICY_VERSION
+from egoassist.realtime import (
+    SemanticTurnRouter, TURN_ROUTER_POLICY_VERSION, explicit_memory_fallback_atoms,
+    is_explicit_memory_request, memory_draft_candidate,
+)
 
 
 def provider_response(content, status_code=200):
@@ -91,6 +94,25 @@ def test_semantic_router_validates_skill_against_disclosed_catalog():
 
     assert result["skillStatus"] == "matched"
     assert result["selectedSkill"] == "kitchen-coach"
+
+
+def test_semantic_router_accepts_background_intent_lifecycle_label():
+    router = SemanticTurnRouter(
+        "test-key",
+        generation_call=lambda **_: provider_response(
+            decision(intentKind="background-reminder"),
+        ),
+    )
+    result = asyncio.run(router.classify("remind me later", []))
+    assert result["intentKind"] == "background-reminder"
+
+
+def test_legacy_semantic_output_defaults_to_foreground_intent():
+    router = SemanticTurnRouter(
+        "test-key", generation_call=lambda **_: provider_response(decision()),
+    )
+    result = asyncio.run(router.classify("ordinary turn", []))
+    assert result["intentKind"] == "foreground-dialogue"
 
 
 def test_semantic_router_accepts_typed_skill_deactivation():
@@ -258,3 +280,71 @@ def test_structured_router_supplies_clock_and_pending_draft_to_provider():
     assert supplied["transcript"] == "是13659892706"
     assert supplied["clock"]["timezone"] == "Asia/Shanghai"
     assert supplied["pendingMemoryDraft"]["subject"] == "小李"
+
+
+def test_server_memory_intent_gate_rejects_questions_and_unrelated_drafts():
+    assert is_explicit_memory_request("你帮我记几个电话吧。") is True
+    assert is_explicit_memory_request("我最后再说一遍，你必须记住这个位置。") is True
+    assert is_explicit_memory_request("你现在记住了吗？") is False
+    assert is_explicit_memory_request("我手上拿的是什么？") is False
+
+    unrelated, reason = memory_draft_candidate(
+        "我手上拿的是什么？",
+        {"mode": "start", "subject": None, "predicate": "phone", "missingFields": ["subject", "value"]},
+        {"subject": None, "predicate": "phone", "missingFields": ["subject", "value"]},
+    )
+    assert unrelated is None
+    assert reason == "draft-start-without-explicit-memory-request"
+
+
+def test_server_memory_draft_continuation_requires_typed_progress():
+    pending = {"subject": None, "predicate": "phone", "missingFields": ["subject", "value"]}
+    accepted, reason = memory_draft_candidate(
+        "是小李的电话",
+        {"mode": "continue", "subject": "小李", "predicate": "phone", "missingFields": ["value"]},
+        pending,
+    )
+    assert accepted["subject"] == "小李"
+    assert reason is None
+
+    rejected, reason = memory_draft_candidate(
+        "你看我做得对吗？",
+        {"mode": "continue", "subject": None, "predicate": "phone", "missingFields": ["subject", "value"]},
+        pending,
+    )
+    assert rejected is None
+    assert reason == "draft-continuation-made-no-progress"
+
+
+def test_explicit_memory_fallback_extracts_failed_trial_phone_atoms():
+    atoms = explicit_memory_fallback_atoms(
+        "呃，小陈的电话是幺三六五七八九五六三二，小李的电话是二六三五七八。"
+        "然后我们这里的报警电话是九幺幺，你都要记住。",
+        {"subject": None, "predicate": "phone", "missingFields": ["subject", "value"]},
+    )
+    assert [(item["subject"], item["predicate"], item["value"]) for item in atoms] == [
+        ("小陈", "phone", "13657895632"),
+        ("小李", "phone", "263578"),
+        ("报警电话", "phone", "911"),
+    ]
+    assert all(item["scope"] == "participant" for item in atoms)
+
+
+def test_explicit_memory_fallback_keeps_location_and_schedule_separate():
+    atoms = explicit_memory_fallback_atoms(
+        "每天中午十二点提醒我吃开瑞坦，开瑞坦放在书桌右边的架子上。",
+        {"subject": None, "predicate": "memory.value", "missingFields": ["subject", "value"]},
+    )
+    assert {(item["predicate"], item["value"]) for item in atoms} == {
+        ("medication.schedule", "每天中午十二点服用开瑞坦"),
+        ("location", "书桌右边的架子上"),
+    }
+
+
+def test_explicit_memory_fallback_associates_number_before_subject():
+    atoms = explicit_memory_fallback_atoms(
+        "幺二三四五六七，记住这个号码，这是小陈的小号。",
+    )
+    assert [(item["subject"], item["predicate"], item["value"]) for item in atoms] == [
+        ("小陈", "phone", "1234567"),
+    ]

@@ -15,19 +15,27 @@
   "tools": [
     {
       "name": "show_reference",
-      "description": "Show the reference diagram for the current step",
+      "description": "Reference display is unavailable until an artifact resolver and viewer are connected",
+      "availability": {
+        "status": "unsupported",
+        "reason": "No task artifact resolver or browser viewer is connected."
+      },
       "requires_confirmation": false,
       "handler": "builtin.local-acknowledgement.v1",
       "arguments": {"type": "object", "additionalProperties": false, "properties": {}},
-      "result": {"status": "accepted", "message": "参考资料请求已进入本地演示队列；当前未绑定外部查看器。"}
+      "result": {"status": "unsupported", "message": "No artifact resolver or viewer is connected."}
     },
     {
       "name": "request_human_help",
-      "description": "Share minimal recent context with a remote expert",
+      "description": "Demo-only local acknowledgement; no remote expert is contacted",
+      "availability": {
+        "status": "demo-only",
+        "reason": "No external expert queue, connector receipt, or acknowledgement endpoint is configured."
+      },
       "requires_confirmation": true,
       "handler": "builtin.local-acknowledgement.v1",
       "arguments": {"type": "object", "additionalProperties": false, "properties": {}},
-      "result": {"status": "accepted", "message": "求助请求已进入本地演示队列；未连接外部服务。"}
+      "result": {"status": "demo-only", "message": "No external expert or acknowledgement endpoint is connected."}
     }
   ],
   "evaluation": ["intervention_precision", "step_order_accuracy", "recovery_success", "followup_reuse", "barge_in_success"]

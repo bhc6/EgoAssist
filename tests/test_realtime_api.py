@@ -9,7 +9,7 @@ from aiohttp.client_exceptions import WSServerHandshakeError
 
 from egoassist import BUILTIN_SKILLS_ROOT
 from egoassist.memory import TimelineMemory
-from egoassist.realtime import PreferenceMemory
+from egoassist.realtime import CaseWorkLedger, PreferenceMemory, SessionJournal
 import run_egoassist
 from run_egoassist import create_app
 
@@ -194,21 +194,39 @@ def test_grounded_turn_claims_follow_committed_memory_state(tmp_path, monkeypatc
             assert (await ws.receive_json())["type"] == "ready"
             assert (await ws.receive_json())["type"] == "state"
 
-            async def control(text):
+            async def control(text, *, expect_memory_status=False):
+                request_count = len(instances[0].requests)
                 await ws.send_json({"type": "control", "transcript": text})
                 messages = [await ws.receive_json() for _ in range(3)]
                 assert [item["type"] for item in messages] == ["user_transcript", "state", "interrupted"]
-                return instances[0].requests[-1][0]
+                memory_status = await ws.receive_json() if expect_memory_status else None
+                if memory_status:
+                    assert memory_status["type"] == "memory_status"
+                instruction = (
+                    instances[0].requests[-1][0]
+                    if len(instances[0].requests) > request_count
+                    else None
+                )
+                return instruction, memory_status
 
-            capture_instruction = await control("记住一个号码")
-            assert "No memory value was committed" in capture_instruction
-            assert "never say it is saved" in capture_instruction
+            capture_instruction, capture_status = await control(
+                "记住一个号码", expect_memory_status=True,
+            )
+            assert capture_instruction is None
+            assert capture_status["status"] == "needs-input"
+            assert capture_status["committedCardIds"] == []
+            assert "还没有保存" in capture_status["message"]
 
-            committed_instruction = await control("我的号码是13657352908")
-            assert "memory card was durably committed" in committed_instruction
-            assert "do not claim that any reminder" in committed_instruction
+            committed_instruction, committed_status = await control(
+                "我的号码是13657352908", expect_memory_status=True,
+            )
+            assert committed_instruction is None
+            assert committed_status["status"] == "committed"
+            assert len(committed_status["committedCardIds"]) == 1
+            assert committed_status["message"] == "已保存：用户的电话号码是13657352908"
 
-            ordinary_instruction = await control("你现在记住了吗")
+            ordinary_instruction, ordinary_status = await control("你现在记住了吗")
+            assert ordinary_status is None
             assert "No active memory card was committed" in ordinary_instruction
             assert "No tool result has been committed" in ordinary_instruction
             label, injected = instances[0].injections[-1]
@@ -219,6 +237,98 @@ def test_grounded_turn_claims_follow_committed_memory_state(tmp_path, monkeypatc
             await ws.close()
 
     asyncio.run(scenario())
+
+
+def test_failed_trial_sequence_keeps_draft_advisory_and_falls_back_to_durable_atoms(tmp_path, monkeypatch):
+    instances = install_queue_test_bridge(monkeypatch)
+
+    async def classify(_self, text, catalog):
+        result = semantic_result(text)
+        result.update({
+            "memoryKind": None,
+            "memoryText": None,
+            "memoryKey": None,
+            "memoryScope": None,
+            "memoryConsent": None,
+            "memoryAtoms": [],
+            "memoryDraft": None,
+            "memoryQuerySpec": None,
+        })
+        if text == "你帮我记几个电话吧。":
+            result.update({
+                "memoryKind": "capture",
+                "memoryScope": "participant",
+                "memoryConsent": "explicit",
+                "memoryDraft": {
+                    "mode": "start", "subject": None, "predicate": "phone",
+                    "language": "zh", "missingFields": ["subject", "value"],
+                },
+            })
+        elif text == "我手上拿的是什么？":
+            result["memoryDraft"] = {
+                "mode": "start", "subject": None, "predicate": "phone",
+                "language": "zh", "missingFields": ["subject", "value"],
+            }
+        else:
+            result.update({"status": "unavailable", "skillStatus": "unavailable"})
+        return result
+
+    monkeypatch.setattr(run_egoassist.SemanticTurnRouter, "classify", classify)
+
+    async def scenario():
+        app = create_app(
+            str(BUILTIN_SKILLS_ROOT), None,
+            str(tmp_path / "memory.json"), "test-realtime", "Ethan",
+        )
+        async with TestClient(TestServer(app)) as client:
+            user = await register_client(client, "failed-trial-fallback")
+            session_id = (await (await client.post("/api/sessions")).json())["session"]["id"]
+            ws = await client.ws_connect(f"/ws/realtime?session={session_id}")
+            assert (await ws.receive_json())["type"] == "ready"
+            assert (await ws.receive_json())["type"] == "state"
+
+            await ws.send_json({"type": "control", "transcript": "你帮我记几个电话吧。"})
+            first = [await ws.receive_json() for _ in range(4)]
+            assert [item["type"] for item in first] == [
+                "user_transcript", "state", "interrupted", "memory_status",
+            ]
+            assert first[-1]["status"] == "needs-input"
+            assert instances[0].requests == []
+
+            timeline = TimelineMemory(tmp_path / "timeline.sqlite3")
+            draft_id = timeline.pending_draft(user_id=user["id"], case_id=session_id)["id"]
+
+            await ws.send_json({"type": "control", "transcript": "我手上拿的是什么？"})
+            second = [await ws.receive_json() for _ in range(3)]
+            assert [item["type"] for item in second] == ["user_transcript", "state", "interrupted"]
+            assert timeline.pending_draft(user_id=user["id"], case_id=session_id)["id"] == draft_id
+
+            phone_turn = (
+                "小陈的电话是幺三六五七八九五六三二，小李的电话是二六三五七八，"
+                "这里的报警电话是九幺幺，你都要记住。"
+            )
+            await ws.send_json({"type": "control", "transcript": phone_turn})
+            third = [await ws.receive_json() for _ in range(4)]
+            assert [item["type"] for item in third] == [
+                "user_transcript", "state", "interrupted", "memory_status",
+            ]
+            assert third[-1]["status"] == "committed"
+            assert len(third[-1]["committedCardIds"]) == 3
+            assert "小陈的电话号码是13657895632" in third[-1]["message"]
+            assert len(instances[0].requests) == 1
+            await ws.close()
+            return user["id"], session_id
+
+    user_id, session_id = asyncio.run(scenario())
+    timeline = TimelineMemory(tmp_path / "timeline.sqlite3")
+    cards = timeline.cards(user_id=user_id, scope="participant")
+    assert {(card["subject"], card["predicate"], card["value"]) for card in cards} == {
+        ("报警电话", "phone", "911"),
+        ("小李", "phone", "263578"),
+        ("小陈", "phone", "13657895632"),
+    }
+    assert all(card["metadata"]["source"] == "semantic-memory-fallback" for card in cards)
+    assert timeline.pending_draft(user_id=user_id, case_id=session_id) is None
 
 
 def test_participant_memory_survives_restart_when_case_timeline_is_disabled(tmp_path):
@@ -348,6 +458,10 @@ def test_typed_memory_draft_only_consumes_compatible_followup_and_writes_atoms(t
             })
             await voice({
                 "transcript": "记住药的位置和服药规律",
+                "memoryDraft": {
+                    "mode": "start", "subject": None, "predicate": "phone",
+                    "language": "zh", "missingFields": ["subject", "value"],
+                },
                 "memoryAtoms": [
                     {
                         "kind": "state", "text": "维生素D3放在书桌右边的架子上。",
@@ -376,6 +490,18 @@ def test_typed_memory_draft_only_consumes_compatible_followup_and_writes_atoms(t
     schedule = next(item for item in participant if item["predicate"] == "medication.schedule")
     assert schedule["recurrence"]["frequency"] == "daily"
     assert schedule["recurrence"]["localTime"] == "12:00"
+    entries = [
+        json.loads(line)
+        for line in (tmp_path / "users" / user_id / "sessions" / f"{session_id}.jsonl")
+        .read_text(encoding="utf-8").splitlines()
+    ]
+    conflict = next(
+        entry for entry in reversed(entries)
+        if entry.get("eventType") == "timeline.memory.written"
+        and entry.get("payload", {}).get("ignoredDraft")
+    )
+    assert conflict["payload"]["ignoredDraft"]["reason"] == "memory-atoms-precedence"
+    assert len(conflict["payload"]["committedCardIds"]) == 2
 
 def test_explicit_general_preference_is_active_without_second_confirmation(tmp_path):
     async def scenario():
@@ -1131,9 +1257,7 @@ def test_websocket_sessions_isolate_runtime_memory_and_resume_from_journal(tmp_p
 
             first_state = await control(first, "cook fruit salad")
             second_state = await control(second, "assemble flat pack stool")
-            assert {item["name"] for item in instances[0].declarations} == {
-                "set_timer", "request_human_help",
-            }
+            assert instances[0].declarations == []
             assert "activate_skill" not in {item["name"] for item in instances[0].declarations}
             assert first_state["activeSkill"]["name"] == "kitchen-coach"
             assert first_state["task"]["task"]["id"] == "fruit-salad"
@@ -1190,6 +1314,7 @@ def test_websocket_sessions_isolate_runtime_memory_and_resume_from_journal(tmp_p
 def test_realtime_transcripts_are_classified_and_committed_in_fifo_order(tmp_path, monkeypatch):
     instances = install_queue_test_bridge(monkeypatch)
     first_started = asyncio.Event()
+    second_started = asyncio.Event()
     release_first = asyncio.Event()
     classifier_calls = []
 
@@ -1198,6 +1323,8 @@ def test_realtime_transcripts_are_classified_and_committed_in_fifo_order(tmp_pat
         if text == "first turn":
             first_started.set()
             await release_first.wait()
+        elif text == "second turn":
+            second_started.set()
         return semantic_result(text)
 
     monkeypatch.setattr(run_egoassist.SemanticTurnRouter, "classify", classify)
@@ -1217,8 +1344,8 @@ def test_realtime_transcripts_are_classified_and_committed_in_fifo_order(tmp_pat
             instances[0].on_transcript("first turn")
             await asyncio.wait_for(first_started.wait(), timeout=1)
             instances[0].on_transcript("second turn")
-            await asyncio.sleep(0)
-            assert classifier_calls == ["first turn"]
+            await asyncio.wait_for(second_started.wait(), timeout=1)
+            assert set(classifier_calls) == {"first turn", "second turn"}
 
             release_first.set()
             assert (await asyncio.wait_for(ws.receive_json(), timeout=1))["type"] == "state"
@@ -1287,6 +1414,129 @@ def test_new_vad_segment_blocks_old_answer_before_its_transcript_arrives(tmp_pat
     asyncio.run(scenario())
 
 
+def test_unsupported_background_intent_is_honestly_handled_as_foreground(tmp_path, monkeypatch):
+    instances = install_queue_test_bridge(monkeypatch)
+
+    async def classify(_self, text, catalog):
+        if "oatmeal" in text:
+            result = semantic_result(text, selected_skill="kitchen-coach")
+            result["intentKind"] = "background-job"
+            return result
+        return semantic_result(text, selected_skill="assembly-coach")
+
+    monkeypatch.setattr(run_egoassist.SemanticTurnRouter, "classify", classify)
+
+    async def scenario():
+        app = create_app(
+            str(BUILTIN_SKILLS_ROOT), None,
+            str(tmp_path / "memory.json"), "test-realtime", "Ethan",
+        )
+        async with TestClient(TestServer(app)) as client:
+            await register_client(client, "multi-intent-user")
+            session_id = (await (await client.post("/api/sessions")).json())["session"]["id"]
+            ws = await client.ws_connect(f"/ws/realtime?session={session_id}")
+            await ws.receive_json()
+            await ws.receive_json()
+
+            instances[0].on_transcript("cook oatmeal")
+            background_state = (await asyncio.wait_for(ws.receive_json(), timeout=1))["state"]
+            downgraded = background_state["workLedger"]["intents"][-1]
+            assert downgraded["status"] == "foreground"
+            assert downgraded["kind"] == "foreground-dialogue"
+            assert background_state["activeSkill"]["name"] == "kitchen-coach"
+            assert background_state["workLedger"]["foregroundIntentId"] == downgraded["intentId"]
+            semantic = downgraded["payload"]["semantic"]
+            assert semantic["requestedIntentKind"] == "background-job"
+            assert semantic["intentExecution"]["status"] == "unsupported"
+            assert semantic["intentExecution"]["capability"] == "background-execution"
+
+            instances[0].on_transcript("assemble flat pack stool")
+            switched = (await asyncio.wait_for(ws.receive_json(), timeout=1))["state"]
+            assert switched["activeSkill"]["name"] == "assembly-coach"
+            assert switched["workLedger"]["foregroundIntentId"] != downgraded["intentId"]
+
+            resumed_response = await client.post("/api/intents/focus", json={
+                "sessionId": session_id, "intentId": downgraded["intentId"],
+            })
+            assert resumed_response.status == 200
+            resumed = await resumed_response.json()
+            assert resumed["activeSkill"]["name"] == "kitchen-coach"
+            assert resumed["workLedger"]["foregroundIntentId"] == downgraded["intentId"]
+            restored_intent = next(
+                item for item in resumed["workLedger"]["intents"]
+                if item["intentId"] == downgraded["intentId"]
+            )
+            assert restored_intent["status"] == "foreground"
+
+    asyncio.run(scenario())
+
+
+def test_unsupported_scheduler_never_fakes_completion_without_executor(tmp_path):
+    async def scenario():
+        app = create_app(
+            str(BUILTIN_SKILLS_ROOT), None,
+            str(tmp_path / "memory.json"), "test-realtime", "Ethan",
+        )
+        async with TestClient(TestServer(app)) as client:
+            user = await register_client(client, "durable-scheduler")
+            session_id = (await (await client.post("/api/sessions")).json())["session"]["id"]
+            journal_path = tmp_path / "users" / user["id"] / "sessions" / f"{session_id}.jsonl"
+            ledger = CaseWorkLedger(SessionJournal(journal_path, session_id=session_id))
+            turn = ledger.capture_turn("remind me to check the rice", source="test")
+            intent = ledger.create_intent(
+                turn["turnId"], kind="background-reminder", status="running-background",
+            )
+            job = ledger.create_job(
+                intent["intentId"],
+                kind="timer-delivery",
+                payload={"dueAt": "2000-01-01T00:00:00+00:00", "label": "rice"},
+                status="queued",
+            )
+
+            state = await client.get(f"/api/state?session={session_id}")
+            assert state.status == 200
+            await asyncio.sleep(0.4)
+
+            restored = CaseWorkLedger(SessionJournal(journal_path, session_id=session_id))
+            assert restored.jobs()[job["jobId"]]["status"] == "queued"
+            assert restored.pending_results() == []
+
+    asyncio.run(scenario())
+
+
+def test_result_inbox_item_can_be_explicitly_dismissed(tmp_path):
+    async def scenario():
+        app = create_app(
+            str(BUILTIN_SKILLS_ROOT), None,
+            str(tmp_path / "memory.json"), "test-realtime", "Ethan",
+        )
+        async with TestClient(TestServer(app)) as client:
+            user = await register_client(client, "result-dismiss-user")
+            session_id = (await (await client.post("/api/sessions")).json())["session"]["id"]
+            journal_path = tmp_path / "users" / user["id"] / "sessions" / f"{session_id}.jsonl"
+            ledger = CaseWorkLedger(SessionJournal(journal_path, session_id=session_id))
+            turn = ledger.capture_turn("show me one result", source="test")
+            intent = ledger.create_intent(
+                turn["turnId"], kind="foreground-dialogue", status="foreground",
+            )
+            result = ledger.enqueue_result(intent["intentId"], "ready for review")
+
+            response = await client.post("/api/results/dismiss", json={
+                "sessionId": session_id,
+                "resultId": result["resultId"],
+            })
+            assert response.status == 200
+            payload = await response.json()
+            assert payload["result"]["status"] == "dismissed"
+            projected = next(
+                item for item in payload["state"]["workLedger"]["resultInbox"]
+                if item["resultId"] == result["resultId"]
+            )
+            assert projected["status"] == "dismissed"
+
+    asyncio.run(scenario())
+
+
 def test_reset_cancels_pending_semantic_turn_before_durable_deactivation(tmp_path, monkeypatch):
     instances = install_queue_test_bridge(monkeypatch)
     classification_started = asyncio.Event()
@@ -1347,10 +1597,13 @@ def test_reset_cancels_pending_semantic_turn_before_durable_deactivation(tmp_pat
         entries = [json.loads(line) for line in journal.read_text(encoding="utf-8").splitlines()]
         checkpoints = [item for item in entries if item.get("type") == "state_checkpoint"]
         assert checkpoints[-1]["state"]["skill"] is None
-        assert not any(
+        assert any(
             item.get("type") == "message" and item.get("message", {}).get("content") == "slow old turn"
             for item in entries
         )
+        inbox = [item for item in entries if item.get("type") == "turn_inbox"]
+        assert inbox[-1]["text"] == "slow old turn"
+        assert inbox[-1]["status"] == "received"
 
     asyncio.run(scenario())
 

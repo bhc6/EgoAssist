@@ -21,8 +21,9 @@ def test_realtime_episode_memory_persists_summaries_without_raw_media(tmp_path):
 
     restored = RealtimeEpisodeMemory(tmp_path / "episodes.json")
     result = restored.retrieve("番茄放在哪里")
-    assert result["selected"][0]["episodeId"] == record["id"]
-    assert result["candidates"][0]["selected"] is True
+    assert result["selected"] == []
+    assert result["candidates"] == []
+    assert result["minimumScore"] == 0.18
 
 
 def test_realtime_episode_memory_deduplicates_adjacent_identical_events(tmp_path):
@@ -71,11 +72,11 @@ def test_referential_recall_uses_declarative_card_without_temporal_guessing(tmp_
 def test_retrieval_never_crosses_session_scope_by_default(tmp_path):
     memory = RealtimeEpisodeMemory(tmp_path / "episodes.json")
     first = memory.remember(
-        "private code alpha", kind="utterance", source="test", skill=None, task=None,
+        "private code alpha", kind="fact", source="test", skill=None, task=None,
         session_id="session-a",
     )
     second = memory.remember(
-        "private code beta", kind="utterance", source="test", skill=None, task=None,
+        "private code beta", kind="fact", source="test", skill=None, task=None,
         session_id="session-b",
     )
 

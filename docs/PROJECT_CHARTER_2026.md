@@ -332,3 +332,23 @@ Release gates are user outcomes, not internal state assertions:
 - Feature flags may hide incomplete work; they may not rename it as complete.
 - Preserve current memory semantics unless a migration demonstrates equivalent
   provenance, scope, and deletion behavior.
+
+## 12. Implementation Evidence
+
+This ledger records verified implementation, not planned capability. A milestone
+is marked complete only after its exit gate and regression suite pass.
+
+| Milestone | Status | Evidence |
+|---|---|---|
+| M0 Truth reset | Complete | Capability catalog drives prompts, provider tools, APIs, and the Task Center; unavailable adapters return `unsupported` or `demo-only`; the local pseudo-scheduler is disabled; full regression and frontend syntax checks pass. |
+| M1 Foundation | In progress | Contracts, ports, migrations, and tracing are not yet the runtime source of truth. |
+| M2 Reliable timer | Not started | Timer delivery remains unavailable. |
+| M3 Interaction transport | Not started | Existing provider bridge remains active pending LiveKit migration. |
+| M4 Artifacts and human help | Not started | Both remain unavailable or demo-only. |
+| M5 Structured perception | Not started | Realtime checkpoint-constrained perception remains experimental. |
+| M6 Privacy and evaluation | Not started | Existing memory deletion remains preserved; complete governance is pending. |
+
+The current memory remediation is retained as EgoAssist-owned product research,
+not foundation debt. `TimelineMemory`, `MemoryDraft`, participant/case scope,
+provenance, temporal semantics, conflict handling, retrieval injection, and
+user-controlled deletion must round-trip through every subsequent migration.

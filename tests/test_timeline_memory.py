@@ -215,6 +215,25 @@ def test_unrelated_chinese_cards_do_not_match_on_one_shared_character(tmp_path):
     assert result["selected"] == []
 
 
+def test_default_retrieval_excludes_legacy_and_scene_even_when_text_matches(tmp_path):
+    memory = TimelineMemory(tmp_path / "timeline.sqlite3")
+    remember(memory, "开瑞坦放在书桌右边的架子上", kind="legacy")
+    remember(memory, "开瑞坦放在书桌右边的架子上", kind="scene")
+    fact = remember(
+        memory, "开瑞坦放在书桌右边的架子上", kind="state",
+        subject="开瑞坦", predicate="location", value="书桌右边的架子上",
+    )
+
+    result = memory.retrieve(
+        "开瑞坦放在哪里", user_id="user-a", case_id="case-a", scope="case",
+        query_spec={"subject": "开瑞坦", "predicate": "location"},
+    )
+
+    assert [item["cardId"] for item in result["selected"]] == [fact["id"]]
+    assert {item["kind"] for item in result["candidates"]} == {"state"}
+    assert result["minimumScore"] == 0.18
+
+
 def test_visual_memory_adapter_preserves_temporal_and_frame_provenance(tmp_path):
     timeline = TimelineMemory(tmp_path / "timeline.sqlite3")
     items = [MemoryItem(

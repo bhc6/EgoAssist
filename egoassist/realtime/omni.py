@@ -7,6 +7,7 @@ import base64
 from collections import deque
 import difflib
 import ipaddress
+import inspect
 import json
 import logging
 import os
@@ -60,6 +61,7 @@ class _ResponseRequest:
     max_protection_ms: int = 2500
     output_mode: str = "audio"
     purpose: str = "conversation"
+    origin: dict[str, Any] | None = None
 
 
 def _is_fake_ip(value: str) -> bool:
@@ -379,7 +381,9 @@ class OmniBrowserBridge:
         self._dialogue_generation = 0
         self._reconnect_lock = asyncio.Lock()
         self._reconnect_scheduled = False
-        self._buffered_audio: deque[str] = deque(maxlen=40)
+        self._buffered_audio: deque[str] = deque()
+        self._buffered_audio_limit = max(4, int(os.getenv("EGOASSIST_AUDIO_RECONNECT_CHUNKS", "40")))
+        self._dropped_audio_chunks = 0
         self._Conversation = OmniRealtimeConversation
         self._CallbackBase = OmniRealtimeCallback
         self._response_lock = threading.Lock()
@@ -407,6 +411,8 @@ class OmniBrowserBridge:
         self._provider_tools: list[dict[str, Any]] = []
         self._tool_handler: Callable[[str, dict[str, Any], bool], dict[str, Any]] | None = None
         self._tool_result_handler: Callable[[str, str, Any, bool, dict[str, Any] | None], Any] | None = None
+        self._result_delivery_handler: Callable[[str, str], Any] | None = None
+        self._response_lifecycle_handler: Callable[[dict[str, Any], str], Any] | None = None
         self._pending_tool_calls: dict[str, dict[str, Any]] = {}
         self._tool_call_signatures: dict[str, tuple[str, str]] = {}
         self._assistant_transcript_buffer = ""
@@ -750,7 +756,7 @@ class OmniBrowserBridge:
         if not audio_b64:
             return False
         if not getattr(self, "connected", True) or not self.conversation:
-            self._buffered_audio.append(audio_b64)
+            self._buffer_audio_for_reconnect(audio_b64)
             self._schedule_reconnect("audio-arrived-while-disconnected")
             return False
         video_flushed = False
@@ -762,10 +768,30 @@ class OmniBrowserBridge:
                     self._pending_video = None
                     video_flushed = True
         except Exception:
-            self._buffered_audio.append(audio_b64)
+            self._buffer_audio_for_reconnect(audio_b64)
             self.connected = False
             self._schedule_reconnect("media-append-failed")
         return video_flushed
+
+    def _buffer_audio_for_reconnect(self, audio_b64: str) -> None:
+        limit = int(getattr(self, "_buffered_audio_limit", 40))
+        backlog = getattr(self, "_buffered_audio", None)
+        if backlog is None:
+            backlog = deque()
+            self._buffered_audio = backlog
+        if len(backlog) >= limit:
+            dropped = backlog.popleft()
+            self._dropped_audio_chunks = int(getattr(self, "_dropped_audio_chunks", 0)) + 1
+            payload = {
+                "media": "audio",
+                "reason": "provider-reconnect-buffer-overflow",
+                "droppedChunks": self._dropped_audio_chunks,
+                "droppedBase64Characters": len(dropped),
+                "bufferLimitChunks": limit,
+            }
+            self._trace("provider.media.gap", payload)
+            self._schedule({"type": "media_gap", **payload})
+        backlog.append(audio_b64)
 
     def append_video(self, image_b64: str) -> bool:
         if not image_b64:
@@ -798,6 +824,7 @@ class OmniBrowserBridge:
         max_protection_ms: int = 2500,
         output_mode: str = "audio",
         purpose: str = "conversation",
+        origin: dict[str, Any] | None = None,
     ) -> bool:
         """Request one response, coalescing work while the provider is busy."""
         if purpose == "proactive-gate":
@@ -813,6 +840,7 @@ class OmniBrowserBridge:
             request = _ResponseRequest(
                 instructions, priority, self._response_sequence, speech_policy, reason,
                 time.monotonic(), max(250, min(5000, int(max_protection_ms))), output_mode, purpose,
+                dict(origin) if origin else None,
             )
             self._trace("response.requested", {"sequence": request.sequence, "priority": priority, "speechPolicy": speech_policy, "reason": reason, "outputMode": output_mode, "purpose": purpose})
             disconnected = not getattr(self, "connected", True)
@@ -822,6 +850,8 @@ class OmniBrowserBridge:
                 if queued is None or (request.priority, request.sequence) >= (queued.priority, queued.sequence):
                     self._queued_response = request
                     self._trace("response.queued", {"sequence": request.sequence, "replacedSequence": queued.sequence if queued else None})
+                    if queued is not None:
+                        self._return_result_to_inbox(queued, "queued-response-replaced")
                 if interrupt:
                     if self._active_response_ids:
                         should_cancel = True
@@ -1058,6 +1088,11 @@ class OmniBrowserBridge:
         name = str(payload.get("name", "")).strip()
         raw_arguments = payload.get("arguments", "{}")
         response_id = self._payload_response_id(payload)
+        with self._response_lock:
+            source_request = self._active_response_requests.get(response_id)
+            if source_request is None and self._inflight_response is not None:
+                source_request = self._inflight_response
+        origin = dict(source_request.origin) if source_request and source_request.origin else {}
         try:
             arguments = json.loads(raw_arguments) if isinstance(raw_arguments, str) else raw_arguments
         except json.JSONDecodeError:
@@ -1087,22 +1122,28 @@ class OmniBrowserBridge:
             return
         if self._context_harness:
             self._context_harness.record_tool_call(
-                call_id, name, arguments, response_id=response_id,
+                call_id, name, arguments, response_id=response_id, metadata={"origin": origin},
             )
         self._trace("tool.call.received", {
             "callId": call_id, "name": name, "arguments": arguments,
         }, response_id=response_id)
         if self._tool_handler is None:
-            self._complete_tool_call(call_id, name, {"status": "error", "error": "tool handler unavailable"}, True)
+            self._complete_tool_call(
+                call_id, name, {"status": "error", "error": "tool handler unavailable"},
+                True, origin=origin,
+            )
             return
         try:
-            result = self._tool_handler(name, arguments, False)
+            result = self._invoke_tool_handler(name, arguments, False, origin)
         except Exception as exc:
-            self._complete_tool_call(call_id, name, {"status": "error", "error": str(exc)}, True)
+            self._complete_tool_call(
+                call_id, name, {"status": "error", "error": str(exc)}, True, origin=origin,
+            )
             return
         if result.get("status") == "confirmation_required":
             self._pending_tool_calls[call_id] = {
                 "name": name, "arguments": arguments, "generation": self._dialogue_generation,
+                "origin": origin,
             }
             if self._context_harness:
                 self._context_harness.journal.append("tool_confirmation", {
@@ -1115,7 +1156,25 @@ class OmniBrowserBridge:
                 "arguments": arguments,
             })
             return
-        self._complete_tool_call(call_id, name, result, False)
+        self._complete_tool_call(call_id, name, result, False, origin=origin)
+
+    def _invoke_tool_handler(
+        self,
+        name: str,
+        arguments: dict[str, Any],
+        confirmed: bool,
+        origin: dict[str, Any],
+    ) -> dict[str, Any]:
+        handler = self._tool_handler
+        if handler is None:
+            raise RuntimeError("tool handler unavailable")
+        parameters = inspect.signature(handler).parameters.values()
+        accepts_origin = any(item.kind == inspect.Parameter.VAR_POSITIONAL for item in parameters) or len(
+            inspect.signature(handler).parameters
+        ) >= 4
+        return handler(name, arguments, confirmed, origin) if accepts_origin else handler(
+            name, arguments, confirmed,
+        )
 
     def _claim_tool_call(
         self,
@@ -1164,18 +1223,27 @@ class OmniBrowserBridge:
             return False
         name = pending["name"]
         arguments = pending["arguments"]
+        origin = dict(pending.get("origin") or {})
         provider_call_active = pending.get("generation") == self._dialogue_generation
         if not accepted:
-            self._complete_tool_call(call_id, name, {"status": "rejected"}, False, provider_call_active)
+            self._complete_tool_call(
+                call_id, name, {"status": "rejected"}, False, provider_call_active, origin,
+            )
             return True
         if self._tool_handler is None:
-            self._complete_tool_call(call_id, name, {"status": "error", "error": "tool handler unavailable"}, True, provider_call_active)
+            self._complete_tool_call(
+                call_id, name, {"status": "error", "error": "tool handler unavailable"},
+                True, provider_call_active, origin,
+            )
             return True
         try:
-            result = self._tool_handler(name, arguments, True)
-            self._complete_tool_call(call_id, name, result, False, provider_call_active)
+            result = self._invoke_tool_handler(name, arguments, True, origin)
+            self._complete_tool_call(call_id, name, result, False, provider_call_active, origin)
         except Exception as exc:
-            self._complete_tool_call(call_id, name, {"status": "error", "error": str(exc)}, True, provider_call_active)
+            self._complete_tool_call(
+                call_id, name, {"status": "error", "error": str(exc)},
+                True, provider_call_active, origin,
+            )
         return True
 
     def _complete_tool_call(
@@ -1185,20 +1253,24 @@ class OmniBrowserBridge:
         result: Any,
         is_error: bool,
         provider_call_active: bool = True,
+        origin: dict[str, Any] | None = None,
     ) -> None:
         journal_entry = None
         if self._context_harness:
             journal_entry = self._context_harness.record_tool_result(
-                call_id, name, result, is_error=is_error,
+                call_id, name, result, is_error=is_error, metadata={"origin": dict(origin or {})},
             )
         tool_result_handler = getattr(self, "_tool_result_handler", None)
+        result_handler_value = None
         if tool_result_handler:
             try:
-                tool_result_handler(call_id, name, result, is_error, journal_entry)
+                result_handler_value = tool_result_handler(call_id, name, result, is_error, journal_entry)
             except Exception as exc:
                 self._trace("timeline.memory.tool-effect.failed", {
                     "callId": call_id, "name": name, "error": str(exc)[:240],
                 })
+        if isinstance(result_handler_value, dict) and result_handler_value.get("resultId"):
+            origin = {**dict(origin or {}), "resultId": str(result_handler_value["resultId"])}
         self._trace("tool.result.committed", {
             "callId": call_id, "name": name, "result": result, "isError": is_error,
         })
@@ -1221,12 +1293,21 @@ class OmniBrowserBridge:
                 "The committed tool_result does not report success; do not claim the action was completed."
             )
             self.request_response(
-                "Continue the current user turn using the committed tool result. Do not repeat the tool call. "
+                "Continue only the source intent using the committed tool result. Do not repeat the tool call. "
                 + outcome_instruction,
                 priority=100,
                 reason="tool-result",
                 purpose="conversation",
+                origin=dict(origin or {}) or None,
             )
+
+    def set_result_delivery_handler(self, handler: Callable[[str, str], Any] | None) -> None:
+        self._result_delivery_handler = handler
+
+    def set_response_lifecycle_handler(
+        self, handler: Callable[[dict[str, Any], str], Any] | None,
+    ) -> None:
+        self._response_lifecycle_handler = handler
 
     @staticmethod
     def _provider_tool_declarations(declarations: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -1242,7 +1323,7 @@ class OmniBrowserBridge:
     def set_tools(
         self,
         declarations: list[dict[str, Any]],
-        handler: Callable[[str, dict[str, Any], bool], dict[str, Any]],
+        handler: Callable[..., dict[str, Any]],
     ) -> None:
         self._provider_tools = self._provider_tool_declarations(declarations)
         self._tool_handler = handler
@@ -1386,6 +1467,7 @@ class OmniBrowserBridge:
         with self._response_lock:
             if drop_queued_below is not None and self._queued_response and self._queued_response.priority < drop_queued_below:
                 self._trace("response.queue.dropped", {"sequence": self._queued_response.sequence, "threshold": drop_queued_below})
+                self._return_result_to_inbox(self._queued_response, "queued-response-cancelled")
                 self._queued_response = None
             if not self._response_pending and not self._active_response_ids:
                 return False
@@ -1406,6 +1488,17 @@ class OmniBrowserBridge:
             "cancelWhenCreated": bool(self._cancel_when_created),
         })
         return True
+
+    def _return_result_to_inbox(self, request: _ResponseRequest, reason: str) -> None:
+        result_id = str((request.origin or {}).get("resultId", ""))
+        handler = getattr(self, "_result_delivery_handler", None)
+        if not result_id or handler is None:
+            return
+        try:
+            handler(result_id, "pending")
+            self._trace("result.delivery.requeued", {"resultId": result_id, "reason": reason})
+        except Exception as exc:
+            self._trace("result.delivery.update_failed", {"resultId": result_id, "error": str(exc)})
 
     def _send_response(self, request: _ResponseRequest) -> None:
         try:
@@ -1609,6 +1702,21 @@ class OmniBrowserBridge:
         fragment = self._pop_assistant_transcript(response_id)
         purpose = request.purpose if request else "conversation"
         interrupted = locally_cancelled or event_type in {"response.cancelled", "response.failed"}
+        lifecycle_handler = getattr(self, "_response_lifecycle_handler", None)
+        if request and request.origin and lifecycle_handler:
+            try:
+                lifecycle_handler(
+                    dict(request.origin), "suspended" if interrupted else "completed",
+                )
+            except Exception as exc:
+                self._trace("intent.lifecycle.update_failed", {"error": str(exc)})
+        result_id = str((request.origin or {}).get("resultId", "")) if request else ""
+        delivery_handler = getattr(self, "_result_delivery_handler", None)
+        if result_id and delivery_handler:
+            try:
+                delivery_handler(result_id, "pending" if interrupted else "delivered")
+            except Exception as exc:
+                self._trace("result.delivery.update_failed", {"resultId": result_id, "error": str(exc)})
         if fragment:
             self._last_assistant_utterance = fragment
             self._last_assistant_utterance_at = time.monotonic()
@@ -1832,7 +1940,7 @@ class OmniBrowserBridge:
     def _request_public(request: _ResponseRequest | None) -> dict[str, Any] | None:
         if not request:
             return None
-        return {"sequence": request.sequence, "priority": request.priority, "speechPolicy": request.speech_policy, "reason": request.reason, "maxProtectionMs": request.max_protection_ms, "outputMode": request.output_mode, "purpose": request.purpose}
+        return {"sequence": request.sequence, "priority": request.priority, "speechPolicy": request.speech_policy, "reason": request.reason, "maxProtectionMs": request.max_protection_ms, "outputMode": request.output_mode, "purpose": request.purpose, "origin": dict(request.origin or {})}
 
     def _trace(self, event_type: str, payload: dict[str, Any], response_id: str | None = None) -> dict[str, Any]:
         sink = getattr(self, "_trace_sink", None)

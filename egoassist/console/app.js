@@ -12,6 +12,10 @@ let currentUser = null, selectedSessionId = null, authMode = "login";
 let sessionCatalog = [], memoryPolicySaving = false;
 let mirrorCamera = localStorage.getItem("egoassist.camera.mirror") !== "false";
 const playbackSources = new Set();
+const AUDIO_BUFFER_HIGH_WATER = 512 * 1024;
+const VIDEO_BUFFER_HIGH_WATER = 128 * 1024;
+let droppedAudioChunks = 0;
+let droppedVideoFrames = 0;
 
 async function request(path, options = {}) {
   const response = await fetch(path, options);
@@ -203,6 +207,63 @@ function renderTimeline(events) {
   if (selected) inspect(selected);
 }
 
+const terminalWorkStatus = status => ["completed", "failed", "cancelled", "delivered", "dismissed"].includes(status);
+
+function workLabel(item, fallback) {
+  const semantic = item.payload?.semantic || {};
+  return semantic.summary || semantic.input || item.payload?.text || item.skillRef?.task || fallback;
+}
+
+function renderWorkCenter() {
+  const ledger = state.workLedger || {intents: [], jobs: [], resultInbox: [], foregroundIntentId: null};
+  const capabilities = state.capabilityCatalog?.platform || [];
+  const unavailable = capabilities.filter(item => item.status !== "available");
+  $("#capabilityTruth").innerHTML = capabilities.map(item =>
+    "<span class='capability-state " + esc(item.status) + "' title='" + esc(item.reason) + "'><b>" +
+    esc(item.label + " · " + item.status) + "</b></span>"
+  ).join("") || "<span class='muted'>能力真值尚未加载</span>";
+
+  const activeJobs = ledger.jobs.filter(item => !terminalWorkStatus(item.status));
+  const pendingResults = ledger.resultInbox.filter(item => !["delivered", "dismissed"].includes(item.status));
+  $("#workCenterCounts").textContent = activeJobs.length + " active · " + pendingResults.length + " results · " + unavailable.length + " limited";
+
+  $("#intentList").innerHTML = ledger.intents.length ? [...ledger.intents].reverse().map(item => {
+    const focused = item.intentId === ledger.foregroundIntentId;
+    const canFocus = !focused && !terminalWorkStatus(item.status) && item.detail?.runtimeCheckpoint;
+    return "<article class='work-row " + esc(item.status) + "'><div><b>" + esc(workLabel(item, item.kind)) +
+      "</b><small>" + esc(item.kind + " · " + item.status) + "</small></div>" +
+      (canFocus ? "<button data-focus-intent='" + esc(item.intentId) + "'>切到前台</button>" : focused ? "<b>前台</b>" : "") +
+      "</article>";
+  }).join("") : "<p class='empty-state'>暂无已记录意图</p>";
+
+  $("#jobList").innerHTML = ledger.jobs.length ? [...ledger.jobs].reverse().map(item => {
+    const cancellable = !terminalWorkStatus(item.status);
+    return "<article class='work-row " + esc(item.status) + "'><div><b>" + esc(workLabel(item, item.kind)) +
+      "</b><small>" + esc(item.kind + " · " + item.status) + "</small></div>" +
+      (cancellable ? "<button class='danger' data-cancel-job='" + esc(item.jobId) + "'>取消</button>" : "") +
+      "</article>";
+  }).join("") : "<p class='empty-state'>暂无可执行任务</p>";
+
+  $("#resultInbox").innerHTML = ledger.resultInbox.length ? [...ledger.resultInbox].reverse().map(item => {
+    const content = typeof item.content === "string" ? item.content : JSON.stringify(item.content);
+    const dismissible = !["delivered", "dismissed"].includes(item.status);
+    return "<article class='work-row " + esc(item.status) + "'><div><b>" + esc(content) +
+      "</b><small>" + esc(item.status + " · priority " + item.priority) + "</small></div>" +
+      (dismissible ? "<button data-dismiss-result='" + esc(item.resultId) + "'>确认</button>" : "") +
+      "</article>";
+  }).join("") : "<p class='empty-state'>暂无待处理结果</p>";
+
+  $$('[data-focus-intent]').forEach(button => button.onclick = () => run(button, post("/api/intents/focus", {
+    sessionId: selectedSessionId, intentId: button.dataset.focusIntent,
+  }).then(payload => payload.state || payload)));
+  $$('[data-cancel-job]').forEach(button => button.onclick = () => run(button, post("/api/jobs/cancel", {
+    sessionId: selectedSessionId, jobId: button.dataset.cancelJob,
+  }).then(payload => payload.state || payload)));
+  $$('[data-dismiss-result]').forEach(button => button.onclick = () => run(button, post("/api/results/dismiss", {
+    sessionId: selectedSessionId, resultId: button.dataset.dismissResult,
+  }).then(payload => payload.state || payload)));
+}
+
 function render(next) {
   state = next;
   const task = state.task, memory = state.memory, mechanism = state.memoryMechanism;
@@ -220,7 +281,12 @@ function render(next) {
   $("#taskSelect").value = task?.task.id || "";
   $("#taskSelect").disabled = !state.activeSkill;
   $("#newTask").disabled = !state.activeSkill?.allowCustomTasks;
-  $("#skillTools").innerHTML = (state.activeSkill?.tools || []).map(item => "<button data-tool='" + esc(item.name) + "' data-confirm='" + item.requires_confirmation + "'>" + esc(item.name) + (item.requires_confirmation ? " · 需确认" : "") + "</button>").join("") || "<span class='muted'>无领域工具</span>";
+  $("#skillTools").innerHTML = (state.activeSkill?.tools || []).map(item => {
+    const availability = item.availability || {status: "unconfigured", executable: false, reason: "No executor is configured."};
+    return "<button data-tool='" + esc(item.name) + "' data-confirm='" + item.requires_confirmation + "' title='" +
+      esc(availability.reason) + "' " + (availability.executable ? "" : "disabled") + ">" + esc(item.name) +
+      " · " + esc(availability.status) + (item.requires_confirmation && availability.executable ? " · 需确认" : "") + "</button>";
+  }).join("") || "<span class='muted'>无领域工具</span>";
   $$("[data-tool]").forEach(button => button.onclick = () => executeTool(button));
   $("#action").textContent = actionName(decision.action);
   $("#decision").className = "decision " + decision.action;
@@ -264,6 +330,7 @@ function render(next) {
   $("#audioAttribution").textContent = JSON.stringify(state.audioAttribution, null, 2);
   $$('[data-requires-task]').forEach(button => button.disabled = !task);
   $("#taskDebug").hidden = !task;
+  renderWorkCenter();
   renderPipeline(task, mechanism, step);
   renderTimeline(state.events || []);
   renderManualSteps();
@@ -393,6 +460,17 @@ async function startAudioCapture() {
   processor = audioContext.createScriptProcessor(4096, 1, 1);
   processor.onaudioprocess = event => {
     if (!socket || socket.readyState !== WebSocket.OPEN) return;
+    if (socket.bufferedAmount > AUDIO_BUFFER_HIGH_WATER) {
+      droppedAudioChunks += 1;
+      return;
+    }
+    if (droppedAudioChunks) {
+      socket.send(JSON.stringify({
+        type: "media_gap", media: "audio", droppedChunks: droppedAudioChunks,
+        reason: "browser-websocket-backpressure",
+      }));
+      droppedAudioChunks = 0;
+    }
     const audio = floatToPcm16Base64(event.inputBuffer.getChannelData(0), audioContext.sampleRate);
     socket.send(JSON.stringify({type: "audio", audio}));
   };
@@ -402,6 +480,17 @@ async function startAudioCapture() {
 
 function sendVideoFrame() {
   if (!socket || socket.readyState !== WebSocket.OPEN || !stream || $("#video").readyState < 2) return;
+  if (socket.bufferedAmount > VIDEO_BUFFER_HIGH_WATER) {
+    droppedVideoFrames += 1;
+    return;
+  }
+  if (droppedVideoFrames) {
+    socket.send(JSON.stringify({
+      type: "media_gap", media: "video", droppedFrames: droppedVideoFrames,
+      reason: "browser-websocket-backpressure",
+    }));
+    droppedVideoFrames = 0;
+  }
   const video = $("#video"), canvas = $("#canvas"), scale = Math.min(1, 768 / video.videoWidth);
   canvas.width = Math.floor(video.videoWidth * scale);
   canvas.height = Math.floor(video.videoHeight * scale);
@@ -538,6 +627,19 @@ async function connectRealtimeSession(generation) {
       $("#assistantCaption").innerHTML = "<span>助手语音字幕 · provider output channel · " + (message.done ? "已完成" : "生成中") + "</span><p>" + esc(assistantText) + "</p>";
       $("#duplexState").textContent = message.done ? "全双工在线 · 正在听" : "助手正在说 · 你可以随时打断";
       if (message.done) assistantText = "";
+    } else if (message.type === "memory_status") {
+      $("#assistantCaption").innerHTML = "<span>记忆事务 · 服务端确认</span><p>" + esc(message.message) + "</p>";
+      $("#duplexState").textContent = message.status === "committed"
+        ? "记忆已提交 · 正在听"
+        : message.status === "needs-input" ? "等待补充要记住的内容" : "记忆未提交 · 正在听";
+    } else if (message.type === "tool_confirmation_required") {
+      const details = JSON.stringify(message.arguments || {}, null, 2);
+      const accepted = window.confirm("Allow tool " + message.tool + "?\n\n" + details);
+      if (socket === ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({type: "tool_confirmation", callId: message.callId, accepted}));
+      }
+    } else if (message.type === "media_gap") {
+      $("#duplexState").textContent = "Media gap detected; live capture continues";
     } else if (message.type === "state") {
       render(message.state);
     } else if (message.type === "session_stale") {

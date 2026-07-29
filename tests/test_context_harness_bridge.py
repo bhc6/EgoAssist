@@ -156,8 +156,63 @@ def test_declared_tool_executes_and_commits_result_before_continuation(tmp_path)
     assert json.loads(bridge.conversation.items[-1]["output"])["status"] == "scheduled"
     assert [entry["type"] for entry in harness.journal.entries()] == ["tool_call", "tool_result"]
     assert committed == [("call-1", "timer", {"status": "scheduled", "seconds": 5}, False, "tool_result")]
-    assert bridge.conversation.responses[-1]["instructions"].startswith("Continue the current user turn")
+    assert bridge.conversation.responses[-1]["instructions"].startswith("Continue only the source intent")
     assert "reports success" in bridge.conversation.responses[-1]["instructions"]
+
+
+def test_tool_call_keeps_source_turn_intent_and_skill_contract(tmp_path):
+    harness = harness_at(tmp_path / "origin-tool.jsonl")
+    bridge = make_bridge(harness)
+    origins = []
+    bridge.set_tools([{
+        "name": "shared_name", "description": "Source skill behavior",
+        "requires_confirmation": False,
+        "arguments": {"type": "object", "properties": {}},
+    }], lambda name, arguments, confirmed, origin: origins.append(origin) or {"status": "accepted"})
+    origin = {
+        "turnId": "turn-old", "intentId": "intent-old",
+        "skill": {"name": "source-skill", "version": "1"},
+        "tools": [{"name": "shared_name"}],
+    }
+    bridge.request_response("source response", origin=origin)
+    bridge._response_created({"response": {"id": "response-origin"}})
+
+    bridge._handle_tool_call_event({
+        "call_id": "call-origin", "name": "shared_name", "arguments": "{}",
+        "response_id": "response-origin",
+    })
+
+    assert origins == [origin]
+    tool_call = next(item for item in harness.journal.entries() if item["type"] == "tool_call")
+    assert tool_call["metadata"]["origin"] == origin
+    pending = bridge.scheduler_snapshot()["queued"] or bridge.scheduler_snapshot()["inflight"]
+    assert pending["origin"] == origin
+
+
+def test_result_delivery_handler_tracks_response_terminal_state(tmp_path):
+    bridge = make_bridge(harness_at(tmp_path / "delivery.jsonl"))
+    delivered = []
+    bridge.set_result_delivery_handler(lambda result_id, status: delivered.append((result_id, status)))
+
+    bridge.request_response("deliver first", origin={"resultId": "result-1"})
+    bridge._response_created({"response": {"id": "response-1"}})
+    bridge._response_finished({"type": "response.done", "response": {"id": "response-1"}})
+
+    bridge.request_response("deliver second", origin={"resultId": "result-2"})
+    bridge._response_created({"response": {"id": "response-2"}})
+    bridge._response_finished({"type": "response.cancelled", "response": {"id": "response-2"}})
+
+    assert delivered == [("result-1", "delivered"), ("result-2", "pending")]
+
+
+def test_replaced_queued_result_is_returned_to_inbox(tmp_path):
+    bridge = make_bridge(harness_at(tmp_path / "requeue.jsonl"))
+    requeued = []
+    bridge.set_result_delivery_handler(lambda result_id, status: requeued.append((result_id, status)))
+    bridge.request_response("busy foreground")
+    bridge.request_response("background result", priority=40, origin={"resultId": "result-late"})
+    bridge.request_response("new foreground", priority=100)
+    assert requeued == [("result-late", "pending")]
 
 
 def test_failed_tool_result_cannot_authorize_success_claim(tmp_path):

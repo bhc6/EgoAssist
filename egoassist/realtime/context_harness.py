@@ -319,6 +319,7 @@ class SessionJournal:
         *,
         status: str = "pending",
         response_id: str | None = None,
+        metadata: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         return self.append(
             "tool_call",
@@ -328,6 +329,7 @@ class SessionJournal:
                 "arguments": dict(arguments),
                 "status": status,
                 "responseId": response_id,
+                "metadata": dict(metadata or {}),
             },
             idempotency_key=f"tool-call:{call_id}",
         )
@@ -339,10 +341,11 @@ class SessionJournal:
         result: Any,
         *,
         is_error: bool = False,
+        metadata: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         return self.append(
             "tool_result",
-            {"callId": str(call_id), "name": str(name), "result": result, "isError": bool(is_error)},
+            {"callId": str(call_id), "name": str(name), "result": result, "isError": bool(is_error), "metadata": dict(metadata or {})},
             idempotency_key=f"tool-result:{call_id}",
         )
 
@@ -481,8 +484,8 @@ class ContextHarness:
     def record_tool_call(self, call_id: str, name: str, arguments: Mapping[str, Any], **kwargs: Any) -> dict[str, Any]:
         return self.journal.append_tool_call(call_id, name, arguments, **kwargs)
 
-    def record_tool_result(self, call_id: str, name: str, result: Any, *, is_error: bool = False) -> dict[str, Any]:
-        return self.journal.append_tool_result(call_id, name, result, is_error=is_error)
+    def record_tool_result(self, call_id: str, name: str, result: Any, *, is_error: bool = False, metadata: Mapping[str, Any] | None = None) -> dict[str, Any]:
+        return self.journal.append_tool_result(call_id, name, result, is_error=is_error, metadata=metadata)
 
     @staticmethod
     def _entry_message(entry: Mapping[str, Any]) -> dict[str, Any] | None:

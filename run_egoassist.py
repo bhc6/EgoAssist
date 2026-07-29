@@ -22,6 +22,7 @@ from egoassist._env import load_env
 from egoassist.memory import ClockContext, TimelineMemory, resolve_time_semantics
 from egoassist.realtime import (
     ContextHarness,
+    CaseWorkLedger,
     ContextLayer,
     ContextSettings,
     default_memory_policy,
@@ -36,8 +37,14 @@ from egoassist.realtime import (
     SkillToolExecutor,
     SessionJournal,
     SemanticTurnRouter,
+    explicit_memory_fallback_atoms,
+    is_explicit_memory_request,
+    memory_draft_candidate,
     TaskSpec,
     TurnTakingPolicy,
+    executable_tool_declarations,
+    platform_capability_available,
+    platform_capability_truth,
 )
 from egoassist.realtime.media_audit import MediaAuditAccumulator
 from egoassist.realtime.tools import tool_result_succeeded
@@ -131,6 +138,12 @@ class CaseRuntimeOwner:
     transitioning: bool = False
     turn_sequence: int = 0
     latest_input_sequence: int = 0
+    work_ledger: CaseWorkLedger | None = None
+    classification_tasks: set[asyncio.Task] = field(default_factory=set)
+    queued_turn_ids: set[str] = field(default_factory=set)
+    job_scheduler_task: asyncio.Task | None = None
+    bridge: Any = None
+    intent_runtimes: dict[str, SkillRuntime] = field(default_factory=dict)
 
 
 def runtime_root() -> Path:
@@ -401,6 +414,7 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
     def session_runtime_from(
         journal: SessionJournal,
         seed_runtime: SkillRuntime | None = None,
+        checkpoint_override: dict | None = None,
     ) -> SkillRuntime:
         def session_event(event_type, source, payload, parent_event_ids=None, **metadata):
             entry = journal.append("runtime_event", {
@@ -412,7 +426,7 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
             })
             return {**entry, "eventId": entry["id"]}
 
-        checkpoint = next((
+        checkpoint = checkpoint_override or next((
             entry.get("state") for entry in reversed(journal.entries())
             if entry.get("type") == "state_checkpoint"
         ), None)
@@ -495,11 +509,16 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                     candidate.maintenance_task is not None
                     and not candidate.maintenance_task.done()
                 )
+                scheduler_active = (
+                    candidate.job_scheduler_task is not None
+                    and not candidate.job_scheduler_task.done()
+                )
                 if (
                     candidate.socket_token is None
                     and candidate.socket is None
                     and not worker_active
                     and not maintenance_active
+                    and not scheduler_active
                     and not candidate.transitioning
                     and not candidate.mutation_lock.locked()
                 ):
@@ -544,8 +563,10 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
             runtime=active_runtime,
             routing=routing_for_case(journal),
             tools=SkillToolExecutor(audit=audit),
+            work_ledger=CaseWorkLedger(journal),
         )
         case_owners[session_id] = owner
+        ensure_job_scheduler(owner)
         return owner
 
     def runtime_for_case(user_id: str, session_id: str) -> tuple[SessionJournal, SkillRuntime]:
@@ -825,6 +846,24 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
         preference_settings = active_policy["components"]["preference"]
         episodic_settings = active_policy["components"]["episodic"]
         harness_snapshot = harness_override.snapshot() if harness_override else None
+        work_ledger_snapshot = (
+            CaseWorkLedger(harness_override.journal).snapshot()
+            if harness_override else {
+                "turnInbox": [], "intents": [], "foregroundIntentId": None,
+                "jobs": [], "resultInbox": [],
+            }
+        )
+        capability_catalog = {
+            "platform": platform_capability_truth(),
+            "skills": [
+                {
+                    "name": item["name"],
+                    "capabilities": item.get("capabilityTruth", []),
+                    "tools": item.get("tools", []),
+                }
+                for item in registry.summaries()
+            ],
+        }
         visible_events = (
             [{
                 "eventId": entry.get("id"),
@@ -955,6 +994,8 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                 "events": visible_events,
                 "sessionId": visible_session_id,
                 "scheduler": scheduler,
+                "workLedger": work_ledger_snapshot,
+                "capabilityCatalog": capability_catalog,
                 "turnTakingPolicy": {
                     **default_policy.public(),
                     "currentSelection": default_policy.select(generic_decision),
@@ -1058,6 +1099,8 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
             "events": visible_events,
             "sessionId": visible_session_id,
             "scheduler": scheduler,
+            "workLedger": work_ledger_snapshot,
+            "capabilityCatalog": capability_catalog,
             "turnTakingPolicy": {
                 **TurnTakingPolicy.from_manifest(active_runtime.skill.manifest).public(),
                 "currentSelection": TurnTakingPolicy.from_manifest(active_runtime.skill.manifest).select(task.decision),
@@ -1102,20 +1145,80 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
     def request_bridge_response(
         bridge, instructions, *, priority, interrupt=False,
         speech_policy="immediate", reason="unspecified", max_protection_ms=2500,
+        origin=None,
     ):
         if hasattr(bridge, "scheduler_snapshot"):
             return bridge.request_response(
                 instructions, priority=priority, interrupt=interrupt,
                 speech_policy=speech_policy, reason=reason,
                 max_protection_ms=max_protection_ms,
+                origin=origin,
             )
         return bridge.request_response(instructions, priority=priority, interrupt=interrupt)
+
+    def ensure_job_scheduler(owner: CaseRuntimeOwner) -> None:
+        """Start one durable case scheduler independently of WebSocket lifetime."""
+        if not platform_capability_available("background-execution"):
+            return
+        active = owner.job_scheduler_task
+        if active is not None and not active.done():
+            return
+
+        async def run() -> None:
+            ledger = owner.work_ledger or CaseWorkLedger(owner.journal)
+            while True:
+                for job in ledger.due_jobs():
+                    intent_id = str(job.get("intentId", ""))
+                    if intent_id not in ledger.intents():
+                        continue
+                    result = ledger.enqueue_result(
+                        intent_id,
+                        {
+                            "kind": "scheduled-job",
+                            "jobId": job["jobId"],
+                            "label": (job.get("payload") or {}).get("label", ""),
+                        },
+                        job_id=job["jobId"], priority=90,
+                    )
+                    ledger.set_job_status(
+                        job["jobId"], "completed",
+                        detail={"resultId": result["resultId"], "trigger": "durable-scheduler"},
+                    )
+                bridge = owner.bridge
+                if bridge is not None and hasattr(bridge, "scheduler_snapshot"):
+                    snapshot = bridge.scheduler_snapshot()
+                    if not snapshot.get("pending") and not snapshot.get("activeResponseIds") and not snapshot.get("queued"):
+                        claimed = ledger.claim_next_result()
+                        if claimed is not None:
+                            accepted = request_bridge_response(
+                                bridge,
+                                "Deliver this completed background result naturally and briefly. "
+                                "Do not mention internal ledgers: "
+                                + json.dumps(claimed.get("content"), ensure_ascii=False),
+                                priority=int(claimed.get("priority", 50)),
+                                reason="result-inbox-arbiter",
+                                origin={
+                                    "intentId": claimed.get("intentId"),
+                                    "jobId": claimed.get("jobId"),
+                                    "resultId": claimed.get("resultId"),
+                                },
+                            )
+                            if not accepted:
+                                ledger.set_result_status(
+                                    claimed["resultId"], "pending",
+                                    detail={"reason": "speech-arbiter-not-accepted"},
+                                )
+                await asyncio.sleep(0.25)
+
+        task = asyncio.create_task(run(), name=f"egoassist-job-scheduler:{owner.session_id}")
+        owner.job_scheduler_task = task
 
     async def stop_case_connection(owner: CaseRuntimeOwner, *, notify: bool = True) -> None:
         owner.epoch += 1
         socket = owner.socket
         owner.socket_token = None
         owner.socket = None
+        owner.bridge = None
         worker = owner.turn_worker
         owner.turn_worker = None
         queue = owner.turn_queue
@@ -1123,6 +1226,13 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
         if worker and worker is not asyncio.current_task() and not worker.done():
             worker.cancel()
             await asyncio.gather(worker, return_exceptions=True)
+        classification_tasks = tuple(owner.classification_tasks)
+        owner.classification_tasks.clear()
+        for task in classification_tasks:
+            if not task.done():
+                task.cancel()
+        if classification_tasks:
+            await asyncio.gather(*classification_tasks, return_exceptions=True)
         if queue:
             while not queue.empty():
                 try:
@@ -1239,11 +1349,19 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
             instructions += " 这是一个指代既往内容的问题，但没有检索到可靠证据；不要猜测，直接说明不确定。"
         if result.get("memoryRecalled"):
             instructions += " A confirmed preference is available as a separate low-trust data item."
+        intent_execution = (result.get("semanticDecision") or {}).get("intentExecution") or {}
+        if intent_execution.get("status") == "unsupported":
+            instructions += (
+                " The requested background action is not supported because no durable executor is connected. "
+                "State that limitation plainly, do not imply that work will continue, and offer only an immediate "
+                "answer or a supported alternative."
+            )
         timeline_write = result.get("timelineWrite") or {}
         card = timeline_write.get("card") or {}
-        if timeline_write.get("action") == "written" and card.get("status") == "active":
+        committed_card_ids = list(timeline_write.get("committedCardIds") or [])
+        if committed_card_ids:
             instructions += (
-                " A memory card was durably committed for this turn. You may briefly acknowledge only the exact "
+                " One or more memory cards were durably committed for this turn. You may briefly acknowledge only the exact "
                 "committed fact; do not claim that any reminder, timer, or external action was created."
             )
         elif timeline_write.get("action") == "capture":
@@ -1572,6 +1690,9 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
         harness: ContextHarness | None = None,
         target_runtime: SkillRuntime | None = None,
         *,
+        turn_id: str | None = None,
+        transcript_entry: dict | None = None,
+        persist_runtime_checkpoint: bool = True,
         preference_memory: PreferenceMemory | None = None,
         user_scope: str = "local-default",
         semantic_decision: dict | None = None,
@@ -1588,10 +1709,10 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
         episodic_settings = active_policy["components"]["episodic"]
         clock_context = clock_context or ClockContext.current()
         if harness:
-            transcript_entry = harness.record_user(
+            transcript_entry = transcript_entry or harness.record_user(
                 transcript,
                 source="input-audio-transcript",
-                turn_id=uuid4().hex[:16],
+                turn_id=turn_id or uuid4().hex[:16],
             )
             transcript_event = {"eventId": transcript_entry["id"]}
         else:
@@ -1642,7 +1763,14 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                     key=lambda item: (item.get("score", 0.0), item.get("record", {}).get("timestamp", "")),
                     reverse=True,
                 )
-                merged_selected = [item for item in merged_candidates if item.get("score", 0.0) >= 0.08][:5]
+                minimum_score = max(
+                    float(episodic_retrieval.get("minimumScore") or 0.18),
+                    float(durable_retrieval.get("minimumScore") or 0.18),
+                )
+                merged_selected = [
+                    item for item in merged_candidates
+                    if item.get("score", 0.0) >= minimum_score
+                ][:5]
                 selected_ids = {item["episodeId"] for item in merged_selected}
                 for item in merged_candidates:
                     item["selected"] = item["episodeId"] in selected_ids
@@ -1657,6 +1785,7 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                     },
                     "candidates": merged_candidates[:20],
                     "selected": merged_selected,
+                    "minimumScore": minimum_score,
                     "claimBoundary": "Merged same-case event cards and explicitly durable participant cards.",
                 }
         elif durable_retrieval is not None:
@@ -1918,7 +2047,43 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
         memory_kind = semantic_decision.get("memoryKind")
         memory_consent = semantic_decision.get("memoryConsent")
         memory_case_id = harness.session_id if harness else "local-default"
+        pending_draft = timeline.pending_draft(user_id=user_scope, case_id=memory_case_id)
+        raw_draft_decision = semantic_decision.get("memoryDraft")
         memory_atoms = list(semantic_decision.get("memoryAtoms") or [])
+        fallback_atoms = []
+        if not memory_atoms and semantic_decision.get("status") in {"unavailable", "invalid"}:
+            fallback_atoms = explicit_memory_fallback_atoms(transcript, pending_draft)
+            if fallback_atoms:
+                memory_atoms = fallback_atoms
+                first_fallback = fallback_atoms[0]
+                memory_kind = first_fallback["kind"]
+                memory_consent = first_fallback["consent"]
+                semantic_decision.update({
+                    "memoryKind": memory_kind,
+                    "memoryText": first_fallback["text"],
+                    "memoryScope": first_fallback["scope"],
+                    "memoryConsent": memory_consent,
+                    "memoryAtoms": fallback_atoms,
+                    "memoryFallback": "explicit-memory-fallback-v1",
+                })
+        if not memory_atoms and raw_draft_decision and is_explicit_memory_request(transcript):
+            structured_fallback = explicit_memory_fallback_atoms(
+                transcript, pending_draft, allow_verbatim=False,
+            )
+            if structured_fallback:
+                fallback_atoms = structured_fallback
+                memory_atoms = structured_fallback
+                first_fallback = structured_fallback[0]
+                memory_kind = first_fallback["kind"]
+                memory_consent = first_fallback["consent"]
+                semantic_decision.update({
+                    "memoryKind": memory_kind,
+                    "memoryText": first_fallback["text"],
+                    "memoryScope": first_fallback["scope"],
+                    "memoryConsent": memory_consent,
+                    "memoryAtoms": structured_fallback,
+                    "memoryFallback": "explicit-memory-fallback-v1",
+                })
         if not memory_atoms and memory_kind in {"fact", "event", "state", "preference"}:
             memory_atoms = [{
                 "kind": memory_kind,
@@ -1930,14 +2095,132 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                 "consent": semantic_decision.get("memoryConsent") or "observed",
                 "legacyMemoryKey": semantic_decision.get("memoryKey"),
             }]
-        pending_draft = timeline.pending_draft(user_id=user_scope, case_id=memory_case_id)
-        draft_decision = semantic_decision.get("memoryDraft")
-        if memory_kind == "capture" and not draft_decision:
+        draft_decision = raw_draft_decision
+        if memory_kind == "capture" and not draft_decision and is_explicit_memory_request(transcript):
             draft_decision = {
                 "mode": "start", "subject": None, "predicate": "memory.value",
                 "language": None, "missingFields": ["subject", "value"],
             }
-        if draft_decision and preference_enabled:
+        draft_decision, draft_rejection = memory_draft_candidate(
+            transcript, draft_decision, pending_draft,
+        )
+        memory_requested = bool(
+            is_explicit_memory_request(transcript)
+            or fallback_atoms
+            or draft_decision
+        )
+        ignored_draft = None
+        if memory_atoms and raw_draft_decision:
+            ignored_draft = {
+                "reason": "memory-atoms-precedence",
+                "candidate": raw_draft_decision,
+            }
+        if memory_atoms:
+            written_cards = []
+            skipped_reasons = []
+            consumed_draft = False
+            for atom in memory_atoms[:3]:
+                atom_kind = atom.get("kind")
+                atom_consent = atom.get("consent") or "observed"
+                requested_scope = atom.get("scope") or "case"
+                compatible_draft = bool(
+                    pending_draft
+                    and (
+                        timeline.draft_accepts(
+                            pending_draft,
+                            subject=atom.get("subject"),
+                            predicate=atom.get("predicate"),
+                        )
+                        or (
+                            pending_draft.get("predicate") == "memory.value"
+                            and (
+                                semantic_method == "explicit-research-api-labels-v1"
+                                or atom.get("fallback") == "explicit-memory-fallback-v1"
+                                or (
+                                    atom.get("scope") == "participant"
+                                    and atom.get("consent") == "explicit"
+                                )
+                            )
+                        )
+                    )
+                )
+                if compatible_draft:
+                    requested_scope = "participant"
+                    atom_consent = "explicit"
+                write_enabled = (
+                    preference_enabled if requested_scope == "participant"
+                    else episodic_settings["enabled"]
+                )
+                if not write_enabled:
+                    skipped_reasons.append(f"{requested_scope}-memory-disabled")
+                    continue
+                target_episodic = (
+                    episodic_for_user(user_scope)
+                    if requested_scope == "participant" and user_scope != "local-default"
+                    else active_episodic
+                )
+                temporal = resolve_time_semantics(
+                    f"{transcript} {atom.get('text') or ''}", clock_context, kind=atom_kind,
+                )
+                episode = target_episodic.remember(
+                    atom.get("text") or transcript,
+                    kind=atom_kind,
+                    source=(
+                        "semantic-memory-fallback"
+                        if atom.get("fallback") == "explicit-memory-fallback-v1"
+                        else "semantic-memory-card"
+                    ),
+                    skill=active_runtime.skill.name if active_runtime.skill else None,
+                    task=active_runtime.task.spec.id if active_runtime.task else None,
+                    evidence_event_id=transcript_event["eventId"],
+                    session_id=memory_case_id,
+                    user_scope=user_scope,
+                    memory_key=atom.get("legacyMemoryKey"),
+                    scope=requested_scope,
+                    tier="long" if requested_scope == "participant" and atom_consent == "explicit" else "short",
+                    status="pending" if atom_consent == "inferred" else "active",
+                    importance=1.0 if atom_consent == "explicit" else 0.7,
+                    recorded_at=temporal["recordedAt"],
+                    effective_at=temporal["effectiveAt"],
+                    effective_end=temporal["effectiveEnd"],
+                    timezone_name=temporal["timezone"],
+                    utc_offset_minutes=clock_context.utc_offset_minutes,
+                    recurrence=temporal["recurrence"],
+                    subject=atom.get("subject"),
+                    predicate=atom.get("predicate"),
+                    value=atom.get("value"),
+                    candidate_scope=memory_case_id,
+                )
+                if episode:
+                    written_cards.append(episode)
+                    consumed_draft = consumed_draft or compatible_draft
+                else:
+                    skipped_reasons.append("empty-or-question-like-memory-text")
+            if consumed_draft and pending_draft:
+                timeline.finish_draft(pending_draft["id"], status="consumed")
+            memory_requested = memory_requested or consumed_draft
+            committed_ids = [
+                card["id"] for card in written_cards
+                if card.get("id") and card.get("status") == "active"
+            ]
+            if written_cards:
+                scopes = {card.get("scope") for card in written_cards}
+                timeline_write = {
+                    "action": "written", "card": written_cards[0], "cards": written_cards,
+                    "consent": "explicit" if consumed_draft else None,
+                    "storageScope": next(iter(scopes)) if len(scopes) == 1 else "mixed",
+                    "committedCardIds": committed_ids,
+                    "fallback": "explicit-memory-fallback-v1" if fallback_atoms else None,
+                    "ignoredDraft": ignored_draft,
+                }
+            else:
+                timeline_write = {
+                    "action": "not-written", "status": "rejected", "card": None, "cards": [],
+                    "reason": skipped_reasons[0] if skipped_reasons else "no-valid-memory-atoms",
+                    "committedCardIds": [],
+                    "ignoredDraft": ignored_draft,
+                }
+        elif draft_decision and preference_enabled:
             if (
                 draft_decision.get("mode") == "continue"
                 and pending_draft
@@ -1970,96 +2253,26 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                 "action": "capture",
                 "card": {**draft, "kind": "capture", "tier": "short", "scope": "case"},
                 "draft": draft,
+                "committedCardIds": [],
             }
         elif draft_decision:
             timeline_write = {
                 "action": "not-written", "status": "disabled",
                 "reason": "participant-memory-disabled", "card": None, "cards": [],
+                "committedCardIds": [],
             }
-        elif memory_atoms:
-            written_cards = []
-            skipped_reasons = []
-            consumed_draft = False
-            for atom in memory_atoms[:3]:
-                atom_kind = atom.get("kind")
-                atom_consent = atom.get("consent") or "observed"
-                requested_scope = atom.get("scope") or "case"
-                compatible_draft = bool(
-                    pending_draft
-                    and (
-                        timeline.draft_accepts(
-                            pending_draft,
-                            subject=atom.get("subject"),
-                            predicate=atom.get("predicate"),
-                        )
-                        or (
-                            pending_draft.get("predicate") == "memory.value"
-                            and semantic_method == "explicit-research-api-labels-v1"
-                        )
-                    )
-                )
-                if compatible_draft:
-                    requested_scope = "participant"
-                    atom_consent = "explicit"
-                write_enabled = (
-                    preference_enabled if requested_scope == "participant"
-                    else episodic_settings["enabled"]
-                )
-                if not write_enabled:
-                    skipped_reasons.append(f"{requested_scope}-memory-disabled")
-                    continue
-                target_episodic = (
-                    episodic_for_user(user_scope)
-                    if requested_scope == "participant" and user_scope != "local-default"
-                    else active_episodic
-                )
-                temporal = resolve_time_semantics(
-                    f"{transcript} {atom.get('text') or ''}", clock_context, kind=atom_kind,
-                )
-                episode = target_episodic.remember(
-                    atom.get("text") or transcript,
-                    kind=atom_kind,
-                    source="semantic-memory-card",
-                    skill=active_runtime.skill.name if active_runtime.skill else None,
-                    task=active_runtime.task.spec.id if active_runtime.task else None,
-                    evidence_event_id=transcript_event["eventId"],
-                    session_id=memory_case_id,
-                    user_scope=user_scope,
-                    memory_key=atom.get("legacyMemoryKey"),
-                    scope=requested_scope,
-                    tier="long" if requested_scope == "participant" and atom_consent == "explicit" else "short",
-                    status="pending" if atom_consent == "inferred" else "active",
-                    importance=1.0 if atom_consent == "explicit" else 0.7,
-                    recorded_at=temporal["recordedAt"],
-                    effective_at=temporal["effectiveAt"],
-                    effective_end=temporal["effectiveEnd"],
-                    timezone_name=temporal["timezone"],
-                    utc_offset_minutes=clock_context.utc_offset_minutes,
-                    recurrence=temporal["recurrence"],
-                    subject=atom.get("subject"),
-                    predicate=atom.get("predicate"),
-                    value=atom.get("value"),
-                    candidate_scope=memory_case_id,
-                )
-                if episode:
-                    written_cards.append(episode)
-                    consumed_draft = consumed_draft or compatible_draft
-                else:
-                    skipped_reasons.append("empty-or-question-like-memory-text")
-            if consumed_draft and pending_draft:
-                timeline.finish_draft(pending_draft["id"], status="consumed")
-            if written_cards:
-                scopes = {card.get("scope") for card in written_cards}
-                timeline_write = {
-                    "action": "written", "card": written_cards[0], "cards": written_cards,
-                    "consent": "explicit" if consumed_draft else None,
-                    "storageScope": next(iter(scopes)) if len(scopes) == 1 else "mixed",
-                }
-            else:
-                timeline_write = {
-                    "action": "not-written", "status": "rejected", "card": None, "cards": [],
-                    "reason": skipped_reasons[0] if skipped_reasons else "no-valid-memory-atoms",
-                }
+        elif raw_draft_decision:
+            timeline_write = {
+                "action": "not-written", "status": "rejected", "card": None, "cards": [],
+                "reason": draft_rejection or "draft-candidate-rejected",
+                "committedCardIds": [],
+            }
+        elif memory_requested:
+            timeline_write = {
+                "action": "not-written", "status": "rejected", "card": None, "cards": [],
+                "reason": "explicit-memory-request-had-no-committable-value",
+                "committedCardIds": [],
+            }
         if harness and timeline_write:
             card = timeline_write.get("card", {})
             cards = timeline_write.get("cards") or ([card] if card else [])
@@ -2080,8 +2293,11 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                     "tier": (card or {}).get("tier"),
                     "storageScope": (card or {}).get("scope") or timeline_write.get("storageScope"),
                     "status": (card or {}).get("status") or timeline_write.get("status"),
+                    "committedCardIds": timeline_write.get("committedCardIds", []),
                     "memoryKey": (card or {}).get("memoryKey"),
                     "reason": timeline_write.get("reason"),
+                    "fallback": timeline_write.get("fallback"),
+                    "ignoredDraft": timeline_write.get("ignoredDraft"),
                     "evidenceEventId": transcript_event["eventId"],
                     "clock": clock_context.prompt_payload(),
                 },
@@ -2130,7 +2346,7 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                 enabled=preference_enabled,
             ), False,
         )
-        if harness:
+        if harness and persist_runtime_checkpoint:
             harness.journal.append_state_checkpoint(runtime_checkpoint(active_runtime), reason="user-turn")
         preference_retrieval = memory_retrieval(
             active_runtime,
@@ -2194,6 +2410,43 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                 "reason": "semantic-stop-speaking-control",
                 "confidence": 1.0,
             }
+        committed_card_ids = list((timeline_write or {}).get("committedCardIds") or [])
+        if committed_card_ids:
+            committed_cards = [
+                card for card in (timeline_write or {}).get("cards", [])
+                if card.get("id") in committed_card_ids
+            ]
+            memory_response = {
+                "requested": memory_requested,
+                "status": "committed",
+                "committedCardIds": committed_card_ids,
+                "message": (
+                    "已保存：" + "；".join(
+                        str(card.get("text") or card.get("summary") or "")
+                        for card in committed_cards
+                    )[:600]
+                    if memory_requested else None
+                ),
+            }
+        elif memory_requested:
+            needs_value = (timeline_write or {}).get("action") == "capture"
+            memory_response = {
+                "requested": True,
+                "status": "needs-input" if needs_value else "not-committed",
+                "committedCardIds": [],
+                "message": (
+                    "还没有保存，请把要记住的完整内容告诉我。"
+                    if needs_value
+                    else "这条内容没有保存成功，请再说一遍。"
+                ),
+            }
+        else:
+            memory_response = {
+                "requested": False,
+                "status": "not-requested",
+                "committedCardIds": [],
+                "message": None,
+            }
         return {
             "matchedTask": matched_task,
             "runtimeChanged": runtime_changed,
@@ -2209,6 +2462,7 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
             "skillControl": skill_control,
             "semanticDecision": semantic_decision,
             "timelineWrite": timeline_write,
+            "memoryResponse": memory_response,
         }
 
     async def post_voice(request):
@@ -2501,6 +2755,9 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                     owner.journal, owner.runtime, None, source="research-console-reset",
                 )
                 owner.routing = active_routing
+                (owner.work_ledger or CaseWorkLedger(owner.journal)).focus_intent(
+                    None, reason="research-console-reset",
+                )
             return web.json_response(scoped_state_for_user(
                 user_id,
                 session_id,
@@ -2511,6 +2768,69 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
         runtime_for_user(user_id).deactivate()
         user_routing[user_id] = registry.route("")
         return await get_state(request)
+
+    async def post_intent_focus(request):
+        user_id = request[user_key]["id"]
+        payload = await request.json()
+        session_id = str(payload.get("sessionId", "")).strip()
+        intent_id = str(payload.get("intentId", "")).strip()
+        if not session_id or not intent_id:
+            raise ValueError("sessionId and intentId are required")
+        identity.get_context_session(user_id, session_id)
+        owner = case_owner(user_id, session_id)
+        ledger = owner.work_ledger or CaseWorkLedger(owner.journal)
+        snapshot = ledger.intent_runtime_snapshot(intent_id)
+        if snapshot is None:
+            raise ValueError("intent has no restorable runtime checkpoint")
+        async with exclusive_case_transition(owner):
+            owner.runtime = session_runtime_from(owner.journal, checkpoint_override=snapshot)
+            ledger.focus_intent(intent_id, reason="explicit-resume")
+            ledger.set_intent_status(intent_id, "foreground", detail={"runtimeCheckpoint": snapshot})
+            owner.journal.append_state_checkpoint(snapshot, reason=f"intent-resumed:{intent_id}")
+            owner.routing = registry.route("")
+        return web.json_response(scoped_state_for_user(
+            user_id, session_id, runtime_override=owner.runtime, routing_override=owner.routing,
+        ))
+
+    async def post_job_cancel(request):
+        user_id = request[user_key]["id"]
+        payload = await request.json()
+        session_id = str(payload.get("sessionId", "")).strip()
+        job_id = str(payload.get("jobId", "")).strip()
+        if not session_id or not job_id:
+            raise ValueError("sessionId and jobId are required")
+        identity.get_context_session(user_id, session_id)
+        owner = case_owner(user_id, session_id)
+        async with owner.mutation_lock:
+            job = (owner.work_ledger or CaseWorkLedger(owner.journal)).cancel_job(job_id)
+        return web.json_response({
+            "job": job,
+            "state": scoped_state_for_user(user_id, session_id, runtime_override=owner.runtime),
+        })
+
+    async def post_result_dismiss(request):
+        user_id = request[user_key]["id"]
+        payload = await request.json()
+        session_id = str(payload.get("sessionId", "")).strip()
+        result_id = str(payload.get("resultId", "")).strip()
+        if not session_id or not result_id:
+            raise ValueError("sessionId and resultId are required")
+        identity.get_context_session(user_id, session_id)
+        owner = case_owner(user_id, session_id)
+        ledger = owner.work_ledger or CaseWorkLedger(owner.journal)
+        async with owner.mutation_lock:
+            result = ledger.results().get(result_id)
+            if result is None:
+                raise ValueError("result not found")
+            if result.get("status") not in {"delivered", "dismissed"}:
+                ledger.set_result_status(
+                    result_id, "dismissed", detail={"reason": "explicit-user-dismiss"},
+                )
+            result = ledger.results()[result_id]
+        return web.json_response({
+            "result": result,
+            "state": scoped_state_for_user(user_id, session_id, runtime_override=owner.runtime),
+        })
 
     async def post_tool(request):
         user_id = request[user_key]["id"]
@@ -2645,6 +2965,7 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
 
         def session_trace(event_type, source, payload, parent_event_ids=None, **metadata):
             parents = list(parent_event_ids or [])
+            trace_runtime = metadata.pop("runtime", None) or session_runtime
             entry = journal.append(
                 "runtime_event",
                 {
@@ -2652,8 +2973,8 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                     "source": source,
                     "payload": dict(payload),
                     "model": metadata.get("model", model),
-                    "skill": session_runtime.skill.name if session_runtime.skill else None,
-                    "task": session_runtime.task.spec.id if session_runtime.task else None,
+                    "skill": trace_runtime.skill.name if trace_runtime.skill else None,
+                    "task": trace_runtime.task.spec.id if trace_runtime.task else None,
                     "responseId": metadata.get("response_id"),
                     "latencyMs": metadata.get("latency_ms"),
                 },
@@ -2675,8 +2996,8 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                             payload.get("sceneSummary", ""),
                             kind="scene",
                             source="proactive-visual-gate",
-                            skill=session_runtime.skill.name if session_runtime.skill else None,
-                            task=session_runtime.task.spec.id if session_runtime.task else None,
+                            skill=trace_runtime.skill.name if trace_runtime.skill else None,
+                            task=trace_runtime.task.spec.id if trace_runtime.task else None,
                             evidence_event_id=entry["id"],
                             session_id=session_id,
                             user_scope=user_id,
@@ -2700,15 +3021,30 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                             )
             return entry
 
+        def runtime_event_sink(active_runtime: SkillRuntime):
+            def sink(event_type, source, payload, parent_event_ids=None, **metadata):
+                return session_trace(
+                    event_type,
+                    source,
+                    payload,
+                    parent_event_ids,
+                    runtime=active_runtime,
+                    **metadata,
+                )
+
+            return sink
+
         media_audit = MediaAuditAccumulator(session_trace)
 
         def session_tool_declarations() -> list[dict]:
             return (
-                session_runtime.skill.manifest.get("tools", [])
+                executable_tool_declarations(session_runtime.skill.manifest.get("tools", []))
                 if session_runtime.skill else []
             )
 
-        def execute_session_tool(name: str, arguments: dict, confirmed: bool) -> dict:
+        def execute_session_tool(
+            name: str, arguments: dict, confirmed: bool, origin: dict | None = None,
+        ) -> dict:
             if (
                 owner.socket_token is not socket_token
                 or owner.epoch != connection_epoch
@@ -2716,13 +3052,14 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
             ):
                 raise RuntimeError("tool call belongs to a stale case connection")
             audit_count = len(session_tools.audit)
+            source = dict(origin or {})
+            declared_tools = source.get("tools")
+            if not isinstance(declared_tools, list):
+                declared_tools = session_tool_declarations()
             result = session_tools.execute(
                 tool=name,
                 arguments=arguments,
-                declared_tools=(
-                    session_runtime.skill.manifest.get("tools", [])
-                    if session_runtime.skill else []
-                ),
+                declared_tools=declared_tools,
                 confirmed=confirmed,
             )
             persist_tool_audit(owner, audit_count)
@@ -2732,11 +3069,14 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
             name: str,
             arguments: dict,
             confirmed: bool,
+            origin: dict | None = None,
         ) -> dict:
             async with owner.mutation_lock:
-                return execute_session_tool(name, arguments, confirmed)
+                return execute_session_tool(name, arguments, confirmed, origin)
 
-        def session_tool_handler(name: str, arguments: dict, confirmed: bool) -> dict:
+        def session_tool_handler(
+            name: str, arguments: dict, confirmed: bool, origin: dict | None = None,
+        ) -> dict:
             try:
                 callback_loop = asyncio.get_running_loop()
             except RuntimeError:
@@ -2744,9 +3084,9 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
             if callback_loop is server_loop:
                 if owner.mutation_lock.locked():
                     raise RuntimeError("case runtime is changing; tool execution was blocked")
-                return execute_session_tool(name, arguments, confirmed)
+                return execute_session_tool(name, arguments, confirmed, origin)
             future = asyncio.run_coroutine_threadsafe(
-                execute_session_tool_serialized(name, arguments, confirmed),
+                execute_session_tool_serialized(name, arguments, confirmed, origin),
                 server_loop,
             )
             return future.result()
@@ -2758,6 +3098,35 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
             is_error: bool,
             journal_entry: dict | None,
         ) -> None:
+            source_origin = {}
+            if journal_entry:
+                source_origin = dict((journal_entry.get("metadata") or {}).get("origin") or {})
+            ledger = owner.work_ledger or CaseWorkLedger(harness.journal)
+            intent_id = source_origin.get("intentId")
+            result_entry = None
+            if intent_id and intent_id in ledger.intents():
+                due_at = (result or {}).get("dueAt") if isinstance(result, dict) else None
+                scheduled_job = None
+                if due_at and tool_result_succeeded(result, is_error=is_error):
+                    scheduled_job = ledger.create_job(
+                        intent_id,
+                        kind="timer-delivery",
+                        payload={
+                            "dueAt": due_at,
+                            "label": (result or {}).get("label", ""),
+                        },
+                        status="queued",
+                    )
+                result_entry = ledger.enqueue_result(
+                    intent_id,
+                    {"tool": name, "result": result, "isError": bool(is_error), "jobId": (scheduled_job or {}).get("jobId")},
+                    priority=100 if not is_error else 80,
+                    delivery="speech-or-display",
+                )
+                ledger.set_job_status(
+                    source_origin.get("jobId"), "completed",
+                    detail={"resultId": result_entry["resultId"]},
+                ) if source_origin.get("jobId") in ledger.jobs() else None
             card = remember_tool_effect(
                 owner,
                 call_id=call_id,
@@ -2768,6 +3137,53 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
             )
             if card and card.get("status") == "active" and card.get("tier") == "short":
                 server_loop.call_soon_threadsafe(request_timeline_consolidation, owner)
+            return result_entry
+
+        def session_result_delivery(result_id: str, status: str) -> None:
+            ledger = owner.work_ledger or CaseWorkLedger(harness.journal)
+            result = ledger.results().get(str(result_id))
+            if result is not None:
+                ledger.set_result_status(str(result_id), status, detail={"arbiter": "speech"})
+                if status == "delivered":
+                    intent_id = str(result.get("intentId", ""))
+                    active_jobs = [
+                        item for item in ledger.jobs().values()
+                        if str(item.get("intentId", "")) == intent_id
+                        and item.get("status") not in {"completed", "failed", "cancelled"}
+                    ]
+                    if intent_id in ledger.intents() and not active_jobs:
+                        ledger.set_intent_status(
+                            intent_id, "completed", detail={"resultId": str(result_id)},
+                        )
+
+        def session_response_lifecycle(origin: dict, status: str) -> None:
+            ledger = owner.work_ledger or CaseWorkLedger(harness.journal)
+            intent_id = str(origin.get("intentId", ""))
+            job_id = str(origin.get("jobId", ""))
+            if intent_id not in ledger.intents():
+                return
+            if status == "completed":
+                waiting_for_input = job_id in ledger.jobs() and ledger.jobs()[job_id].get("status") == "waiting-input"
+                suspended_intent = intent_id in ledger.intents() and ledger.intents()[intent_id].get("status") == "suspended"
+                if job_id in ledger.jobs() and not waiting_for_input and ledger.jobs()[job_id].get("status") not in {"completed", "failed", "cancelled"}:
+                    ledger.set_job_status(job_id, "completed", detail={"response": "completed"})
+                active_jobs = [
+                    item for item in ledger.jobs().values()
+                    if str(item.get("intentId", "")) == intent_id
+                    and item.get("status") not in {"completed", "failed", "cancelled"}
+                ]
+                if not active_jobs and not waiting_for_input and not suspended_intent:
+                    ledger.set_intent_status(intent_id, "completed", detail={"response": "completed"})
+            elif status == "suspended":
+                if job_id in ledger.jobs() and ledger.jobs()[job_id].get("status") not in {"completed", "failed", "cancelled"}:
+                    ledger.set_job_status(
+                        job_id, "suspended",
+                        detail={"reason": "response-interrupted", "runtimeCheckpoint": origin.get("runtimeCheckpoint")},
+                    )
+                ledger.set_intent_status(
+                    intent_id, "suspended",
+                    detail={"runtimeCheckpoint": origin.get("runtimeCheckpoint"), "reason": "response-interrupted"},
+                )
 
         async def classify_semantic_turn(text: str) -> dict:
             catalog = [
@@ -2781,6 +3197,20 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
             )
             return await semantic_router.classify(text, catalog)
 
+        classification_limit = asyncio.Semaphore(
+            max(1, int(os.getenv("EGOASSIST_CLASSIFICATION_CONCURRENCY", "4"))),
+        )
+
+        async def classify_persisted_turn(turn_id: str, text: str) -> dict:
+            ledger = owner.work_ledger or CaseWorkLedger(harness.journal)
+            ledger.set_turn_status(turn_id, "classifying")
+            async with classification_limit:
+                semantic = await classify_semantic_turn(text)
+            ledger.set_turn_status(
+                turn_id, "ready", detail={"semanticMethod": semantic.get("method")},
+            )
+            return semantic
+
         def resolve_semantic_turn(text: str, result: dict, semantic: dict) -> None:
             harness.journal.append("control_decision", {
                 "decision": semantic,
@@ -2788,22 +3218,79 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                 "input": text,
             })
 
-        async def process_queued_turn(text: str, *, explicit: bool, turn_sequence: int) -> dict:
+        async def process_queued_turn(
+            text: str,
+            *,
+            explicit: bool,
+            turn_sequence: int,
+            turn_id: str,
+            semantic_task: asyncio.Task | None = None,
+        ) -> dict:
             nonlocal session_routing, session_episode_injection
             text = str(text).strip()
             if not text:
                 session_trace("audio.transcript.ignored", "realtime-user", {"reason": "empty-transcript"})
                 return {}
-            semantic = await classify_semantic_turn(text)
+            work_ledger = owner.work_ledger or CaseWorkLedger(harness.journal)
+            semantic = await semantic_task if semantic_task is not None else await classify_persisted_turn(
+                turn_id, text,
+            )
             if owner.socket_token is not socket_token or owner.epoch != connection_epoch:
                 raise asyncio.CancelledError
             async with owner.mutation_lock:
                 if owner.socket_token is not socket_token or owner.epoch != connection_epoch:
                     raise asyncio.CancelledError
+                work_ledger.set_turn_status(turn_id, "processing")
+                pending_draft_before = timeline.pending_draft(
+                    user_id=user_id, case_id=session_id,
+                )
+                requested_intent_kind = str(
+                    semantic.get("intentKind") or "foreground-dialogue"
+                )
+                intent_kind = requested_intent_kind
+                if (
+                    requested_intent_kind
+                    in {"background-job", "background-reminder", "persistent-task"}
+                    and not platform_capability_available("background-execution")
+                ):
+                    intent_kind = "foreground-dialogue"
+                    semantic = {
+                        **semantic,
+                        "requestedIntentKind": requested_intent_kind,
+                        "intentKind": intent_kind,
+                        "intentExecution": {
+                            "status": "unsupported",
+                            "capability": "background-execution",
+                            "reason": "No durable workflow executor is connected.",
+                        },
+                    }
+                if semantic.get("memoryDraft") and intent_kind == "foreground-dialogue":
+                    intent_kind = "waiting-input"
+                background_intent = intent_kind in {
+                    "background-job", "background-reminder", "persistent-task",
+                }
+                waiting_input_intent = intent_kind == "waiting-input"
+                processing_runtime = session_runtime
+                if background_intent:
+                    selected_skill = semantic.get("selectedSkill")
+                    processing_runtime = SkillRuntime(
+                        registry,
+                        str(selected_skill) if selected_skill else None,
+                        event_sink=None,
+                    )
+                    processing_runtime.set_event_sink(runtime_event_sink(processing_runtime))
+                    selected_task = semantic.get("selectedTask")
+                    if selected_task and str(selected_task) in processing_runtime.tasks:
+                        processing_runtime.select_task(str(selected_task))
                 result = process_transcript(
                     text,
                     harness,
-                    session_runtime,
+                    processing_runtime,
+                    turn_id=turn_id,
+                    transcript_entry=work_ledger.ensure_turn_message(
+                        turn_id, text, source="input-audio-transcript",
+                    ),
+                    persist_runtime_checkpoint=not background_intent,
                     preference_memory=current_preference_memory(),
                     episodic_memory=current_episodic_memory(),
                     user_scope=user_id,
@@ -2812,16 +3299,69 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                     clock_context=clock_for_session(user_id, session_id),
                 )
                 resolve_semantic_turn(text, result, semantic)
-                session_routing = result["routingState"]
-                owner.routing = session_routing
-                session_episode_injection = result["episodicInjection"]
-                if hasattr(bridge, "set_tools"):
+                if not background_intent:
+                    session_routing = result["routingState"]
+                    owner.routing = session_routing
+                    session_episode_injection = result["episodicInjection"]
+                current_skill_ref = {
+                    "name": processing_runtime.skill.name if processing_runtime.skill else None,
+                    "version": (
+                        processing_runtime.skill.manifest.get("version")
+                        if processing_runtime.skill else None
+                    ),
+                    "task": processing_runtime.task.spec.id if processing_runtime.task else None,
+                }
+                draft_decision = semantic.get("memoryDraft") or {}
+                waiting_intent = next(
+                    (
+                        item for item in reversed(list(work_ledger.intents().values()))
+                        if item.get("status") == "waiting-input"
+                        and (item.get("payload") or {}).get("semantic", {}).get("memoryDraft")
+                    ),
+                    None,
+                )
+                continuation_intent = (
+                    waiting_intent
+                    if str(draft_decision.get("mode", "")).casefold() == "continue"
+                    or (
+                        pending_draft_before is not None
+                        and (result.get("timelineWrite") or {}).get("consent") == "explicit"
+                    )
+                    else None
+                )
+                if continuation_intent is not None:
+                    intent = dict(continuation_intent)
+                    work_ledger.link_turn_to_intent(
+                        intent["intentId"], turn_id, relation="memory-draft-continuation",
+                    )
+                else:
+                    intent = work_ledger.create_intent(
+                        turn_id,
+                        kind=intent_kind,
+                        payload={"semantic": semantic},
+                        skill_ref=current_skill_ref,
+                        status="running-background" if background_intent else "waiting-input" if waiting_input_intent else "foreground",
+                        intent_id=f"intent-{turn_id}",
+                    )
+                if background_intent:
+                    owner.intent_runtimes[intent["intentId"]] = processing_runtime
+                if not background_intent:
+                    work_ledger.focus_intent(intent["intentId"], reason="user-turn")
+                job = work_ledger.create_job(
+                    intent["intentId"],
+                    kind=intent_kind,
+                    payload={"turnId": turn_id, "text": text},
+                    status="running" if background_intent else "waiting-input" if waiting_input_intent or continuation_intent else "queued",
+                    job_id=f"job-{turn_id}",
+                )
+                if not background_intent and hasattr(bridge, "set_tools"):
                     bridge.set_tools(session_tool_declarations(), session_tool_handler)
-                refresh_harness_context(bridge, harness, session_runtime)
-                if result.get("skillControl") == "deactivate":
+                if not background_intent:
+                    refresh_harness_context(bridge, harness, session_runtime)
+                if not background_intent and result.get("skillControl") == "deactivate":
                     bridge.cancel_response()
                 evidence = result.get("episodicInjection", {}).get("evidence", [])
-                if hasattr(bridge, "inject_context_data"):
+                if not background_intent and hasattr(bridge, "inject_context_data"):
                     bridge.inject_context_data("current_turn_context", {
                         "transcript": text,
                         "retrievalEvidence": evidence,
@@ -2836,18 +3376,74 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                         "user.control.stop_speaking", "explicit-control" if explicit else "realtime-user",
                         {"text": text, "responseRequested": False},
                     )
-                state_payload = state(
-                        session_runtime,
-                        routing_override=session_routing,
-                        bridge_override=bridge,
-                        harness_override=harness,
-                        tools_override=session_tools,
-                        memory_override=current_preference_memory(),
-                        episodic_override=current_episodic_memory(),
-                        media_override=session_media_configuration,
-                        user_scope=user_id,
-                        memory_policy_override=current_memory_policy(),
+                if background_intent:
+                    work_ledger.set_intent_status(
+                        intent["intentId"],
+                        "running-background",
+                        detail={"runtimeCheckpoint": runtime_checkpoint(processing_runtime)},
                     )
+                    work_ledger.set_job_status(
+                        job["jobId"], "waiting-result",
+                        detail={"turnId": turn_id, "runtimeCheckpoint": runtime_checkpoint(processing_runtime)},
+                    )
+                elif waiting_input_intent or continuation_intent:
+                    committed = bool((result.get("timelineWrite") or {}).get("committedCardIds"))
+                    draft_still_pending = (
+                        timeline.pending_draft(user_id=user_id, case_id=session_id) is not None
+                    )
+                    if continuation_intent and (committed or not draft_still_pending):
+                        for prior_job in work_ledger.jobs().values():
+                            if (
+                                prior_job.get("jobId") != job["jobId"]
+                                and prior_job.get("intentId") == intent["intentId"]
+                                and prior_job.get("status") == "waiting-input"
+                            ):
+                                work_ledger.set_job_status(
+                                    prior_job["jobId"], "completed",
+                                    detail={"continuedByTurnId": turn_id},
+                                )
+                        work_ledger.set_job_status(
+                            job["jobId"], "completed",
+                            detail={"continuedByTurnId": turn_id},
+                        )
+                        work_ledger.set_intent_status(
+                            intent["intentId"], "completed",
+                            detail={"runtimeCheckpoint": runtime_checkpoint(processing_runtime), "continuedByTurnId": turn_id},
+                        )
+                    else:
+                        work_ledger.set_intent_status(
+                            intent["intentId"], "waiting-input",
+                            detail={
+                                "runtimeCheckpoint": runtime_checkpoint(processing_runtime),
+                                "memoryDraft": semantic.get("memoryDraft"),
+                            },
+                        )
+                        work_ledger.set_job_status(
+                            job["jobId"], "waiting-input",
+                            detail={"turnId": turn_id, "memoryDraft": semantic.get("memoryDraft")},
+                        )
+                else:
+                    work_ledger.set_intent_status(
+                        intent["intentId"], "foreground",
+                        detail={"runtimeCheckpoint": runtime_checkpoint(processing_runtime)},
+                    )
+                    work_ledger.set_job_status(
+                        job["jobId"], "waiting-result",
+                        detail={"turnId": turn_id, "runtimeCheckpoint": runtime_checkpoint(processing_runtime)},
+                    )
+                work_ledger.set_turn_status(turn_id, "completed")
+                state_payload = state(
+                    session_runtime,
+                    routing_override=session_routing,
+                    bridge_override=bridge,
+                    harness_override=harness,
+                    tools_override=session_tools,
+                    memory_override=current_preference_memory(),
+                    episodic_override=current_episodic_memory(),
+                    media_override=session_media_configuration,
+                    user_scope=user_id,
+                    memory_policy_override=current_memory_policy(),
+                )
             timeline_cards = (result.get("timelineWrite") or {}).get("cards") or [
                 (result.get("timelineWrite") or {}).get("card") or {}
             ]
@@ -2857,8 +3453,50 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                 await ws.send_json({"type": "state", "state": state_payload})
                 if explicit:
                     await ws.send_json({"type": "interrupted"})
+            memory_response = result.get("memoryResponse") or {}
+            server_memory_reply = (
+                memory_response.get("message")
+                if memory_response.get("requested")
+                else None
+            )
+            if server_memory_reply and not ws.closed:
+                response_id = f"memory-policy-{connection_epoch}-{turn_sequence}"
+                harness.journal.append_message(
+                    "assistant",
+                    server_memory_reply,
+                    source="server-memory-policy",
+                    response_id=response_id,
+                    idempotency_key=f"assistant:{response_id}:completed",
+                    metadata={
+                        "purpose": "memory-policy",
+                        "memoryStatus": memory_response.get("status"),
+                        "committedCardIds": memory_response.get("committedCardIds", []),
+                    },
+                )
+                await ws.send_json({
+                    "type": "memory_status",
+                    "status": memory_response.get("status"),
+                    "message": server_memory_reply,
+                    "committedCardIds": memory_response.get("committedCardIds", []),
+                })
+                session_trace(
+                    "response.served.memory_transaction",
+                    "server-memory-policy",
+                    {
+                        "turnSequence": turn_sequence,
+                        "status": memory_response.get("status"),
+                        "reason": (
+                            "server-confirmed-committed-card-ids"
+                            if memory_response.get("committedCardIds")
+                            else "no-committed-card-id"
+                        ),
+                    },
+                )
             if (
+                not background_intent
+                and
                 result.get("control") != "stop-speaking"
+                and not server_memory_reply
                 and owner.socket_token is socket_token
                 and owner.epoch == connection_epoch
                 and not ws.closed
@@ -2882,6 +3520,14 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                     max_protection_ms=(
                         selection["maxProtectionMs"] or turn_policy(session_runtime).max_protection_ms
                     ),
+                    origin={
+                        "turnId": turn_id,
+                        "intentId": intent["intentId"],
+                        "jobId": job["jobId"],
+                        "skill": current_skill_ref,
+                        "tools": session_tool_declarations(),
+                        "runtimeCheckpoint": runtime_checkpoint(processing_runtime),
+                    },
                 )
             elif result.get("control") != "stop-speaking" and turn_sequence < owner.latest_input_sequence:
                 session_trace(
@@ -2908,6 +3554,8 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                 try:
                     result = await process_queued_turn(
                         item["text"], explicit=item["explicit"], turn_sequence=item["turnSequence"],
+                        turn_id=item["turnId"],
+                        semantic_task=item.get("semanticTask"),
                     )
                     if future and not future.done():
                         future.set_result(result)
@@ -2916,14 +3564,22 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                         future.cancel()
                     raise
                 except Exception as exc:
+                    try:
+                        (owner.work_ledger or CaseWorkLedger(harness.journal)).set_turn_status(
+                            item["turnId"], "failed", detail={"error": str(exc)},
+                        )
+                    except Exception:
+                        LOGGER.exception("failed to persist turn failure")
                     if future and not future.done():
                         future.set_exception(exc)
                     elif not ws.closed:
                         await ws.send_json({"type": "error", "message": str(exc)})
                 finally:
+                    owner.queued_turn_ids.discard(str(item["turnId"]))
                     queue.task_done()
+                    refill_turn_queue()
 
-        def transcript_received(text):
+        def enqueue_persisted_turn(turn: dict, *, explicit: bool = False, future=None) -> bool:
             queue = owner.turn_queue
             worker = owner.turn_worker
             if (
@@ -2933,24 +3589,86 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                 and owner.socket_token is socket_token
                 and owner.epoch == connection_epoch
             ):
-                owner.turn_sequence += 1
-                owner.latest_input_sequence = owner.turn_sequence
+                turn_id = str(turn["turnId"])
+                if turn_id in owner.queued_turn_ids:
+                    return True
+                if queue.full():
+                    (owner.work_ledger or CaseWorkLedger(harness.journal)).set_turn_status(
+                        turn_id, "deferred", detail={"reason": "bounded-turn-queue-full"},
+                    )
+                    if future and not future.done():
+                        future.set_exception(RuntimeError("turn persisted for deferred processing"))
+                    return False
+                sequence = int(turn.get("sequence") or 0)
+                owner.turn_sequence = max(owner.turn_sequence, sequence)
+                owner.latest_input_sequence = max(owner.latest_input_sequence, sequence)
+                semantic_task = asyncio.create_task(
+                    classify_persisted_turn(turn_id, str(turn["text"])),
+                    name=f"egoassist-turn-classifier:{turn_id}",
+                )
+                owner.classification_tasks.add(semantic_task)
+                semantic_task.add_done_callback(owner.classification_tasks.discard)
+                owner.queued_turn_ids.add(turn_id)
                 queue.put_nowait({
-                    "text": str(text), "explicit": False, "future": None,
-                    "turnSequence": owner.turn_sequence,
+                    "text": str(turn["text"]), "explicit": bool(explicit), "future": future,
+                    "turnSequence": sequence, "turnId": turn_id,
+                    "semanticTask": semantic_task,
                 })
+                return True
+            return False
+
+        def refill_turn_queue() -> None:
+            queue = owner.turn_queue
+            if queue is None or queue.full():
+                return
+            ledger = owner.work_ledger or CaseWorkLedger(harness.journal)
+            for pending in ledger.recoverable_turns():
+                if queue.full():
+                    break
+                enqueue_persisted_turn(pending)
+
+        def transcript_received(text):
+            normalized = str(text).strip()
+            if not normalized:
+                return
+            owner.turn_sequence += 1
+            owner.latest_input_sequence = owner.turn_sequence
+            ledger = owner.work_ledger or CaseWorkLedger(harness.journal)
+            captured = ledger.capture_turn(
+                normalized,
+                source="input-audio-transcript",
+                sequence=owner.turn_sequence,
+            )
+            enqueue_persisted_turn(captured)
 
         try:
-            owner.turn_queue = asyncio.Queue()
+            owner.turn_queue = asyncio.Queue(
+                maxsize=max(4, int(os.getenv("EGOASSIST_TURN_QUEUE_CAPACITY", "64"))),
+            )
             owner.turn_worker = asyncio.create_task(
                 turn_worker_loop(owner.turn_queue),
                 name=f"egoassist-turn-worker:{session_id}:{connection_epoch}",
             )
+            ledger = owner.work_ledger or CaseWorkLedger(harness.journal)
+            recoverable = ledger.recoverable_turns()
+            if recoverable:
+                owner.turn_sequence = max(
+                    owner.turn_sequence,
+                    max(int(item.get("sequence") or 0) for item in recoverable),
+                )
+                for pending_turn in recoverable:
+                    enqueue_persisted_turn(pending_turn)
             bridge = OmniBrowserBridge(api_key, model, voice, initial_context["system"], emit, transcript_received)
+            owner.bridge = bridge
             if hasattr(bridge, "set_context_harness"):
                 bridge.set_context_harness(harness)
             if hasattr(bridge, "set_tool_result_handler"):
                 bridge.set_tool_result_handler(session_tool_result_committed)
+            if hasattr(bridge, "set_result_delivery_handler"):
+                bridge.set_result_delivery_handler(session_result_delivery)
+            if hasattr(bridge, "set_response_lifecycle_handler"):
+                bridge.set_response_lifecycle_handler(session_response_lifecycle)
+            (owner.work_ledger or CaseWorkLedger(harness.journal)).recover_delivery_claims()
             if hasattr(bridge, "set_tools"):
                 bridge.set_tools(session_tool_declarations(), session_tool_handler)
             if hasattr(bridge, "set_trace_sink"):
@@ -2999,6 +3717,16 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                     if bridge.append_video(image_value):
                         interval = session_runtime.skill.manifest.get("proactive_check_seconds", 4) if session_runtime.skill else 4
                         bridge.maybe_check_proactively(float(interval))
+                elif kind == "media_gap":
+                    media = str(payload.get("media", "unknown"))
+                    gap = {
+                        "media": media,
+                        "reason": str(payload.get("reason", "browser-reported-gap")),
+                        "droppedChunks": max(0, int(payload.get("droppedChunks") or 0)),
+                        "droppedFrames": max(0, int(payload.get("droppedFrames") or 0)),
+                    }
+                    session_trace("browser.media.gap", "browser-media", gap)
+                    await ws.send_json({"type": "media_gap", **gap})
                 elif kind == "media_config":
                     raw_video_configuration = payload.get("video", {})
                     video_configuration = (
@@ -3059,14 +3787,15 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                     future = asyncio.get_running_loop().create_future()
                     owner.turn_sequence += 1
                     owner.latest_input_sequence = owner.turn_sequence
+                    ledger = owner.work_ledger or CaseWorkLedger(harness.journal)
+                    captured = ledger.capture_turn(
+                        transcript,
+                        source="explicit-control",
+                        sequence=owner.turn_sequence,
+                    )
                     if hasattr(bridge, "handle_user_speech_started"):
                         bridge.handle_user_speech_started(trigger="explicit-control")
-                    queue.put_nowait({
-                        "text": transcript,
-                        "explicit": True,
-                        "future": future,
-                        "turnSequence": owner.turn_sequence,
-                    })
+                    enqueue_persisted_turn(captured, explicit=True, future=future)
                     await future
                 elif kind == "tool_confirmation":
                     call_id = str(payload.get("callId", ""))
@@ -3166,6 +3895,15 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                 ]
                 if maintenance:
                     await asyncio.gather(*maintenance, return_exceptions=True)
+                schedulers = [
+                    owner.job_scheduler_task
+                    for owner in case_owners.values()
+                    if owner.job_scheduler_task is not None and not owner.job_scheduler_task.done()
+                ]
+                for scheduler in schedulers:
+                    scheduler.cancel()
+                if schedulers:
+                    await asyncio.gather(*schedulers, return_exceptions=True)
             finally:
                 lease.release()
 
@@ -3186,6 +3924,9 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
         web.post("/api/task/observe", post_observation),
         web.post("/api/replay/observe", post_replay_observation),
         web.post("/api/task/reset", post_reset),
+        web.post("/api/intents/focus", post_intent_focus),
+        web.post("/api/jobs/cancel", post_job_cancel),
+        web.post("/api/results/dismiss", post_result_dismiss),
         web.post("/api/candidate", post_candidate),
         web.post("/api/memory/delete", post_delete),
         web.post("/api/tools/execute", post_tool),

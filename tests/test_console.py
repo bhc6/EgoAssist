@@ -93,3 +93,17 @@ def test_frontend_tool_invocation_is_manifest_driven():
     assert "generation !== mediaGeneration" in script
     assert "acquired.getTracks().forEach(track => track.stop())" in script
     assert "socket || connectingPromise ? disconnectRealtime()" in script
+
+
+def test_frontend_exposes_operable_work_center_and_capability_truth():
+    html = (CONSOLE_ROOT / "index.html").read_text(encoding="utf-8")
+    script = (CONSOLE_ROOT / "app.js").read_text(encoding="utf-8")
+
+    for identifier in ("capabilityTruth", "intentList", "jobList", "resultInbox"):
+        assert f'id="{identifier}"' in html
+    assert "state.workLedger" in script
+    assert "state.capabilityCatalog?.platform" in script
+    assert 'post("/api/intents/focus"' in script
+    assert 'post("/api/jobs/cancel"' in script
+    assert 'post("/api/results/dismiss"' in script
+    assert "availability.executable" in script

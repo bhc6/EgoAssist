@@ -3,7 +3,14 @@ from pathlib import Path
 import pytest
 
 from egoassist import BUILTIN_SKILLS_ROOT
-from egoassist.realtime import SkillPackage, SkillRegistry, SkillRuntime, SkillToolExecutor
+from egoassist.realtime import (
+    SkillPackage,
+    SkillRegistry,
+    SkillRuntime,
+    SkillToolExecutor,
+    executable_tool_declarations,
+    platform_capability_truth,
+)
 
 
 ROOT = Path(__file__).parents[1]
@@ -56,11 +63,23 @@ def test_skill_changes_tool_surface_and_confirmation_policy():
 
     timer = executor.execute("set_timer", {"seconds": 2}, kitchen_tools)
     assert timer["status"] == "unsupported"
-    assert "no persistent alarm" in timer["reason"]
+    assert "No durable workflow" in timer["reason"]
     pending = executor.execute("request_human_help", {}, kitchen_tools)
-    assert pending["status"] == "confirmation_required"
+    assert pending["status"] == "demo-only"
+    assert "confirmation_required" not in {timer["status"], pending["status"]}
+    assert executor.audit[-1]["result"]["status"] == "demo-only"
+    assert executable_tool_declarations(kitchen_tools) == []
     with pytest.raises(ValueError, match="not available"):
         executor.execute("set_timer", {}, assembly_tools)
+
+
+def test_capability_truth_does_not_promote_manifest_labels_to_features():
+    catalog = {item["id"]: item for item in platform_capability_truth()}
+    assert catalog["scoped-memory"]["status"] == "available"
+    assert catalog["background-execution"]["status"] == "unsupported"
+    assert catalog["timer-delivery"]["status"] == "unsupported"
+    assert catalog["human-help"]["status"] == "demo-only"
+    assert all(item["executable"] == (item["status"] == "available") for item in catalog.values())
 
 
 def test_tool_contract_drives_defaults_and_fails_closed():

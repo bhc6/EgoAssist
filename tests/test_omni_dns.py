@@ -658,6 +658,26 @@ def test_video_never_uses_a_stale_audio_append_as_ordering_credit():
     assert bridge.conversation.events[-2:] == [("audio", "fresh-audio"), ("video", "late-frame")]
 
 
+def test_reconnect_audio_overflow_is_bounded_and_explicitly_reported():
+    bridge = OmniBrowserBridge.__new__(OmniBrowserBridge)
+    bridge._buffered_audio = __import__("collections").deque()
+    bridge._buffered_audio_limit = 2
+    bridge._dropped_audio_chunks = 0
+    traced = []
+    emitted = []
+    bridge._trace = lambda event, payload, response_id=None: traced.append((event, payload))
+    bridge._schedule = emitted.append
+
+    bridge._buffer_audio_for_reconnect("oldest")
+    bridge._buffer_audio_for_reconnect("middle")
+    bridge._buffer_audio_for_reconnect("newest")
+
+    assert list(bridge._buffered_audio) == ["middle", "newest"]
+    assert traced[-1][0] == "provider.media.gap"
+    assert traced[-1][1]["droppedChunks"] == 1
+    assert emitted[-1]["type"] == "media_gap"
+
+
 def test_production_video_flush_waits_for_provider_speech_segment():
     class Conversation:
         def __init__(self):

@@ -16,6 +16,10 @@
     {
       "name": "set_timer",
       "description": "Check a relative cooking deadline; the local adapter will explicitly report that alarm delivery is unsupported",
+      "availability": {
+        "status": "unsupported",
+        "reason": "No durable workflow or acknowledged notification endpoint is connected."
+      },
       "requires_confirmation": false,
       "handler": "builtin.relative-deadline.v1",
       "arguments": {
@@ -30,11 +34,15 @@
     },
     {
       "name": "request_human_help",
-      "description": "Share minimal recent context with a trusted helper",
+      "description": "Demo-only local acknowledgement; no external helper is contacted",
+      "availability": {
+        "status": "demo-only",
+        "reason": "No external helper queue, connector receipt, or acknowledgement endpoint is configured."
+      },
       "requires_confirmation": true,
       "handler": "builtin.local-acknowledgement.v1",
       "arguments": {"type": "object", "additionalProperties": false, "properties": {}},
-      "result": {"status": "accepted", "message": "求助请求已进入本地演示队列；未连接外部服务。"}
+      "result": {"status": "demo-only", "message": "No external helper or acknowledgement endpoint is connected."}
     }
   ],
   "evaluation": ["intervention_precision", "unnecessary_interruption_rate", "hazard_recall", "followup_reuse", "barge_in_success"]
