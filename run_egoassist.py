@@ -294,6 +294,51 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
         restored.task.restore(task_state)
         return restored
 
+    def append_memory_audit(
+        target: ContextHarness | SessionJournal,
+        event_type: str,
+        source: str,
+        payload: dict,
+        *,
+        parent_event_id: str | None = None,
+    ) -> dict:
+        journal = target.journal if isinstance(target, ContextHarness) else target
+        return journal.append(
+            "runtime_event",
+            {
+                "eventType": event_type,
+                "source": source,
+                "payload": dict(payload),
+                "model": model,
+                "skill": None,
+                "task": None,
+                "responseId": None,
+                "latencyMs": None,
+            },
+            parent_id=parent_event_id,
+        )
+
+    def case_journal(
+        user_id: str,
+        session_id: str,
+        *,
+        initial_memory_policy: dict | None = None,
+    ) -> SessionJournal:
+        if session_id in live_harnesses:
+            return live_harnesses[session_id].journal
+        experiment_case = identity.get_context_session(user_id, session_id)
+        return SessionJournal.open_in(
+            user_memory_root / user_id / "sessions",
+            session_id,
+            metadata={
+                "model": model,
+                "voice": voice,
+                "userId": user_id,
+                "caseLabel": experiment_case.get("label", ""),
+                "initialMemoryPolicy": initial_memory_policy or experiment_case["memoryPolicy"],
+            },
+        )
+
     def memory_retrieval(
         target_runtime: SkillRuntime | None = None,
         *,
@@ -368,6 +413,7 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
         media_override: dict | None = None,
         user_scope: str = "local-default",
         memory_policy_override: dict | None = None,
+        session_id_override: str | None = None,
     ):
         active_runtime = target_runtime or runtime
         active_routing = routing_override or routing_state
@@ -392,9 +438,14 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
         )
         visible_session_id = (
             harness_override.session_id
-            if harness_override else ledger.session_id if user_scope == "local-default" else None
+            if harness_override
+            else (
+                session_id_override
+                if session_id_override
+                else ledger.session_id if user_scope == "local-default" else None
+            )
         )
-        memory_state = active_memory.snapshot()
+        memory_state = active_memory.snapshot(candidate_scope=visible_session_id)
         compiled_context = context(active_runtime)
         bridges = (
             (bridge_override,) if bridge_override is not None
@@ -420,7 +471,7 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
             "claimBoundary": "Logical channels are distinct; residual acoustic echo is observable but speaker identity is not guaranteed.",
         }
         episodic_state = active_episodic.snapshot(
-            session_id=harness_override.session_id if harness_override else None,
+            session_id=visible_session_id,
             user_scope=user_scope,
             allow_cross_session=episodic_settings["scope"] == "participant",
         )
@@ -432,7 +483,7 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                     "query": "",
                     "scope": {
                         "user": user_scope,
-                        "session": harness_override.session_id if harness_override else None,
+                        "session": visible_session_id,
                         "allowCrossSession": episodic_settings["scope"] == "participant",
                     },
                     "minimumScore": None,
@@ -826,16 +877,10 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
         updated = identity.update_memory_policy(user_id, session_id, requested)
         try:
             if updated != previous:
-                journal = live_harnesses.get(session_id).journal if session_id in live_harnesses else SessionJournal.open_in(
-                    user_memory_root / user_id / "sessions",
+                journal = case_journal(
+                    user_id,
                     session_id,
-                    metadata={
-                        "model": model,
-                        "voice": voice,
-                        "userId": user_id,
-                        "caseLabel": experiment_case.get("label", ""),
-                        "initialMemoryPolicy": previous,
-                    },
+                    initial_memory_policy=previous,
                 )
                 journal.append("memory_policy_changed", {
                     "previous": previous,
@@ -851,18 +896,27 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
             "profiles": memory_profiles(),
         })
 
-    async def get_state(request):
-        user = request[user_key]
-        user_id = user["id"]
+    def scoped_state_for_user(user_id: str, session_id: str | None = None) -> dict:
         active_runtime = runtime_for_user(user_id)
-        return web.json_response(state(
+        policy = (
+            identity.get_context_session(user_id, session_id)["memoryPolicy"]
+            if session_id else default_memory_policy()
+        )
+        return state(
             active_runtime,
             routing_override=user_routing[user_id],
             tools_override=user_tools[user_id],
-            memory_override=memory_for_user(user_id),
-            episodic_override=episodic_for_user(user_id),
+            memory_override=scoped_preference_memory(user_id, session_id, policy),
+            episodic_override=scoped_episodic_memory(user_id, session_id, policy),
             user_scope=user_id,
-        ))
+            memory_policy_override=policy,
+            session_id_override=session_id,
+        )
+
+    async def get_state(request):
+        user_id = request[user_key]["id"]
+        session_id = str(request.query.get("session", "")).strip() or None
+        return web.json_response(scoped_state_for_user(user_id, session_id))
 
     async def get_index(request):
         return web.FileResponse(WEB_ROOT / "index.html")
@@ -985,6 +1039,35 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
             turn_episode_injection = {
                 "status": "disabled", "query": transcript, "episodeIds": [], "evidence": [],
             }
+        if harness:
+            append_memory_audit(
+                harness,
+                "episodic.memory.retrieved",
+                "realtime-episodic-memory",
+                {
+                    "enabled": episodic_settings["enabled"],
+                    "method": episodic_retrieval["method"],
+                    "query": episodic_retrieval["query"],
+                    "referential": episodic_retrieval.get("referential", False),
+                    "scope": episodic_retrieval["scope"],
+                    "minimumScore": episodic_retrieval.get("minimumScore"),
+                    "candidates": [{
+                        "episodeId": item["episodeId"],
+                        "score": item["score"],
+                        "selected": item["selected"],
+                        "rejectionReasons": item.get("rejectionReasons", []),
+                        "retrievalReasons": item.get("retrievalReasons", []),
+                    } for item in episodic_retrieval.get("candidates", [])],
+                },
+                parent_event_id=transcript_event["eventId"],
+            )
+            append_memory_audit(
+                harness,
+                "episodic.memory.injected",
+                "realtime-episodic-memory",
+                turn_episode_injection,
+                parent_event_id=transcript_event["eventId"],
+            )
         if target_runtime is None:
             active_episode_injection = turn_episode_injection
         if harness and turn_episode_injection.get("evidence"):
@@ -1093,7 +1176,7 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                         [route_event["eventId"]],
                     )
         if episodic_settings["enabled"]:
-            active_episodic.remember(
+            episode = active_episodic.remember(
                 transcript,
                 kind="utterance",
                 source="input-audio-transcript",
@@ -1103,6 +1186,21 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                 session_id=harness.session_id if harness else None,
                 user_scope=user_scope,
             )
+            if harness and episode:
+                written = episode.get("evidenceEventId") == transcript_event["eventId"]
+                append_memory_audit(
+                    harness,
+                    "episodic.memory.written" if written else "episodic.memory.deduplicated",
+                    "realtime-episodic-memory",
+                    {
+                        "episodeId": episode["id"],
+                        "kind": episode["kind"],
+                        "source": episode["source"],
+                        "storageScope": episodic_settings["scope"],
+                        "evidenceEventId": episode.get("evidenceEventId"),
+                    },
+                    parent_event_id=transcript_event["eventId"],
+                )
         if active_runtime.task and not speech_control:
             active_runtime.task.apply_voice_intent(task_control, transcript)
         if harness:
@@ -1114,7 +1212,7 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
             and semantic_decision.get("preferenceIntent") == "propose-durable"
         ):
             step = active_runtime.task.current_step
-            active_memory.propose_preference(
+            proposal = active_memory.propose_preference(
                 task=active_runtime.task.spec.id,
                 step=step.id,
                 prompt=transcript[:160],
@@ -1122,7 +1220,19 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                 source_quote=transcript[:160],
                 evidence=f"用户明确提出长期偏好：{transcript[:160]}",
                 scope_reason=f"话语发生时活动范围为 task={active_runtime.task.spec.id}, checkpoint={step.id}",
+                candidate_scope=harness.session_id if harness else None,
             )
+            if harness:
+                append_memory_audit(
+                    harness,
+                    "memory.candidate.proposed",
+                    "preference-memory",
+                    {
+                        **dict(proposal["candidate"] or {}),
+                        "storageScope": active_policy["components"]["preference"]["scope"],
+                    },
+                    parent_event_id=transcript_event["eventId"],
+                )
         hint, recalled = apply_memory_hint(
             active_runtime, preference_memory=active_memory, enabled=preference_enabled,
         ) if harness or live_bridges else (
@@ -1131,6 +1241,36 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                 enabled=preference_enabled,
             ), False,
         )
+        preference_retrieval = memory_retrieval(
+            active_runtime,
+            emit=False,
+            preference_memory=active_memory,
+            enabled=preference_enabled,
+        )
+        if harness:
+            append_memory_audit(
+                harness,
+                "memory.retrieval.completed",
+                "preference-memory",
+                {
+                    "enabled": preference_enabled,
+                    "storageScope": active_policy["components"]["preference"]["scope"],
+                    "method": preference_retrieval["method"],
+                    "query": preference_retrieval["query"],
+                    "candidateCount": len(preference_retrieval["candidates"]),
+                    "selectedMemoryId": (
+                        preference_retrieval["selected"]["memoryId"]
+                        if preference_retrieval["selected"] else None
+                    ),
+                    "candidates": [{
+                        "memoryId": item["memoryId"],
+                        "selected": item["selected"],
+                        "score": item["score"],
+                        "rejectionReasons": item["rejectionReasons"],
+                    } for item in preference_retrieval["candidates"]],
+                },
+                parent_event_id=transcript_event["eventId"],
+            )
         if harness and hint:
             harness.journal.append_retrieval_evidence(
                 "confirmed preference for current task checkpoint",
@@ -1248,8 +1388,24 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
         )
         active_memory = scoped_preference_memory(user_id, session_id, policy)
         accepted = bool(payload.get("accepted"))
-        active_memory.resolve_candidate(accepted)
-        return await get_state(request)
+        if accepted and not policy["components"]["preference"]["enabled"]:
+            raise ValueError("confirmed preference memory is disabled for this experiment case")
+        candidate = active_memory.snapshot(candidate_scope=session_id).get("candidate")
+        active_memory.resolve_candidate(accepted, candidate_scope=session_id)
+        if session_id:
+            append_memory_audit(
+                case_journal(user_id, session_id),
+                "memory.confirmed" if accepted else "memory.rejected",
+                "preference-memory",
+                {
+                    "memoryId": candidate["id"] if candidate else None,
+                    "trigger": candidate.get("trigger") if candidate else None,
+                    "preference": candidate.get("preference") if candidate and accepted else None,
+                    "storageScope": policy["components"]["preference"]["scope"],
+                    "accepted": accepted,
+                },
+            )
+        return web.json_response(scoped_state_for_user(user_id, session_id))
 
     async def post_delete(request):
         user_id = request[user_key]["id"]
@@ -1259,8 +1415,25 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
             identity.get_context_session(user_id, session_id)["memoryPolicy"]
             if session_id else default_memory_policy()
         )
-        scoped_preference_memory(user_id, session_id, policy).delete_memory(str(payload.get("id", "")))
-        return await get_state(request)
+        active_memory = scoped_preference_memory(user_id, session_id, policy)
+        record_id = str(payload.get("id", ""))
+        record = next(
+            (item for item in active_memory.snapshot(candidate_scope=session_id)["records"] if item["id"] == record_id),
+            None,
+        )
+        active_memory.delete_memory(record_id, candidate_scope=session_id)
+        if session_id:
+            append_memory_audit(
+                case_journal(user_id, session_id),
+                "memory.deleted",
+                "preference-memory",
+                {
+                    "memoryId": record_id,
+                    "trigger": record.get("trigger") if record else None,
+                    "storageScope": policy["components"]["preference"]["scope"],
+                },
+            )
+        return web.json_response(scoped_state_for_user(user_id, session_id))
 
     async def post_reset(request):
         user_id = request[user_key]["id"]
@@ -1368,7 +1541,7 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
 
         def session_trace(event_type, source, payload, parent_event_ids=None, **metadata):
             parents = list(parent_event_ids or [])
-            return journal.append(
+            entry = journal.append(
                 "runtime_event",
                 {
                     "eventType": event_type,
@@ -1382,6 +1555,43 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                 },
                 parent_id=parents[-1] if parents else None,
             )
+            if event_type == "proactive.gate.decision":
+                policy = current_memory_policy()
+                episodic_settings = policy["components"]["episodic"]
+                if episodic_settings["enabled"]:
+                    active_episodic = current_episodic_memory(policy)
+                    visible = active_episodic.snapshot(
+                        session_id=session_id,
+                        user_scope=user_id,
+                        allow_cross_session=episodic_settings["scope"] == "participant",
+                    )["recent"]
+                    has_scene_anchor = any(item["kind"] == "scene" for item in visible)
+                    if payload.get("salientChange") or not has_scene_anchor:
+                        episode = active_episodic.remember(
+                            payload.get("sceneSummary", ""),
+                            kind="scene",
+                            source="proactive-visual-gate",
+                            skill=session_runtime.skill.name if session_runtime.skill else None,
+                            task=session_runtime.task.spec.id if session_runtime.task else None,
+                            evidence_event_id=entry["id"],
+                            session_id=session_id,
+                            user_scope=user_id,
+                        )
+                        if episode:
+                            append_memory_audit(
+                                journal,
+                                "episodic.memory.written",
+                                "realtime-episodic-memory",
+                                {
+                                    "episodeId": episode["id"],
+                                    "kind": "scene",
+                                    "source": "proactive-visual-gate",
+                                    "storageScope": episodic_settings["scope"],
+                                    "evidenceEventId": entry["id"],
+                                },
+                                parent_event_id=entry["id"],
+                            )
+            return entry
 
         def session_tool_declarations() -> list[dict]:
             return (

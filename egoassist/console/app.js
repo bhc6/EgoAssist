@@ -27,6 +27,8 @@ async function post(path, data = {}) {
   return request(path, {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(data)});
 }
 
+const selectedStatePath = () => "/api/state" + (selectedSessionId ? "?session=" + encodeURIComponent(selectedSessionId) : "");
+
 function setAuthMode(mode) {
   authMode = mode;
   const registering = mode === "register";
@@ -131,7 +133,7 @@ async function enterConsole(user) {
   $("#currentUser").textContent = user.username;
   await refreshSessionList(localStorage.getItem("egoassist.session." + user.id));
   localStorage.setItem("egoassist.session." + user.id, selectedSessionId);
-  render(await request("/api/state"));
+  render(await request(selectedStatePath()));
   const selected = sessionCatalog.find(item => item.id === selectedSessionId);
   if (selected?.memoryPolicy) renderMemoryPolicy(selected.memoryPolicy, state.memoryProfiles || []);
 }
@@ -303,7 +305,7 @@ async function runMemoryMutation(button, promise) {
     if (socket && socket.readyState === WebSocket.OPEN) {
       socket.send(JSON.stringify({type: "refresh"}));
     } else {
-      render(await request("/api/state"));
+      render(await request(selectedStatePath()));
       const selected = sessionCatalog.find(item => item.id === selectedSessionId);
       if (selected?.memoryPolicy) renderMemoryPolicy(selected.memoryPolicy, state.memoryProfiles || []);
     }
@@ -321,6 +323,7 @@ async function ensureMedia() {
     audio: {channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true}
   });
   $("#video").srcObject = stream;
+  $("#video").style.transform = "scaleX(-1)";
   $("#cameraEmpty").hidden = true;
   $("#cameraState").textContent = "摄像头与麦克风在线";
   $("#cameraButton").textContent = "关闭设备";
@@ -605,6 +608,7 @@ $("#newSession").onclick = async () => {
   if (currentUser) localStorage.setItem("egoassist.session." + currentUser.id, selectedSessionId);
   await refreshSessionList(selectedSessionId);
   if (wasRealtime) await connectRealtime();
+  else render(await request(selectedStatePath()));
 };
 $("#sessionSelect").onchange = async event => {
   const wasRealtime = Boolean(socket || connectingPromise);
@@ -616,6 +620,7 @@ $("#sessionSelect").onchange = async event => {
   const selected = sessionCatalog.find(item => item.id === selectedSessionId);
   if (selected?.memoryPolicy) renderMemoryPolicy(selected.memoryPolicy, state?.memoryProfiles || []);
   if (wasRealtime) await connectRealtime();
+  else render(await request(selectedStatePath()));
 };
 boot().catch(error => { showLogin(); $("#authError").textContent = error.message; });
 setInterval(() => {

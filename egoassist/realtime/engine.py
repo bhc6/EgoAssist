@@ -27,38 +27,79 @@ class PreferenceMemory:
         self._lock = threading.RLock()
         self.session_number = 1
         self.session_events: list[dict[str, Any]] = []
-        self.candidate: dict[str, Any] | None = None
+        self._candidates: dict[str, dict[str, Any]] = {}
         self.last_decision = self._decision("silent", "等待事件", "尚无需要介入的证据。")
+        self._scoped_events: dict[str, list[dict[str, Any]]] = {}
+        self._scoped_decisions: dict[str, dict[str, Any]] = {}
         self._records = self._load()
         self._event_sink = event_sink
 
-    def snapshot(self) -> dict[str, Any]:
+    @staticmethod
+    def _candidate_key(candidate_scope: str | None) -> str:
+        return str(candidate_scope or "__default__")
+
+    @property
+    def candidate(self) -> dict[str, Any] | None:
+        """Backward-compatible access to the unscoped candidate."""
+        return self._candidates.get(self._candidate_key(None))
+
+    def snapshot(self, *, candidate_scope: str | None = None) -> dict[str, Any]:
         with self._lock:
+            candidate_key = self._candidate_key(candidate_scope)
+            scoped = candidate_scope is not None
             return {
                 "session": self.session_number,
                 "memoryPath": str(self.memory_path),
                 "records": list(self._records),
-                "candidate": self.candidate,
-                "decision": self.last_decision,
-                "events": list(reversed(self.session_events[-6:])),
+                "candidate": self._candidates.get(candidate_key),
+                "decision": (
+                    self._scoped_decisions.get(
+                        candidate_key,
+                        self._decision("silent", "等待事件", "尚无需要介入的证据。"),
+                    ) if scoped else self.last_decision
+                ),
+                "events": list(reversed(
+                    (self._scoped_events.get(candidate_key, []) if scoped else self.session_events)[-6:]
+                )),
             }
 
-    def resolve_candidate(self, accepted: bool) -> dict[str, Any]:
+    def resolve_candidate(
+        self,
+        accepted: bool,
+        *,
+        candidate_scope: str | None = None,
+    ) -> dict[str, Any]:
         with self._lock:
-            if self.candidate is None:
+            candidate_key = self._candidate_key(candidate_scope)
+            candidate = self._candidates.get(candidate_key)
+            if candidate is None:
                 raise ValueError("no pending memory candidate")
             if accepted:
-                record = {**self.candidate, "status": "confirmed", "confirmedAt": self._now()}
+                record = {**candidate, "status": "confirmed", "confirmedAt": self._now()}
                 self._records = [item for item in self._records if item["trigger"] != record["trigger"]]
                 self._records.append(record)
                 self._save()
-                self.last_decision = self._decision("saved", "已保存", "这条记忆将在后续相同步骤中复用，可随时删除。", evidence_id=record["id"])
-                self._emit("memory.confirmed", {"memoryId": record["id"], "trigger": record["trigger"], "preference": record["preference"]})
+                self._set_decision(
+                    self._decision("saved", "已保存", "这条记忆将在后续相同步骤中复用，可随时删除。", evidence_id=record["id"]),
+                    candidate_scope,
+                )
+                self._emit(
+                    "memory.confirmed",
+                    {
+                        "memoryId": record["id"],
+                        "trigger": record["trigger"],
+                        "preference": record["preference"],
+                    },
+                    candidate_scope,
+                )
             else:
-                self.last_decision = self._decision("silent", "未保存", "候选偏好已丢弃，不影响未来会话。")
-                self._emit("memory.rejected", {"memoryId": self.candidate["id"]})
-            self.candidate = None
-            return self.snapshot()
+                self._set_decision(
+                    self._decision("silent", "未保存", "候选偏好已丢弃，不影响未来会话。"),
+                    candidate_scope,
+                )
+                self._emit("memory.rejected", {"memoryId": candidate["id"]}, candidate_scope)
+            self._candidates.pop(candidate_key, None)
+            return self.snapshot(candidate_scope=candidate_scope)
 
     def propose_preference(
         self,
@@ -70,10 +111,12 @@ class PreferenceMemory:
         preference: str | None = None,
         source_quote: str | None = None,
         scope_reason: str = "当前任务与当前 checkpoint 在用户提出偏好时处于活动状态",
+        candidate_scope: str | None = None,
     ) -> dict[str, Any]:
         """Create an explicit, user-confirmable preference for any task."""
         with self._lock:
-            self.candidate = {
+            candidate_key = self._candidate_key(candidate_scope)
+            candidate = {
                 "id": uuid4().hex[:8],
                 "trigger": {"task": task, "step": step},
                 "preference": preference or prompt,
@@ -83,32 +126,46 @@ class PreferenceMemory:
                 "scopeReason": scope_reason,
                 "status": "pending",
             }
-            self._emit("memory.candidate.proposed", dict(self.candidate))
-            self.last_decision = self._decision(
-                "ask",
-                "发现可能的长期偏好",
-                "先询问是否保存，不从单次行为直接概括。",
+            self._candidates[candidate_key] = candidate
+            self._emit("memory.candidate.proposed", dict(candidate), candidate_scope)
+            self._set_decision(
+                self._decision(
+                    "ask",
+                    "发现可能的长期偏好",
+                    "先询问是否保存，不从单次行为直接概括。",
+                ),
+                candidate_scope,
             )
-            return self.snapshot()
+            return self.snapshot(candidate_scope=candidate_scope)
 
     def next_session(self) -> dict[str, Any]:
         with self._lock:
             self.session_number += 1
             self.session_events = []
-            self.candidate = None
+            self._candidates = {}
+            self._scoped_events = {}
+            self._scoped_decisions = {}
             self.last_decision = self._decision("silent", "新会话已开始", "等待步骤事件；长期记忆已从磁盘加载。")
             return self.snapshot()
 
-    def delete_memory(self, record_id: str) -> dict[str, Any]:
+    def delete_memory(
+        self,
+        record_id: str,
+        *,
+        candidate_scope: str | None = None,
+    ) -> dict[str, Any]:
         with self._lock:
             before = len(self._records)
             self._records = [item for item in self._records if item["id"] != record_id]
             if len(self._records) == before:
                 raise ValueError("memory not found")
             self._save()
-            self.last_decision = self._decision("silent", "记忆已删除", "磁盘记录已同步更新，后续不会再触发。")
-            self._emit("memory.deleted", {"memoryId": record_id})
-            return self.snapshot()
+            self._set_decision(
+                self._decision("silent", "记忆已删除", "磁盘记录已同步更新，后续不会再触发。"),
+                candidate_scope,
+            )
+            self._emit("memory.deleted", {"memoryId": record_id}, candidate_scope)
+            return self.snapshot(candidate_scope=candidate_scope)
 
     def retrieve(self, task: str, step: str, *, emit: bool = True) -> dict[str, Any]:
         """Return an auditable exact-trigger lookup, including rejected records."""
@@ -154,7 +211,9 @@ class PreferenceMemory:
                 self._save()
             self.session_number = 1
             self.session_events = []
-            self.candidate = None
+            self._candidates = {}
+            self._scoped_events = {}
+            self._scoped_decisions = {}
             self.last_decision = self._decision("silent", "等待事件", "尚无需要介入的证据。")
             return self.snapshot()
 
@@ -167,11 +226,25 @@ class PreferenceMemory:
             record = self._matching_record(task, step)
             return dict(record) if record else None
 
-    def _append_event(self, event: str, detail: str) -> None:
-        self.session_events.append({"type": event, "detail": detail, "time": self._now()})
+    def _set_decision(self, decision: dict[str, Any], candidate_scope: str | None) -> None:
+        if candidate_scope is None:
+            self.last_decision = decision
+        else:
+            self._scoped_decisions[self._candidate_key(candidate_scope)] = decision
 
-    def _emit(self, event_type: str, payload: dict[str, Any]) -> None:
-        self._append_event(event_type, str(payload)[:300])
+    def _append_event(self, event: str, detail: str, candidate_scope: str | None = None) -> None:
+        target = self.session_events if candidate_scope is None else self._scoped_events.setdefault(
+            self._candidate_key(candidate_scope), []
+        )
+        target.append({"type": event, "detail": detail, "time": self._now()})
+
+    def _emit(
+        self,
+        event_type: str,
+        payload: dict[str, Any],
+        candidate_scope: str | None = None,
+    ) -> None:
+        self._append_event(event_type, str(payload)[:300], candidate_scope)
         if self._event_sink:
             self._event_sink(event_type, "preference-memory", payload)
 

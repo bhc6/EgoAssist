@@ -157,17 +157,115 @@ separate `proactive-utterance` on the dialogue lane. A `speak=false` response ca
 audio events. The first scene summary creates an episodic anchor; later summaries are persisted only when
 `salient_change=true`.
 
-## Memory Boundaries
+## Memory Research Baseline
 
-EgoAssist exposes distinct memory claims:
+Memory is the main experimental surface of this repository. The baseline is deliberately small and inspectable: it does
+not claim to be free of inductive bias, but every online memory rule is deterministic, versioned, visible in runtime
+state, and removable as a treatment. Engineering isolation, crash recovery, and audit logging are kept separate from
+the behavioral memory hypotheses being studied.
 
-- working context: current realtime session and structured events;
-- preference memory: explicit candidate, user confirmation, atomic persistence, exact task/checkpoint lookup, and one-shot reuse;
-- realtime episodic memory: persistent scene/dialogue summaries with source events, auditable term overlap, and timestamp-neighbor expansion for conversational references; raw audio and frames are not retained;
-- hierarchical visual memory: the original frame-segment, embedding, consolidation, temporal localization, and abstention pipeline used by the offline EgoLife benchmark;
-- knowledge memory: no domain injection in general mode; static Skill/task injection after activation.
+### Systems and storage
 
-The behavioral realtime memory plugins are controlled per experiment case. The default `all-online` profile enables confirmed preferences at participant scope and lexical episodic memory at case scope. The control panel can select a named profile or independently change each plugin and its scope:
+EgoAssist currently distinguishes five mechanisms:
+
+| Mechanism | Online behavioral treatment | Current implementation |
+| --- | --- | --- |
+| Context journal | No; required infrastructure | Typed append-only case history, bounded projection, deterministic extractive compaction |
+| Confirmed preference | Yes | Explicit candidate, user confirmation, JSON persistence, exact task/checkpoint retrieval |
+| Lexical episodic | Yes | Compact text episodes, lexical Jaccard retrieval, optional timestamp-neighbor expansion |
+| Hierarchical visual | No; offline method | Frame segments, embeddings, consolidation, temporal localization, and abstention for EgoLife |
+| Knowledge | No; separate baseline component | Static Skill/task context after activation; no runtime semantic knowledge retrieval |
+
+`username` identifies one participant or research identity. A server-generated opaque user ID owns all files; the
+username itself is never used as a path. A named case identifies one experimental run. The physical layout is:
+
+```text
+identity.sqlite3
+users/{user-id}/preferences.json
+users/{user-id}/episodes.json
+users/{user-id}/cases/{case-id}/preferences.json
+users/{user-id}/cases/{case-id}/episodes.json
+users/{user-id}/sessions/{case-id}.jsonl
+```
+
+The participant stores are the only cross-case stores. Case stores are separate files, including separate episodic
+capacity limits, so records and eviction in case A cannot affect case B. Pending preference candidates, recent
+decision status, and transient preference events are keyed by case even when confirmed records use participant scope.
+Every state, policy, confirmation, deletion, and WebSocket request checks that the case belongs to the authenticated
+user. A case ID owned by another user returns `403`; a valid-looking ID cannot select another user's files.
+
+Switching a component from `case` to `participant`, or back, selects another physical store. It does not copy, merge,
+or delete records. This is intentional and must be considered when interpreting a mid-case policy change.
+
+### Per-turn order
+
+For each completed realtime user transcript, the online path is:
+
+```text
+append transcript to case journal
+  -> read the case's versioned memory policy
+  -> lexical episodic retrieval (or explicit disabled result)
+  -> record retrieval and injection outcome
+  -> route Skill/task and update the task checkpoint
+  -> persist the current transcript as an episode when enabled
+  -> create a preference candidate only for a classified durable preference
+  -> exact preference retrieval for the active task/checkpoint
+  -> inject selected evidence as typed low-trust data
+  -> explicitly request the provider response
+```
+
+Retrieval happens before the current transcript is remembered, so a turn cannot retrieve itself. Retrieved summaries,
+confirmed preferences, transcripts, tool output, and compaction summaries are data, not system instructions. The
+provider projection can contain them, but they cannot change the system, safety, Skill, or user-control policy.
+
+The case journal records positive and negative memory outcomes. Relevant event types include
+`episodic.memory.retrieved`, `episodic.memory.injected`, `episodic.memory.written`,
+`episodic.memory.deduplicated`, `memory.candidate.proposed`, `memory.retrieval.completed`, `memory.confirmed`,
+`memory.rejected`, and `memory.deleted`. Candidate scores, rejection reasons, selected IDs, storage scope, and the
+policy changes that produced them remain attributable to one case. The journal contains user transcripts and selected
+memory evidence; it is research data, not an anonymized telemetry stream. Deleting a preference removes the active
+record but does not rewrite its historical append-only audit event.
+
+### Confirmed preference
+
+A language-dependent decision can only produce the typed label `preferenceIntent=propose-durable`. It creates a
+case-local pending candidate; it never writes a confirmed preference. Persistence requires an explicit user action in
+the control panel. Accepting while preference memory is disabled is rejected. Rejecting discards the candidate.
+
+Each confirmed record contains its source quote, evidence, and an exact trigger `{task, step}`. Retrieval uses no
+embedding, fuzzy match, LLM, or inferred user profile: both task and checkpoint must match exactly and status must be
+`confirmed`. Saving another record for the same trigger replaces the earlier active record. Within a running task,
+`announced_memory_ids` prevents the same record from producing repeated reminders after its first reuse. That
+one-shot suppression is session state, not a learned preference.
+
+### Lexical episodic
+
+The realtime episodic adapter stores compact text summaries only. Raw camera frames and raw audio are not retained.
+Exact consecutive duplicates with the same kind, summary, user scope, and session are coalesced. Each physical store
+holds at most `300` records.
+
+Retrieval is fully specified:
+
+- lowercase/case-fold the query and record;
+- Latin terms match `[a-z0-9]{2,}`; single Latin characters are ignored;
+- Chinese characters are concatenated and represented as overlapping character bigrams;
+- score is Jaccard overlap, `|query ∩ record| / |query ∪ record|`;
+- ineligible user/session scope always scores zero;
+- candidates are ordered by score, with newest-first recency as the tie-breaker;
+- select at most `5` candidates with score at least `0.05`; expose at most `20` ranked candidates for audit;
+- for a classified referential query only, one adjacent utterance before and after each positive lexical anchor may be
+  added with `max(0.05, min(0.95, anchor_score * 0.85))`;
+- no embedding, vector database, LLM retrieval, learned reranker, domain schema, or raw-media similarity is used.
+
+Selected evidence includes episode ID, timestamp, source, score, retrieval reason, and summary. The UI calls this
+`context injection`. It does not call it generation impact: observing an injection does not establish that the output
+changed. That claim requires a controlled counterfactual comparison.
+
+### Profiles and controls
+
+The control panel exposes named profiles plus independent enable/scope controls. `all-online` means all behavioral
+memory currently connected to the realtime path; it does not imply that the offline hierarchical visual method is
+active.
 
 | Profile | Context journal | Confirmed preference | Lexical episodic |
 | --- | --- | --- | --- |
@@ -175,13 +273,49 @@ The behavioral realtime memory plugins are controlled per experiment case. The d
 | `context-only` | required | off | off |
 | `confirmed-preference` | required | on, participant | off |
 | `lexical-episodic` | required | off | on, case |
-| `custom` | required | explicit | explicit |
+| `custom` | required | explicit on/off and scope | explicit on/off and scope |
 
-Disabling a plugin gates its persistence, retrieval, and injection without deleting existing records. Case-scoped preference and episodic stores are physically partitioned so capacity eviction cannot leak across cases; participant scope uses a separate long-term store. The append-only context journal and deterministic compaction are recovery/audit infrastructure, not a behavioral memory treatment, and therefore remain enabled in every profile. The selected policy is versioned in SQLite, returned in runtime state, and appended to the case journal on every change. Changes apply to subsequent turns; a clean benchmark should set the policy before collecting a case rather than switch it mid-case.
+Disabling a behavioral component gates its persistence, retrieval, and injection without deleting stored records.
+The policy is normalized and versioned in SQLite, returned in runtime state, and appended as
+`memory_policy_changed` whenever it changes. The context journal remains on in every profile because it is the source
+of truth for recovery and audit. It is therefore a controlled constant, not a claimed no-memory condition.
 
-Selected realtime episodes are injected into the same user turn before response creation. The injected block includes episode ID, timestamp, source, score, and summary; the model is instructed to use only relevant evidence and abstain when evidence is insufficient. The UI reports `context injection`, not causal generation impact: injection is observable, while proving that an output changed requires a counterfactual experiment.
+"Pluggable" currently means the two online behavioral components can be independently enabled, scoped, composed, and
+ablated through a versioned policy. It does not yet mean arbitrary third-party memory classes can be dynamically
+loaded from the UI. The offline hierarchical visual pipeline is likewise not presented as a realtime toggle. A future
+memory method should add a typed adapter and a named profile rather than silently replace the baseline algorithm.
 
-The realtime summary adapter and offline hierarchical visual backend intentionally share a conceptual contract without forcing a second visual model into the latency-sensitive dialogue loop. The hierarchical backend is an offline research method, not a realtime control-panel plugin. Future research can implement that adapter and evaluate the trade-off explicitly instead of presenting an unavailable toggle.
+### Inductive biases and protocol
+
+The baseline is suitable for memory research because its assumptions are few and observable, not because it has none:
+
+| Mechanism | Explicit inductive bias |
+| --- | --- |
+| Context | Ordered history, bounded recent tail, deterministic extractive summary, fixed token budgets |
+| Preference | Explicit confirmation, exact task/checkpoint identity, replacement by trigger, one reuse per task session |
+| Episodic | Character/word tokenization, lexical overlap, `0.05` threshold, top-5, recency tie-break, local adjacency |
+| Scope | Case isolation by default for episodes; participant transfer by default for confirmed preferences |
+| Generation | Evidence is injected before response creation as low-trust context |
+
+These choices are modest enough for an engineering baseline and precise enough to ablate. They should not be hidden
+when reporting results. In particular, lexical retrieval favors surface overlap, adjacency favors local discourse,
+and participant scope is a transfer condition rather than a neutral storage option.
+
+For a clean experiment:
+
+1. Use one username per participant or research identity; never reuse a username across participants.
+2. Create one named case per experimental run.
+3. Select and record the profile before opening the realtime WebSocket or collecting the first turn.
+4. Do not use a mid-case profile change as a formal control condition. Evidence already projected into the provider
+   context or retained in the append-only journal cannot be retroactively withdrawn.
+5. Treat `participant` scope as an explicit experimental treatment. Use `case` scope when runs must be independent.
+6. Record model, Skill/task versions, profile version, case label, failures, abstentions, and the journal artifact.
+7. Evaluate retrieval and generation separately. A selected memory, an injected memory, and a causally changed answer
+   are three different outcomes.
+
+The realtime summary adapter and offline hierarchical visual backend intentionally share only a conceptual contract.
+This avoids forcing a second visual model into the latency-sensitive dialogue loop and keeps future memory innovations
+measurable against the unchanged lexical/confirmed baseline.
 
 ## Skills
 

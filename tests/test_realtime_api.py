@@ -258,6 +258,38 @@ def test_authenticated_users_have_isolated_runtime_preferences_episodes_and_sess
                 bob_sessions = (await (await bob_client.get(base + "/api/sessions")).json())["sessions"]
                 assert {item["id"] for item in alice_sessions} == {alice_session}
                 assert {item["id"] for item in bob_sessions} == {bob_session}
+
+                for path, body in (
+                    ("/api/sessions/memory-policy", {"sessionId": alice_session, "policy": {"profile": "context-only"}}),
+                    ("/api/candidate", {"sessionId": alice_session, "accepted": True}),
+                    ("/api/memory/delete", {"sessionId": alice_session, "id": "unknown"}),
+                ):
+                    forbidden = await bob_client.post(base + path, json=body)
+                    assert forbidden.status == 403
+                forbidden_state = await bob_client.get(base + f"/api/state?session={alice_session}")
+                assert forbidden_state.status == 403
+
+                alice_case_policy = await alice_client.post(
+                    base + "/api/sessions/memory-policy",
+                    json={
+                        "sessionId": alice_session,
+                        "policy": {
+                            "profile": "custom",
+                            "components": {
+                                "preference": {"enabled": True, "scope": "case"},
+                                "episodic": {"enabled": True, "scope": "case"},
+                            },
+                        },
+                    },
+                )
+                assert alice_case_policy.status == 200
+                scoped_state = await (await alice_client.get(
+                    base + f"/api/state?session={alice_session}",
+                )).json()
+                assert scoped_state["sessionId"] == alice_session
+                case_root = tmp_path / "users" / alice["id"] / "cases" / alice_session
+                assert Path(scoped_state["memory"]["memoryPath"]) == case_root / "preferences.json"
+                assert Path(scoped_state["episodicMemory"]["path"]) == case_root / "episodes.json"
         finally:
             await server.close()
 
@@ -429,10 +461,14 @@ def test_quick_control_uses_the_realtime_websocket(tmp_path, monkeypatch):
 
 
 def test_case_memory_policy_is_audited_and_gates_realtime_plugins(tmp_path, monkeypatch):
+    instances = []
+
     class FakeBridge:
         def __init__(self, api_key, model, voice, instructions, emit, on_transcript):
             self.emit = emit
             self.requests = []
+            self.trace_sink = None
+            instances.append(self)
 
         async def connect(self):
             await self.emit({"type": "ready"})
@@ -451,6 +487,9 @@ def test_case_memory_policy_is_audited_and_gates_realtime_plugins(tmp_path, monk
 
         def cancel_response(self, **kwargs):
             return False
+
+        def set_trace_sink(self, sink):
+            self.trace_sink = sink
 
         async def close(self):
             return None
@@ -516,18 +555,62 @@ def test_case_memory_policy_is_audited_and_gates_realtime_plugins(tmp_path, monk
             await ws.send_json({"type": "refresh"})
             assert (await ws.receive_json())["state"]["memoryPolicy"]["profile"] == "lexical-episodic"
 
+            instances[0].trace_sink(
+                "proactive.gate.decision",
+                "realtime-bridge",
+                {"sceneSummary": "案板上放着一把刀和蔬菜", "salientChange": False},
+                [],
+            )
+            await ws.send_json({"type": "refresh"})
+            scene_state = (await ws.receive_json())["state"]
+            assert any(item["kind"] == "scene" for item in scene_state["episodicMemory"]["recent"])
+
             await ws.send_json({"type": "control", "transcript": "普通实验话语"})
             enabled_turn = [await ws.receive_json() for _ in range(3)]
             enabled_state = next(item["state"] for item in enabled_turn if item["type"] == "state")
-            assert enabled_state["episodicMemory"]["count"] == 1
+            assert enabled_state["episodicMemory"]["count"] == 2
+
+            preference_enabled = await (await client.post(
+                "/api/sessions/memory-policy",
+                json={"sessionId": session_id, "policy": {"profile": "confirmed-preference"}},
+            )).json()
+            assert preference_enabled["memoryPolicy"]["profile"] == "confirmed-preference"
+            await ws.send_json({"type": "refresh"})
+            assert (await ws.receive_json())["state"]["memoryPolicy"]["profile"] == "confirmed-preference"
+
+            await ws.send_json({"type": "control", "transcript": "以后每次提醒我慢一点"})
+            preference_turn = [await ws.receive_json() for _ in range(3)]
+            preference_state = next(item["state"] for item in preference_turn if item["type"] == "state")
+            assert preference_state["memory"]["candidate"]["status"] == "pending"
+            confirmed = await client.post(
+                "/api/candidate", json={"sessionId": session_id, "accepted": True},
+            )
+            assert confirmed.status == 200
+            confirmed_state = await confirmed.json()
+            record_id = confirmed_state["memory"]["records"][-1]["id"]
+            deleted = await client.post(
+                "/api/memory/delete", json={"sessionId": session_id, "id": record_id},
+            )
+            assert deleted.status == 200
             await ws.close()
 
             journal_path = tmp_path / "users" / user["id"] / "sessions" / f"{session_id}.jsonl"
             entries = [json.loads(line) for line in journal_path.read_text(encoding="utf-8").splitlines()]
+            assert entries[0]["metadata"]["initialMemoryPolicy"]["profile"] == "all-online"
             changes = [item for item in entries if item.get("type") == "memory_policy_changed"]
             assert [item["policy"]["profile"] for item in changes] == [
-                "context-only", "lexical-episodic",
+                "context-only", "lexical-episodic", "confirmed-preference",
             ]
+            memory_events = [
+                item["eventType"] for item in entries
+                if item.get("type") == "runtime_event" and str(item.get("eventType", "")).startswith(("memory.", "episodic.memory."))
+            ]
+            assert "episodic.memory.retrieved" in memory_events
+            assert "episodic.memory.injected" in memory_events
+            assert "episodic.memory.written" in memory_events
+            assert "memory.candidate.proposed" in memory_events
+            assert "memory.confirmed" in memory_events
+            assert "memory.deleted" in memory_events
 
     asyncio.run(scenario())
 

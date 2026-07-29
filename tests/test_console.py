@@ -45,6 +45,8 @@ def test_frontend_exposes_memory_pipeline_and_treats_steps_as_reference_map():
     assert "可选证据锚点" in script
     assert "助手语音字幕" in script
     assert "/api/sessions/memory-policy" in script
+    assert '"?session=" + encodeURIComponent(selectedSessionId)' in script
+    assert '$("#video").style.transform = "scaleX(-1)"' in script
     assert "generation impact" not in script
     assert "context injection" in script
 

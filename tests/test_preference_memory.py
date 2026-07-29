@@ -1,3 +1,5 @@
+import pytest
+
 from egoassist.realtime import PreferenceMemory
 
 
@@ -50,3 +52,22 @@ def test_generic_preference_uses_task_and_step(tmp_path):
     }
     memory.resolve_candidate(True)
     assert memory.matching_record("assemble_filter", "insert_gasket")["prompt"] == "先确认密封圈平整。"
+
+
+def test_pending_candidates_are_isolated_by_experiment_case(tmp_path):
+    memory = PreferenceMemory(tmp_path / "memory.json")
+    first = memory.propose_preference(
+        task="task-a",
+        step="step-a",
+        prompt="案例 A 的偏好",
+        evidence="case-a evidence",
+        candidate_scope="case-a",
+    )
+
+    assert first["candidate"]["preference"] == "案例 A 的偏好"
+    assert memory.snapshot(candidate_scope="case-b")["candidate"] is None
+    with pytest.raises(ValueError, match="no pending memory candidate"):
+        memory.resolve_candidate(True, candidate_scope="case-b")
+
+    memory.resolve_candidate(True, candidate_scope="case-a")
+    assert memory.matching_record("task-a", "step-a")["preference"] == "案例 A 的偏好"
