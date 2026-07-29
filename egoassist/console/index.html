@@ -8,7 +8,21 @@
   <link rel="stylesheet" href="styles.css">
   <link rel="stylesheet" href="responsive.css">
 </head>
-<body>
+<body class="auth-required">
+  <div id="authGate" class="auth-gate">
+    <form id="authForm" class="auth-panel">
+      <div class="brand"><b>EgoAssist</b><span>RESEARCH BASELINE</span></div>
+      <h1 id="authTitle">登录参与者账号</h1>
+      <div class="auth-mode" role="group" aria-label="账号操作">
+        <button id="loginMode" type="button" class="active">登录</button>
+        <button id="registerMode" type="button">注册</button>
+      </div>
+      <label>用户名<input id="authUsername" required minlength="3" maxlength="32" autocomplete="username"></label>
+      <label>密码<input id="authPassword" type="password" required minlength="8" maxlength="256" autocomplete="current-password"></label>
+      <p id="authError" role="alert"></p>
+      <button id="authSubmit" type="submit" class="primary">登录</button>
+    </form>
+  </div>
   <header>
     <div class="brand"><b>EgoAssist</b><span>OBSERVABILITY CONSOLE</span></div>
     <label>Skill<select id="skillSelect"></select></label>
@@ -16,6 +30,12 @@
     <button id="newTask">新建任务</button>
     <span id="mode" class="model-pill"></span>
     <button id="reset">重置会话</button>
+    <div class="identity-controls">
+      <b id="currentUser">-</b>
+      <label>实验案例<select id="sessionSelect"></select></label>
+      <button id="newSession" title="创建独立实验案例">新建案例</button>
+      <button id="logout" title="退出当前账号">退出</button>
+    </div>
   </header>
 
   <main>

@@ -94,6 +94,18 @@ class TaskSpec:
             f"任务步骤：\n{steps}\n安全策略：\n{safety}\n长期个人记忆：\n{memory}"
         )
 
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "title": self.title,
+            "version": self.version,
+            "role": self.role,
+            "safety_policy": list(self.safety_policy),
+            "steps": [asdict(step) for step in self.steps],
+            "aliases": list(self.aliases),
+            "provenance": self.provenance,
+        }
+
 
 class TaskSession:
     def __init__(
@@ -124,6 +136,53 @@ class TaskSession:
         self.decision = self._decision("guide", self.spec.steps[0].instruction, "开始任务", 1.0)
         self.trace: list[dict[str, Any]] = []
         self._emit("task.session.started", {"task": self.spec.id, "checkpoint": self.current_checkpoint_id})
+        return self.snapshot()
+
+    def restore(self, snapshot: dict[str, Any]) -> dict[str, Any]:
+        """Restore a validated durable snapshot for this exact task version."""
+        task = snapshot.get("task", {})
+        if task.get("id") != self.spec.id or task.get("version") != self.spec.version:
+            raise ValueError("task snapshot does not match active task specification")
+        checkpoint_id = str(snapshot.get("currentCheckpointId", ""))
+        valid_ids = {step.id for step in self.spec.steps}
+        ledger = snapshot.get("checkpointLedger")
+        if checkpoint_id not in valid_ids or not isinstance(ledger, dict) or set(ledger) != valid_ids:
+            raise ValueError("invalid task checkpoint snapshot")
+        restored = {}
+        for step_id in valid_ids:
+            value = ledger[step_id]
+            status = value.get("status")
+            confidence = value.get("confidence")
+            evidence_ids = value.get("evidenceIds", [])
+            if status not in {"unknown", "active", "hypothesized", "satisfied"}:
+                raise ValueError("invalid task checkpoint status")
+            if not isinstance(confidence, (int, float)) or not 0 <= confidence <= 1:
+                raise ValueError("invalid task checkpoint confidence")
+            if not isinstance(evidence_ids, list):
+                raise ValueError("invalid task checkpoint evidence")
+            restored[step_id] = {
+                "status": status,
+                "confidence": float(confidence),
+                "evidenceIds": [str(item) for item in evidence_ids],
+                "updatedBy": value.get("updatedBy"),
+            }
+        step_index = int(snapshot.get("stepIndex", 0))
+        if not 0 <= step_index < len(self.spec.steps):
+            raise ValueError("invalid task step index")
+        decision = snapshot.get("decision")
+        if not isinstance(decision, dict) or not {"action", "message", "reason"}.issubset(decision):
+            raise ValueError("invalid task decision snapshot")
+        self.step_index = step_index
+        self.current_checkpoint_id = checkpoint_id
+        self.checkpoints = restored
+        self.completed = bool(snapshot.get("completed", False))
+        self.paused = bool(snapshot.get("paused", False))
+        self.observation = snapshot.get("observation") if isinstance(snapshot.get("observation"), dict) else None
+        self.announced_memory_ids = {str(item) for item in snapshot.get("announcedMemoryIds", [])}
+        self.decision = dict(decision)
+        trace = snapshot.get("trace", [])
+        self.trace = list(reversed(trace)) if isinstance(trace, list) else []
+        self._emit("task.session.restored", {"task": self.spec.id, "checkpoint": checkpoint_id})
         return self.snapshot()
 
     @property
@@ -168,32 +227,44 @@ class TaskSession:
         self._emit("intervention.decision", self.decision, [evidence_id] if evidence_id else [])
         return self.snapshot()
 
-    def voice(self, transcript: str) -> dict[str, Any]:
-        text = transcript.strip().lower()
-        completion_denied = any(word in text for word in ("没完成", "没有完成", "还没", "未完成", "别到下一步"))
-        completion_question = any(word in text for word in ("下一步怎么", "下一步是什么", "完成了吗", "算完成吗"))
-        completion_confirmed = any(word in text for word in ("完成了", "已经好了", "这步好了", "可以下一步了", "done"))
-        if completion_confirmed and not completion_denied and not completion_question:
-            return self.confirm_step("用户语音确认")
-        if any(word in text for word in ("上一步", "回退", "退一步", "go back")):
+    def apply_voice_intent(self, intent: str | None, transcript: str = "") -> dict[str, Any]:
+        """Apply a validated semantic label; never infer intent from transcript text."""
+        intent = str(intent or "none")
+        allowed = {
+            "none", "confirm-step", "rollback", "repeat",
+            "pause-task", "resume-task", "request-help",
+        }
+        if intent not in allowed:
+            raise ValueError(f"unsupported task voice intent: {intent}")
+        if intent == "confirm-step":
+            return self.confirm_step("用户语义确认")
+        if intent == "rollback":
             self.checkpoints[self.current_checkpoint_id]["status"] = "unknown"
             self.step_index = max(0, self.step_index - 1)
             self.current_checkpoint_id = self.spec.steps[self.step_index].id
             self.checkpoints[self.current_checkpoint_id].update({"status": "active", "updatedBy": "user-rollback"})
             self.completed = False
             self.decision = self._decision("guide", self.current_step.instruction, "用户请求回退并重新检查", 1.0)
-        elif any(word in text for word in ("重复", "再说", "repeat", "没听清")):
+        elif intent == "repeat":
             self.decision = self._decision("guide", self.current_step.instruction, "用户请求重复", 1.0)
-        elif any(word in text for word in ("暂停", "停止", "stop", "pause")):
+        elif intent == "pause-task":
             self.paused = True
-            self.decision = self._decision("silent", "已暂停。说“继续”恢复陪练。", "用户控制", 1.0)
-        elif any(word in text for word in ("继续", "恢复", "resume")):
+            self.decision = self._decision("silent", "已暂停任务指导。", "用户语义控制", 1.0)
+        elif intent == "resume-task":
             self.paused = False
             self.decision = self._decision("guide", self.current_step.instruction, "用户恢复", 1.0)
-        elif any(word in text for word in ("帮助", "怎么做", "下一步", "help")):
+        elif intent == "request-help":
             self.decision = self._decision("guide", self.current_step.instruction, f"知识来源：{self.current_step.source}", 1.0)
-        self._emit("interaction.voice.control", {"transcript": transcript, "decision": self.decision})
+        self._emit("interaction.voice.control", {
+            "transcript": transcript, "intent": intent, "decision": self.decision,
+            "method": "structured-semantic-label",
+        })
         return self.snapshot()
+
+    def voice(self, transcript: str) -> dict[str, Any]:
+        raise TypeError(
+            "TaskSession.voice no longer infers intent from text; use apply_voice_intent"
+        )
 
     def confirm_step(self, source: str) -> dict[str, Any]:
         if self.completed:
@@ -242,6 +313,7 @@ class TaskSession:
             ],
             "observation": self.observation,
             "decision": self.decision,
+            "announcedMemoryIds": sorted(self.announced_memory_ids),
             "trace": list(reversed(self.trace[-8:])),
         }
 

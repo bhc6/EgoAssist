@@ -8,7 +8,7 @@ version = "0.1.0"
 description = "Skill-first full-duplex embodied assistance framework with observable memory and intervention control"
 readme = "README.md"
 requires-python = ">=3.10"
-license = "MIT"
+license = "Apache-2.0"
 authors = [{ name = "EgoAssist contributors" }]
 keywords = ["embodied-assistant", "full-duplex", "egocentric", "long-term-memory", "skills"]
 

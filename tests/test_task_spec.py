@@ -26,9 +26,25 @@ def test_task_spec_loads_and_builds_realtime_context():
 def test_generic_task_session_progresses_from_spec():
     spec = TaskSpec.load(TASK)
     session = TaskSession(spec)
-    session.voice("完成了")
+    session.apply_voice_intent("confirm-step", "完成了")
     assert session.snapshot()["stepIndex"] == 1
     assert session.current_step.id == "wash"
+
+
+def test_task_session_snapshot_restores_exact_runtime_state():
+    spec = TaskSpec.load(TASK)
+    source = TaskSession(spec)
+    source.apply_voice_intent("confirm-step", "完成了")
+    source.apply_voice_intent("pause-task", "暂停")
+    source.announced_memory_ids.add("memory-7")
+
+    restored = TaskSession(TaskSpec.from_dict(spec.to_dict()))
+    restored.restore(source.snapshot())
+
+    assert restored.snapshot() == source.snapshot()
+    assert restored.current_step.id == source.current_step.id
+    assert restored.paused is True
+    assert restored.announced_memory_ids == {"memory-7"}
 
 
 def test_dynamic_task_validation_rejects_duplicate_steps():

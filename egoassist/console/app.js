@@ -5,16 +5,78 @@ let state, stream, socket, audioContext, microphoneSource, processor, videoTimer
 let playbackTime = 0, assistantText = "";
 let connectingPromise = null;
 let selectedEventId = null, pipelineDetails = [];
+let currentUser = null, selectedSessionId = null, authMode = "login";
 const playbackSources = new Set();
 
-async function post(path, data = {}) {
-  const response = await fetch(path, {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(data)});
+async function request(path, options = {}) {
+  const response = await fetch(path, options);
   const body = await response.text();
   let result;
   try { result = JSON.parse(body); }
   catch (_) { throw Error((response.ok ? "服务返回了无效 JSON：" : "请求失败：") + body.slice(0, 180)); }
+  if (response.status === 401) {
+    showLogin();
+    throw Error("登录状态已失效");
+  }
   if (!response.ok) throw Error(result.message || result.error || "请求失败");
   return result;
+}
+
+async function post(path, data = {}) {
+  return request(path, {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(data)});
+}
+
+function setAuthMode(mode) {
+  authMode = mode;
+  const registering = mode === "register";
+  $("#loginMode").classList.toggle("active", !registering);
+  $("#registerMode").classList.toggle("active", registering);
+  $("#authTitle").textContent = registering ? "注册参与者账号" : "登录参与者账号";
+  $("#authSubmit").textContent = registering ? "注册并进入" : "登录";
+  $("#authPassword").autocomplete = registering ? "new-password" : "current-password";
+  $("#authError").textContent = "";
+}
+
+function showLogin() {
+  disconnectRealtime();
+  currentUser = null;
+  selectedSessionId = null;
+  document.body.classList.add("auth-required");
+  $("#authGate").hidden = false;
+  $("#authPassword").value = "";
+}
+
+async function refreshSessionList(preferredId = selectedSessionId) {
+  const payload = await request("/api/sessions");
+  let sessions = payload.sessions || [];
+  if (!sessions.length) {
+    const created = await post("/api/sessions");
+    preferredId = created.session.id;
+    sessions = (await request("/api/sessions")).sessions || [];
+  }
+  selectedSessionId = sessions.some(item => item.id === preferredId) ? preferredId : sessions[0].id;
+  $("#sessionSelect").innerHTML = sessions.map(item => {
+    const seen = item.last_seen_at ? item.last_seen_at.replace("T", " ").slice(0, 19) : "";
+    const label = item.label || "未命名案例";
+    return "<option value='" + esc(item.id) + "'>" + esc(label + " · " + item.id + (seen ? " · " + seen : "")) + "</option>";
+  }).join("");
+  $("#sessionSelect").value = selectedSessionId;
+}
+
+async function enterConsole(user) {
+  currentUser = user;
+  document.body.classList.remove("auth-required");
+  $("#authGate").hidden = true;
+  $("#currentUser").textContent = user.username;
+  await refreshSessionList(localStorage.getItem("egoassist.session." + user.id));
+  localStorage.setItem("egoassist.session." + user.id, selectedSessionId);
+  render(await request("/api/state"));
+}
+
+async function boot() {
+  const payload = await request("/api/auth/me");
+  if (payload.user) await enterConsole(payload.user);
+  else showLogin();
 }
 
 const actionName = action => ({silent: "静默", guide: "指导", ask: "询问", correct: "纠错", emergency: "紧急"}[action] || action);
@@ -43,6 +105,7 @@ function inspect(value) {
 
 function renderPipeline(task, mechanism, step) {
   const scheduler = state.scheduler || {};
+  const lanes = state.providerLanes || {};
   const retrieval = mechanism.retrieval || {};
   const routing = state.intentRouting || {status: "no-match", candidates: []};
   const decision = task?.decision || state.genericDecision || {action: "silent", confidence: 0, reason: "no-domain-intent"};
@@ -51,12 +114,12 @@ function renderPipeline(task, mechanism, step) {
     {stage: "capture", title: "音频 / 视频采集", status: stream ? "live" : "idle", summary: stream ? "16 kHz PCM + latest-only JPEG" : "等待浏览器设备", claim: "原始媒体只记录大小和时间，不在账本保存 Base64"},
     {stage: "attribution", title: "声道与说话者归因", status: stream ? "live" : "idle", summary: "input transcript ≠ spoken output transcript", claim: state.audioAttribution?.claimBoundary || "等待媒体配置"},
     {stage: "intent", title: "意图路由", status: routing.status === "matched" ? "live" : routing.status === "ambiguous" ? "warning" : "idle", summary: routing.status + " · " + (routing.selectedSkill || "general"), claim: routing.claimBoundary},
-    {stage: "perception", title: "结构化感知", status: task?.observation ? "live" : "idle", summary: task?.observation ? task.observation.summary : "无控制面结构化观测", claim: "模型视觉上下文与已提交控制事件分开展示"},
+    {stage: "perception", title: "结构化感知", status: lanes.perception?.connected ? "live" : "idle", summary: lanes.perception?.connected ? "独立视觉门控通道 · 不共享麦克风" : "感知通道未连接", claim: "视觉门控与用户对话使用不同 provider session；模型视觉上下文与已提交控制事件分开展示"},
     {stage: "task", title: "Skill / 任务假设", status: task ? "live" : state.activeSkill ? "warning" : "idle", summary: taskSummary, claim: task ? "Checkpoint ledger，不规定唯一执行路径" : "无证据时不加载领域工作流"},
     {stage: "knowledge", title: "知识增强", status: state.knowledgeMechanism.method === "none" ? "idle" : "warning", summary: state.knowledgeMechanism.method, claim: state.knowledgeMechanism.claimBoundary},
     {stage: "memory", title: "记忆检索", status: retrieval.status === "matched" || state.episodicMemory?.count ? "live" : "idle", summary: "preference " + (retrieval.candidates || []).length + " · episodes " + (state.episodicMemory?.count || 0), claim: "偏好与情景记忆分开；显示查询、候选、拒绝原因和实际注入结果"},
     {stage: "policy", title: "主动干预策略", status: "live", summary: actionName(decision.action) + " · " + Math.round((decision.confidence || 0) * 100) + "%", claim: decision.reason},
-    {stage: "scheduler", title: "响应调度与打断", status: scheduler.pending || scheduler.activeResponseIds?.length ? "live" : "idle", summary: scheduler.activePolicies?.[0]?.speechPolicy || state.turnTakingPolicy.currentSelection.policy, claim: "Skill 可配置：" + state.turnTakingPolicy.currentSelection.basis},
+    {stage: "scheduler", title: "响应调度与打断", status: scheduler.pending || scheduler.activeResponseIds?.length ? "live" : "idle", summary: (lanes.dialogue?.turnDetection || "unknown") + " · " + (scheduler.activePolicies?.[0]?.speechPolicy || state.turnTakingPolicy.currentSelection.policy), claim: "转写后先检索与更新上下文，再显式创建唯一回答；Skill 可配置：" + state.turnTakingPolicy.currentSelection.basis},
     {stage: "output", title: "语音与字幕输出", status: scheduler.activeResponseIds?.length ? "live" : "idle", summary: scheduler.activeResponseIds?.join(", ") || "等待输出", claim: "只展示可验证输出和结构化中间产物，不声称访问隐藏思维链"}
   ];
   $("#pipeline").innerHTML = pipelineDetails.map((item, index) => "<article class='pipeline-node " + esc(item.status) + "' data-pipeline='" + index + "'><div><h3>" + esc(item.title) + "</h3><p>" + esc(item.summary) + "</p></div><b>" + esc(item.stage) + "</b></article>").join("");
@@ -112,7 +175,8 @@ function render(next) {
   $("#memories").innerHTML = memory.records.length ? memory.records.map(item => "<article><b>" + esc(item.preference) + "</b><small>trigger " + esc(item.trigger.task) + " / " + esc(item.trigger.step) + "</small><button data-delete='" + esc(item.id) + "'>删除</button></article>").join("") : "<span>暂无已确认偏好</span>";
   const episodic = state.episodicMemory || {recent: [], retrieval: {candidates: []}};
   const episodeCandidates = episodic.retrieval?.candidates || [];
-  $("#episodicRetrieval").innerHTML = "<b>EPISODIC RETRIEVAL · " + esc(episodic.retrieval?.method || "none") + "</b>" + (episodeCandidates.length ? episodeCandidates.slice(0, 6).map(item => "<div class='rank-row " + (item.selected ? "selected" : "") + "'><b>" + esc(item.episodeId) + "</b><span>score " + Number(item.score || 0).toFixed(2) + " · " + esc(item.selected ? "selected" : (item.rejectionReasons || []).join(", ")) + "</span><small>" + esc(item.record.kind + " / " + item.record.source) + "</small></div>").join("") : "<p>无情景召回候选</p>");
+  const episodeInjection = episodic.retrieval?.injection || {status: "not-injected", episodeIds: []};
+  $("#episodicRetrieval").innerHTML = "<b>EPISODIC RETRIEVAL · " + esc(episodic.retrieval?.method || "none") + "</b><p>generation impact: " + esc(episodeInjection.status) + " · " + esc((episodeInjection.episodeIds || []).join(", ") || "none") + "</p>" + (episodeCandidates.length ? episodeCandidates.slice(0, 6).map(item => "<div class='rank-row " + (item.selected ? "selected" : "") + "'><b>" + esc(item.episodeId) + "</b><span>score " + Number(item.score || 0).toFixed(2) + " · " + esc(item.selected ? (item.retrievalReasons || ["selected"]).join(", ") : (item.rejectionReasons || []).join(", ")) + "</span><small>" + esc(item.record.kind + " / " + item.record.source) + "</small></div>").join("") : "<p>无情景召回候选</p>");
   $("#episodicEpisodes").innerHTML = "<b>RECENT EPISODES · raw media retained: " + esc(episodic.retainsRawMedia) + "</b>" + (episodic.recent?.length ? episodic.recent.map(item => "<article><b>" + esc(item.summary) + "</b><small>" + esc(item.kind + " · " + item.source) + "</small><span>" + esc(item.task || "general") + "</span></article>").join("") : "<p>暂无实时情景摘要</p>");
   $("#toolAudit").innerHTML = state.toolAudit.length ? state.toolAudit.map(item => "<article><b>" + esc(item.tool || item.action || "tool") + "</b><p>" + esc(JSON.stringify(item.arguments || item.result || {})) + "</p><small>" + esc(item.time || item.timestamp || "") + "</small></article>").join("") : "<span class='muted'>暂无工具调用</span>";
   $$("[data-delete]").forEach(button => button.onclick = () => run(button, post("/api/memory/delete", {id: button.dataset.delete})));
@@ -284,10 +348,11 @@ async function connectRealtime() {
 }
 
 async function connectRealtimeSession() {
+  if (!selectedSessionId) await refreshSessionList();
   await ensureMedia();
   await startAudioCapture();
   const scheme = location.protocol === "https:" ? "wss:" : "ws:";
-  const ws = new WebSocket(scheme + "//" + location.host + "/ws/realtime");
+  const ws = new WebSocket(scheme + "//" + location.host + "/ws/realtime?session=" + encodeURIComponent(selectedSessionId));
   socket = ws;
   let ready = false;
   let restartAfterClose = false;
@@ -305,11 +370,14 @@ async function connectRealtimeSession() {
     const message = JSON.parse(event.data);
     if (message.type === "ready") {
       ready = true;
+      selectedSessionId = message.contextSessionId || selectedSessionId;
+      if (currentUser) localStorage.setItem("egoassist.session." + currentUser.id, selectedSessionId);
+      refreshSessionList(selectedSessionId).catch(() => {});
       resolveReady();
       sendMediaConfiguration(ws);
       $("#duplexState").textContent = "全双工在线 · 直接说话，可随时打断";
       $("#realtimeButton").textContent = "结束陪练";
-    } else if (message.type === "audio") {
+    } else if (message.type === "audio" && ["conversation", "proactive-utterance"].includes(message.purpose)) {
       $("#duplexState").textContent = "助手正在说 · 你可以随时打断";
       playPcm24(message.audio);
     } else if (message.type === "interrupted") {
@@ -320,7 +388,7 @@ async function connectRealtimeSession() {
     } else if (message.type === "user_transcript") {
       $("#transcript").textContent = "你 · " + (message.channel || "input_audio_transcription") + "：" + message.text + (message.echoRisk === "suspected" ? " · 可能残余回声" : "");
       $("#duplexState").textContent = "正在听你说话";
-    } else if (message.type === "assistant_transcript") {
+    } else if (message.type === "assistant_transcript" && ["conversation", "proactive-utterance"].includes(message.purpose)) {
       assistantText = message.done ? message.text : assistantText + message.text;
       $("#assistantCaption").innerHTML = "<span>助手语音字幕 · provider output channel · " + (message.done ? "已完成" : "生成中") + "</span><p>" + esc(assistantText) + "</p>";
       $("#duplexState").textContent = message.done ? "全双工在线 · 正在听" : "助手正在说 · 你可以随时打断";
@@ -330,6 +398,8 @@ async function connectRealtimeSession() {
     } else if (message.type === "session_stale") {
       restartAfterClose = true;
       $("#duplexState").textContent = "任务已切换，正在重建实时会话…";
+    } else if (message.type === "reconnecting") {
+      $("#duplexState").textContent = "实时模型会话正在自动恢复 · 麦克风音频短暂缓冲中";
     } else if (message.type === "error") {
       alert(message.message);
     }
@@ -410,9 +480,55 @@ $("#taskForm").onsubmit = async event => {
     if (wasRealtime) await connectRealtime();
   } catch (error) { alert(error.message); }
 };
-fetch("/api/state").then(response => response.json()).then(render).catch(error => alert(error.message));
+
+$("#loginMode").onclick = () => setAuthMode("login");
+$("#registerMode").onclick = () => setAuthMode("register");
+$("#authForm").onsubmit = async event => {
+  event.preventDefault();
+  $("#authSubmit").disabled = true;
+  $("#authError").textContent = "";
+  try {
+    const payload = await post("/api/auth/" + authMode, {
+      username: $("#authUsername").value.trim(),
+      password: $("#authPassword").value,
+    });
+    await enterConsole(payload.user);
+  } catch (error) {
+    $("#authError").textContent = error.message;
+  } finally {
+    $("#authSubmit").disabled = false;
+  }
+};
+$("#logout").onclick = async () => {
+  disconnectRealtime();
+  stopMedia();
+  try { await post("/api/auth/logout"); } finally { showLogin(); }
+};
+$("#newSession").onclick = async () => {
+  const label = prompt("实验案例名称", "新实验案例");
+  if (label === null || !label.trim()) return;
+  const wasRealtime = Boolean(socket || connectingPromise);
+  const pendingConnection = connectingPromise;
+  disconnectRealtime();
+  if (pendingConnection) await pendingConnection.catch(() => {});
+  const created = await post("/api/sessions", {label: label.trim()});
+  selectedSessionId = created.session.id;
+  if (currentUser) localStorage.setItem("egoassist.session." + currentUser.id, selectedSessionId);
+  await refreshSessionList(selectedSessionId);
+  if (wasRealtime) await connectRealtime();
+};
+$("#sessionSelect").onchange = async event => {
+  const wasRealtime = Boolean(socket || connectingPromise);
+  const pendingConnection = connectingPromise;
+  disconnectRealtime();
+  if (pendingConnection) await pendingConnection.catch(() => {});
+  selectedSessionId = event.currentTarget.value;
+  if (currentUser) localStorage.setItem("egoassist.session." + currentUser.id, selectedSessionId);
+  if (wasRealtime) await connectRealtime();
+};
+boot().catch(error => { showLogin(); $("#authError").textContent = error.message; });
 setInterval(() => {
   if (!socket || socket.readyState !== WebSocket.OPEN) return;
-  fetch("/api/state").then(response => response.json()).then(render).catch(() => {});
+  socket.send(JSON.stringify({type: "refresh"}));
 }, 1200);
 addEventListener("beforeunload", () => { disconnectRealtime(); stopMedia(); });

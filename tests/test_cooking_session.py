@@ -26,7 +26,7 @@ def test_step_completion_requires_user_confirmation():
     assert state["decision"]["action"] == "ask"
     assert state["stepIndex"] == 0
 
-    state = session.voice("完成了")
+    state = session.apply_voice_intent("confirm-step", "完成了")
     assert state["decision"]["action"] == "guide"
     assert state["stepIndex"] == 1
 
@@ -41,11 +41,11 @@ def test_wrong_step_and_low_confidence_require_human_confirmation():
 
 def test_voice_completion_questions_do_not_advance_and_rollback_is_explicit():
     session = task_session()
-    assert session.voice("还没完成")["stepIndex"] == 0
-    assert session.voice("下一步怎么做")["stepIndex"] == 0
-    assert session.voice("完成了吗")["stepIndex"] == 0
-    assert session.voice("完成了")["stepIndex"] == 1
-    state = session.voice("上一步")
+    assert session.apply_voice_intent(None, "还没完成")["stepIndex"] == 0
+    assert session.apply_voice_intent(None, "下一步怎么做")["stepIndex"] == 0
+    assert session.apply_voice_intent(None, "完成了吗")["stepIndex"] == 0
+    assert session.apply_voice_intent("confirm-step", "完成了")["stepIndex"] == 1
+    state = session.apply_voice_intent("rollback", "上一步")
     assert state["stepIndex"] == 0
     assert state["decision"]["reason"] == "用户请求回退并重新检查"
 
@@ -73,10 +73,10 @@ def test_confirmed_memory_hint_triggers_once_at_matching_step():
         "prompt": "慢一点切。",
     }
     assert session.apply_memory_hint(record)["decision"]["reason"] == "开始任务"
-    session.voice("完成了")
-    session.voice("完成了")
+    session.apply_voice_intent("confirm-step", "完成了")
+    session.apply_voice_intent("confirm-step", "完成了")
     first = session.apply_memory_hint(record)
-    session.voice("怎么做")
+    session.apply_voice_intent("request-help", "怎么做")
     second = session.apply_memory_hint(record)
     assert first["decision"]["message"] == "慢一点切。"
     assert second["decision"]["message"] != "慢一点切。"

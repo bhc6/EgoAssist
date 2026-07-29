@@ -1,0 +1,313 @@
+import json
+import threading
+
+from egoassist.realtime import ContextHarness, ContextSettings, SessionJournal
+from egoassist.realtime.omni import OmniBrowserBridge
+
+
+class Modalities:
+    AUDIO = "audio"
+    TEXT = "text"
+
+
+class Conversation:
+    def __init__(self):
+        self.items = []
+        self.responses = []
+        self.sessions = []
+        self.cancelled = 0
+
+    def create_item(self, item):
+        self.items.append(item)
+
+    def create_response(self, **kwargs):
+        self.responses.append(kwargs)
+
+    def update_session(self, **kwargs):
+        self.sessions.append(kwargs)
+
+    def cancel_response(self):
+        self.cancelled += 1
+
+
+def make_bridge(harness):
+    bridge = OmniBrowserBridge.__new__(OmniBrowserBridge)
+    bridge._context_harness = harness
+    bridge._provider_tools = []
+    bridge._tool_handler = None
+    bridge._pending_tool_calls = {}
+    bridge._dialogue_generation = 3
+    bridge._trace_sink = None
+    bridge.connected = True
+    bridge.closed = False
+    bridge.voice = "test"
+    bridge.instructions = "policy"
+    bridge.modalities = Modalities
+    bridge.conversation = Conversation()
+    bridge._response_lock = threading.Lock()
+    bridge._response_pending = False
+    bridge._active_response_ids = set()
+    bridge._active_response_requests = {}
+    bridge._queued_response = None
+    bridge._inflight_response = None
+    bridge._response_sequence = 0
+    bridge._cancel_when_created = False
+    bridge._barge_in_pending = False
+    bridge._response_text = {}
+    bridge._output_channels_seen = set()
+    bridge._suppressed_output_channels_seen = set()
+    bridge._assistant_transcript_buffer = ""
+    bridge._assistant_transcript_buffers = {}
+    bridge._last_assistant_utterance = ""
+    bridge._last_assistant_utterance_at = 0.0
+    bridge._replayed_compaction_id = None
+    bridge._schedule = lambda payload: None
+    return bridge
+
+
+def harness_at(path):
+    return ContextHarness(
+        SessionJournal(path, session_id="bridge-session"),
+        ContextSettings(context_window=2048, reserve_tokens=256, keep_recent_tokens=512, max_summary_tokens=256),
+    )
+
+
+def test_provider_projection_replays_durable_context(tmp_path):
+    harness = harness_at(tmp_path / "session.jsonl")
+    harness.record_user("remember this", source="test", turn_id="one")
+    harness.record_assistant("remembered", response_id="response-1")
+    bridge = make_bridge(harness)
+
+    count = bridge._replay_context(bridge.conversation)
+
+    assert count == 2
+    assert [item["role"] for item in bridge.conversation.items] == ["user", "assistant"]
+    assert bridge.conversation.items[0]["content"][0]["type"] == "input_text"
+
+
+def test_assistant_completion_is_committed_once_by_response_id(tmp_path):
+    harness = harness_at(tmp_path / "assistant.jsonl")
+    bridge = make_bridge(harness)
+    bridge.request_response("answer", purpose="conversation")
+    bridge._response_created({"response": {"id": "response-2"}})
+    payload = {"response_id": "response-2", "transcript": "durable answer"}
+
+    bridge.route_provider_output("response.audio_transcript.done", payload)
+    bridge.route_provider_output("response.audio_transcript.done", payload)
+    bridge._response_finished({"type": "response.done", "response": {"id": "response-2"}})
+
+    messages = [entry for entry in harness.journal.entries() if entry["type"] == "message"]
+    assert len(messages) == 1
+    assert messages[0]["message"] == {"role": "assistant", "content": "durable answer"}
+
+
+def test_completed_transcript_buffer_is_not_recommitted_at_response_end(tmp_path):
+    harness = harness_at(tmp_path / "assistant-buffer.jsonl")
+    bridge = make_bridge(harness)
+    bridge.request_response("answer", purpose="conversation")
+    bridge._response_created({"response": {"id": "response-buffer"}})
+    bridge.route_provider_output("response.audio_transcript.delta", {
+        "response_id": "response-buffer", "delta": "durable ",
+    })
+    bridge.route_provider_output("response.audio_transcript.done", {
+        "response_id": "response-buffer", "transcript": "durable answer",
+    })
+
+    bridge._response_finished({"type": "response.done", "response": {"id": "response-buffer"}})
+
+    messages = [entry for entry in harness.journal.entries() if entry["type"] == "message"]
+    assert len(messages) == 1
+    assert messages[0]["message"]["content"] == "durable answer"
+
+
+def test_declared_tool_executes_and_commits_result_before_continuation(tmp_path):
+    harness = harness_at(tmp_path / "tool.jsonl")
+    bridge = make_bridge(harness)
+    bridge.set_tools([
+        {
+            "name": "timer",
+            "description": "Set a timer",
+            "requires_confirmation": False,
+            "arguments": {
+                "type": "object",
+                "properties": {"seconds": {"type": "integer"}},
+                "required": ["seconds"],
+            },
+        }
+    ], lambda name, arguments, confirmed: {"status": "scheduled", "seconds": arguments["seconds"]})
+
+    bridge._handle_tool_call_event({
+        "type": "response.function_call_arguments.done",
+        "call_id": "call-1",
+        "name": "timer",
+        "arguments": '{"seconds":5}',
+        "response_id": "response-tool",
+    })
+
+    assert bridge.conversation.sessions[-1]["tools"][0]["function"]["name"] == "timer"
+    assert "tool_choice" not in bridge.conversation.sessions[-1]
+    assert bridge.conversation.items[-1]["type"] == "function_call_output"
+    assert json.loads(bridge.conversation.items[-1]["output"])["status"] == "scheduled"
+    assert [entry["type"] for entry in harness.journal.entries()] == ["tool_call", "tool_result"]
+    assert bridge.conversation.responses[-1]["instructions"].startswith("Continue the current user turn")
+
+
+def test_qwen_output_item_tool_event_executes_declared_tool(tmp_path):
+    harness = harness_at(tmp_path / "qwen-tool.jsonl")
+    bridge = make_bridge(harness)
+    bridge.set_tools([{
+        "name": "timer",
+        "description": "Set a timer",
+        "requires_confirmation": False,
+        "arguments": {"type": "object", "properties": {"seconds": {"type": "integer"}}},
+    }], lambda name, arguments, confirmed: {"status": "scheduled", "seconds": arguments["seconds"]})
+
+    assert bridge._handle_output_item_event({
+        "type": "response.output_item.done",
+        "response_id": "response-tool",
+        "item": {
+            "type": "function_call",
+            "call_id": "call-qwen",
+            "name": "timer",
+            "arguments": '{"seconds":7}',
+        },
+    }) is True
+
+    assert json.loads(bridge.conversation.items[-1]["output"])["seconds"] == 7
+    assert [entry["type"] for entry in harness.journal.entries()] == ["tool_call", "tool_result"]
+
+
+def test_confirmed_tool_waits_for_explicit_approval(tmp_path):
+    harness = harness_at(tmp_path / "confirm.jsonl")
+    bridge = make_bridge(harness)
+    emitted = []
+    bridge._schedule = emitted.append
+
+    def handler(name, arguments, confirmed):
+        if not confirmed:
+            return {"status": "confirmation_required", "tool": name, "arguments": arguments}
+        return {"status": "accepted"}
+
+    bridge.set_tools([{
+        "name": "human_help",
+        "description": "Ask a helper",
+        "requires_confirmation": True,
+        "arguments": {"type": "object", "properties": {}},
+    }], handler)
+    bridge._handle_tool_call_event({
+        "call_id": "call-confirm", "name": "human_help", "arguments": "{}",
+    })
+
+    assert emitted[-1]["type"] == "tool_confirmation_required"
+    assert bridge.conversation.items == []
+    assert bridge.confirm_tool("call-confirm", True)
+    assert bridge.conversation.items[-1]["type"] == "function_call_output"
+    assert json.loads(bridge.conversation.items[-1]["output"])["status"] == "accepted"
+
+
+def test_recovered_pending_tool_uses_data_item_when_provider_call_is_gone(tmp_path):
+    harness = harness_at(tmp_path / "recovered-tool.jsonl")
+    harness.record_tool_call("call-old", "human_help", {})
+    harness.journal.append("tool_confirmation", {
+        "callId": "call-old", "name": "human_help", "arguments": {}, "status": "pending",
+    })
+    bridge = make_bridge(harness)
+    bridge.set_context_harness(harness)
+    bridge.set_tools([{
+        "name": "human_help", "description": "Ask", "requires_confirmation": True,
+        "arguments": {"type": "object", "properties": {}},
+    }], lambda name, arguments, confirmed: {"status": "accepted"})
+
+    assert bridge.confirm_tool("call-old", True)
+    assert bridge.conversation.items[-1]["role"] == "user"
+    assert "recovered_tool_result" in bridge.conversation.items[-1]["content"][0]["text"]
+
+
+def test_cancelled_response_commits_partial_assistant_transcript(tmp_path):
+    harness = harness_at(tmp_path / "interrupted.jsonl")
+    bridge = make_bridge(harness)
+    bridge.request_response("answer", purpose="conversation")
+    bridge._response_created({"response": {"id": "response-cut"}})
+    bridge.route_provider_output("response.audio_transcript.delta", {
+        "response_id": "response-cut", "delta": "partly spoken",
+    })
+
+    bridge._response_finished({"type": "response.cancelled", "response": {"id": "response-cut"}})
+
+    entries = harness.journal.entries()
+    assert entries[-2]["type"] == "message"
+    assert entries[-2]["status"] == "interrupted"
+    assert entries[-2]["message"]["content"] == "partly spoken"
+    assert entries[-1]["type"] == "interruption"
+
+
+def test_local_cancel_marks_provider_done_as_interrupted(tmp_path):
+    harness = harness_at(tmp_path / "local-cancel-done.jsonl")
+    bridge = make_bridge(harness)
+    bridge.request_response("answer", purpose="conversation")
+    bridge._response_created({"response": {"id": "response-local-cut"}})
+    bridge.route_provider_output("response.audio_transcript.delta", {
+        "response_id": "response-local-cut", "delta": "audible prefix",
+    })
+
+    assert bridge.cancel_response(reason="semantic-stop-control")
+    bridge._response_finished({"type": "response.done", "response": {"id": "response-local-cut"}})
+
+    entries = harness.journal.entries()
+    assert entries[-2]["type"] == "message"
+    assert entries[-2]["status"] == "interrupted"
+    assert entries[-2]["message"]["content"] == "audible prefix"
+    assert entries[-1]["type"] == "interruption"
+    assert entries[-1]["reason"] == "local-cancel:response.done"
+
+
+def test_response_done_usage_is_normalized_and_persisted(tmp_path):
+    harness = harness_at(tmp_path / "usage.jsonl")
+    bridge = make_bridge(harness)
+    bridge.request_response("answer", purpose="conversation")
+    bridge._response_created({"response": {"id": "response-usage"}})
+
+    bridge._response_finished({
+        "type": "response.done",
+        "response": {
+            "id": "response-usage",
+            "model": "qwen-test",
+            "usage": {"input_tokens": 1500, "output_tokens": 25, "total_tokens": 1525},
+        },
+    })
+
+    usage = harness.journal.entries()[-1]
+    assert usage["type"] == "provider_usage"
+    assert usage["usage"] == {"inputTokens": 1500, "outputTokens": 25, "totalTokens": 1525}
+    assert usage["model"] == "qwen-test"
+
+
+def test_compaction_change_marks_provider_projection_stale(tmp_path):
+    harness = harness_at(tmp_path / "projection.jsonl")
+    harness.record_user("keep", source="test", turn_id="one")
+    checkpoint = harness.compact(reason="provider-usage-threshold", force=True)
+    built = harness.build([])
+    bridge = make_bridge(harness)
+    scheduled = []
+    bridge._schedule_reconnect = scheduled.append
+
+    bridge.apply_context_projection("policy", built["manifest"])
+
+    assert bridge.connected is False
+    assert scheduled == ["context-compacted"]
+    assert built["manifest"]["latestCompactionId"] == checkpoint["id"]
+
+
+def test_provider_reconnect_commits_active_partial_transcript(tmp_path):
+    harness = harness_at(tmp_path / "reconnect-fragment.jsonl")
+    bridge = make_bridge(harness)
+    bridge.request_response("answer", purpose="conversation")
+    bridge._response_created({"response": {"id": "response-reconnect"}})
+    bridge.note_assistant_transcript("audible prefix", response_id="response-reconnect")
+
+    bridge._persist_active_interruptions("provider-reconnect:test")
+
+    entries = harness.journal.entries()
+    assert entries[-2]["status"] == "interrupted"
+    assert entries[-2]["message"]["content"] == "audible prefix"
+    assert entries[-1]["reason"] == "provider-reconnect:test"

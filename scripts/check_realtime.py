@@ -7,7 +7,9 @@ import asyncio
 import base64
 import io
 import json
+import os
 from collections import Counter
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import aiohttp
 from PIL import Image
@@ -18,11 +20,55 @@ async def check(
     exercise_seconds: float = 0,
     stress_controls: bool = False,
     stress_media_gap: bool = False,
+    username: str = "realtime-check",
+    password: str = "realtime-check-pass",
+    transcript: str = "",
+    expected_skill: str = "",
+    case_label: str = "realtime-provider-check",
+    result_timeout: float = 30,
+    interrupt_transcript: str = "",
+    interrupt_delay: float = 0.8,
 ) -> bool:
     events = []
     errors = []
     event_counts: Counter[str] = Counter()
-    async with aiohttp.ClientSession() as session:
+    parts = urlsplit(url)
+    auth_scheme = "https" if parts.scheme in {"https", "wss"} else "http"
+    auth_root = f"{auth_scheme}://{parts.netloc}"
+    async with aiohttp.ClientSession(cookie_jar=aiohttp.CookieJar(unsafe=True)) as session:
+        login = await session.post(
+            auth_root + "/api/auth/login",
+            json={"username": username, "password": password},
+        )
+        if login.status == 400:
+            login = await session.post(
+                auth_root + "/api/auth/register",
+                json={"username": username, "password": password},
+            )
+        if login.status != 200:
+            detail = (await login.text())[:500]
+            print(json.dumps({"connected": False, "authStatus": login.status, "errors": [detail]}))
+            return False
+        context_session_id = ""
+        if transcript:
+            created = await session.post(
+                auth_root + "/api/sessions",
+                json={"label": case_label},
+            )
+            if created.status != 201:
+                detail = (await created.text())[:500]
+                print(json.dumps({"connected": False, "sessionStatus": created.status, "errors": [detail]}))
+                return False
+            context_session_id = str((await created.json())["session"]["id"])
+            ws_parts = urlsplit(url)
+            query = dict(parse_qsl(ws_parts.query, keep_blank_values=True))
+            query["session"] = context_session_id
+            url = urlunsplit((
+                ws_parts.scheme, ws_parts.netloc, ws_parts.path,
+                urlencode(query), ws_parts.fragment,
+            ))
+        latest_state = {}
+        assistant_transcript = ""
         async with session.ws_connect(url, timeout=45) as websocket:
             for _ in range(6):
                 message = await asyncio.wait_for(websocket.receive(), 45)
@@ -34,8 +80,43 @@ async def check(
                 event_counts[payload.get("type", "unknown")] += 1
                 if payload.get("type") == "error":
                     errors.append(str(payload.get("message", ""))[:500])
+                if payload.get("type") == "state":
+                    latest_state = payload.get("state") or {}
                 if payload.get("type") in {"ready", "error"}:
                     break
+            if "ready" in events and transcript:
+                await websocket.send_json({"type": "control", "transcript": transcript})
+                loop = asyncio.get_running_loop()
+                deadline = loop.time() + result_timeout
+                interrupt_at = loop.time() + interrupt_delay
+                interrupt_sent = False
+                while loop.time() < deadline:
+                    if interrupt_transcript and not interrupt_sent and loop.time() >= interrupt_at:
+                        await websocket.send_json({"type": "control", "transcript": interrupt_transcript})
+                        interrupt_sent = True
+                    try:
+                        message = await asyncio.wait_for(websocket.receive(), 0.2)
+                    except asyncio.TimeoutError:
+                        continue
+                    if message.type != aiohttp.WSMsgType.TEXT:
+                        continue
+                    payload = json.loads(message.data)
+                    event_type = payload.get("type", "unknown")
+                    event_counts[event_type] += 1
+                    if event_type == "error":
+                        errors.append(str(payload.get("message", ""))[:500])
+                        break
+                    if event_type == "assistant_transcript":
+                        assistant_transcript = (
+                            str(payload.get("text", ""))
+                            if payload.get("done")
+                            else assistant_transcript + str(payload.get("text", ""))
+                        )
+                    if event_type == "state":
+                        latest_state = payload.get("state") or {}
+                        active_name = (latest_state.get("activeSkill") or {}).get("name")
+                        if expected_skill and active_name == expected_skill:
+                            break
             if "ready" in events and exercise_seconds > 0:
                 await websocket.send_json({
                     "type": "media_config",
@@ -95,15 +176,29 @@ async def check(
                     if event_type == "error":
                         errors.append(str(payload.get("message", ""))[:500])
     connected = "ready" in events
+    active_skill = (latest_state.get("activeSkill") or {}).get("name")
+    routing = latest_state.get("intentRouting") or {}
     print(json.dumps({
         "events": events,
         "eventCounts": event_counts,
         "connected": connected,
         "stressControls": stress_controls,
         "stressMediaGap": stress_media_gap,
+        "username": username,
+        "contextSessionId": context_session_id or None,
+        "transcript": transcript or None,
+        "activeSkill": active_skill,
+        "intentRouting": {
+            "method": routing.get("method"),
+            "status": routing.get("status"),
+            "selectedSkill": routing.get("selectedSkill"),
+        },
+        "assistantTranscript": assistant_transcript or None,
+        "interruptTranscript": interrupt_transcript or None,
         "errors": errors,
     }, ensure_ascii=False))
-    return connected and not errors
+    skill_ok = not expected_skill or active_skill == expected_skill
+    return connected and not errors and skill_ok
 
 
 def main() -> None:
@@ -112,9 +207,23 @@ def main() -> None:
     parser.add_argument("--exercise-seconds", type=float, default=0)
     parser.add_argument("--stress-controls", action="store_true")
     parser.add_argument("--stress-media-gap", action="store_true")
+    parser.add_argument("--username", default="realtime-check")
+    parser.add_argument("--transcript", default="")
+    parser.add_argument("--expect-skill", default="")
+    parser.add_argument("--case-label", default="realtime-provider-check")
+    parser.add_argument("--result-timeout", type=float, default=30)
+    parser.add_argument("--interrupt-transcript", default="")
+    parser.add_argument("--interrupt-delay", type=float, default=0.8)
+    parser.add_argument(
+        "--password",
+        default=os.getenv("EGOASSIST_CHECK_PASSWORD", "realtime-check-pass"),
+    )
     args = parser.parse_args()
     raise SystemExit(0 if asyncio.run(check(
         args.url, args.exercise_seconds, args.stress_controls, args.stress_media_gap,
+        args.username, args.password, args.transcript, args.expect_skill,
+        args.case_label, args.result_timeout, args.interrupt_transcript,
+        args.interrupt_delay,
     )) else 1)
 
 

@@ -1,7 +1,11 @@
 import asyncio
+import json
 from pathlib import Path
 
+import pytest
+from aiohttp import ClientSession, CookieJar
 from aiohttp.test_utils import TestClient, TestServer
+from aiohttp.client_exceptions import WSServerHandshakeError
 
 from egoassist import BUILTIN_SKILLS_ROOT
 from egoassist.realtime import PreferenceMemory
@@ -10,6 +14,47 @@ from run_egoassist import create_app
 
 
 ROOT = Path(__file__).parents[1]
+
+
+def patch_semantic_router(monkeypatch):
+    async def classify(_self, text, catalog):
+        stop = text in {"您别说了。", "请停止当前语音输出"}
+        selected_skill = (
+            "kitchen-coach" if text == "cook fruit salad"
+            else "assembly-coach" if text == "assemble flat pack stool"
+            else None
+        )
+        return {
+            "method": "semantic-turn-router-v2",
+            "model": "test-router",
+            "status": "classified",
+            "speechControl": "stop-speaking" if stop else None,
+            "taskControl": "repeat" if text == "再说一遍" else None,
+            "preferenceIntent": None,
+            "memoryQuery": None,
+            "selectedSkill": selected_skill,
+            "skillStatus": "matched" if selected_skill else "no-match",
+            "rawOutput": json.dumps({
+                "speechControl": "stop-speaking" if stop else "none",
+                "taskControl": "repeat" if text == "再说一遍" else "none",
+                "preferenceIntent": "none", "memoryQuery": "none",
+                "skill": selected_skill or "none",
+            }),
+            "latencyMs": 0.1,
+            "policyVersion": "semantic-turn-router-v2",
+            "claimBoundary": "test classifier",
+        }
+
+    monkeypatch.setattr(run_egoassist.SemanticTurnRouter, "classify", classify)
+
+
+async def register_client(client, username="researcher"):
+    response = await client.post(
+        "/api/auth/register",
+        json={"username": username, "password": "baseline-pass-123"},
+    )
+    assert response.status == 200
+    return (await response.json())["user"]
 
 
 def test_runtime_root_prefers_caller_env_and_falls_back_to_source(tmp_path, monkeypatch):
@@ -26,6 +71,23 @@ def test_runtime_root_prefers_caller_env_and_falls_back_to_source(tmp_path, monk
     assert run_egoassist.runtime_root() == working_root
 
 
+def test_research_voice_api_rejects_unknown_semantic_labels(tmp_path):
+    async def scenario():
+        app = create_app(
+            str(BUILTIN_SKILLS_ROOT), "kitchen-coach",
+            str(tmp_path / "memory.json"), "test-realtime", "Ethan",
+        )
+        async with TestClient(TestServer(app)) as client:
+            await register_client(client)
+            response = await client.post("/api/voice", json={
+                "transcript": "evidence", "taskControl": "invented-action",
+            })
+            assert response.status == 400
+            assert "invalid taskControl" in (await response.json())["error"]
+
+    asyncio.run(scenario())
+
+
 def test_api_switches_catalog_tasks_and_isolates_custom_tasks(tmp_path):
     async def scenario():
         app = create_app(
@@ -33,6 +95,7 @@ def test_api_switches_catalog_tasks_and_isolates_custom_tasks(tmp_path):
             str(tmp_path / "memory.json"), "test-realtime", "Ethan",
         )
         async with TestClient(TestServer(app)) as client:
+            await register_client(client)
             initial = await (await client.get("/api/state")).json()
             assert {item["id"] for item in initial["tasks"]} == {"tomato-eggs", "oatmeal", "fruit-salad"}
             assert initial["memoryMechanism"]["policy"] == "explicit-confirmation"
@@ -69,6 +132,7 @@ def test_generic_start_routes_skill_then_task_without_default_recipe(tmp_path):
             str(tmp_path / "memory.json"), "test-realtime", "Ethan",
         )
         async with TestClient(TestServer(app)) as client:
+            await register_client(client)
             initial = await (await client.get("/api/state")).json()
             assert initial["activeSkill"] is None
             assert initial["task"] is None
@@ -99,6 +163,130 @@ def test_generic_start_routes_skill_then_task_without_default_recipe(tmp_path):
     asyncio.run(scenario())
 
 
+def test_manifest_evidence_switches_active_skill_and_task_but_abstains_without_evidence(tmp_path):
+    async def scenario():
+        app = create_app(
+            str(BUILTIN_SKILLS_ROOT), "assembly-coach",
+            str(tmp_path / "memory.json"), "test-realtime", "Ethan",
+        )
+        async with TestClient(TestServer(app)) as client:
+            await register_client(client)
+            await client.post("/api/tasks/select", json={"task": "flat-pack-stool"})
+
+            switched_skill = await (await client.post(
+                "/api/voice", json={"transcript": "我想做菜，但还没想好做什么"},
+            )).json()
+            assert switched_skill["activeSkill"]["name"] == "kitchen-coach"
+            assert switched_skill["task"] is None
+
+            fruit = await (await client.post(
+                "/api/voice", json={"transcript": "请指导我做水果沙拉"},
+            )).json()
+            assert fruit["task"]["task"]["id"] == "fruit-salad"
+
+            tomato = await (await client.post(
+                "/api/voice", json={"transcript": "番茄炒蛋"},
+            )).json()
+            assert tomato["task"]["task"]["id"] == "tomato-eggs"
+
+            abstained = await (await client.post(
+                "/api/voice", json={"transcript": "今天天气还不错"},
+            )).json()
+            assert abstained["task"]["task"]["id"] == "tomato-eggs"
+            assert abstained["intentRouting"]["status"] == "no-match"
+
+    asyncio.run(scenario())
+
+
+def test_authenticated_users_have_isolated_runtime_preferences_episodes_and_session_lists(tmp_path):
+    async def scenario():
+        app = create_app(
+            str(BUILTIN_SKILLS_ROOT), None,
+            str(tmp_path / "memory.json"), "test-realtime", "Ethan",
+        )
+        server = TestServer(app)
+        await server.start_server()
+        try:
+            async with ClientSession(cookie_jar=CookieJar(unsafe=True)) as alice_client, \
+                    ClientSession(cookie_jar=CookieJar(unsafe=True)) as bob_client:
+                base = str(server.make_url("/"))[:-1]
+
+                anonymous = await alice_client.get(base + "/api/state")
+                assert anonymous.status == 401
+                alice = (await (await alice_client.post(
+                    base + "/api/auth/register",
+                    json={"username": "alice", "password": "alice-password"},
+                )).json())["user"]
+                bob = (await (await bob_client.post(
+                    base + "/api/auth/register",
+                    json={"username": "bob-user", "password": "bob-password"},
+                )).json())["user"]
+                assert alice["id"] != bob["id"]
+
+                alice_state = await (await alice_client.post(
+                    base + "/api/voice", json={"transcript": "请指导我做水果沙拉"},
+                )).json()
+                assert alice_state["activeSkill"]["name"] == "kitchen-coach"
+                await alice_client.post(
+                    base + "/api/voice", json={
+                        "transcript": "以后每次到这里请提醒我慢一点",
+                        "preferenceIntent": "propose-durable",
+                    },
+                )
+                await alice_client.post(base + "/api/candidate", json={"accepted": True})
+                await alice_client.post(base + "/api/voice", json={"transcript": "记住一段数字"})
+                await alice_client.post(base + "/api/voice", json={"transcript": "四五六七八九二"})
+
+                bob_state = await (await bob_client.get(base + "/api/state")).json()
+                assert bob_state["activeSkill"] is None
+                assert bob_state["memory"]["records"] == []
+                bob_recall = await (await bob_client.post(
+                    base + "/api/voice", json={"transcript": "我刚才让你记住的数字是什么来着"},
+                )).json()
+                evidence = bob_recall["episodicMemory"]["retrieval"]["injection"].get("evidence", [])
+                assert all(item.get("summary") != "四五六七八九二" for item in evidence)
+
+                alice_session = (await (await alice_client.post(base + "/api/sessions")).json())["session"]["id"]
+                reset_for_case = await (await alice_client.get(base + "/api/state")).json()
+                assert reset_for_case["activeSkill"] is None
+                assert reset_for_case["task"] is None
+                bob_session = (await (await bob_client.post(base + "/api/sessions")).json())["session"]["id"]
+                alice_sessions = (await (await alice_client.get(base + "/api/sessions")).json())["sessions"]
+                bob_sessions = (await (await bob_client.get(base + "/api/sessions")).json())["sessions"]
+                assert {item["id"] for item in alice_sessions} == {alice_session}
+                assert {item["id"] for item in bob_sessions} == {bob_session}
+        finally:
+            await server.close()
+
+    asyncio.run(scenario())
+
+
+def test_generic_episodic_recall_is_not_elevated_into_system_context(tmp_path):
+    async def scenario():
+        app = create_app(
+            str(BUILTIN_SKILLS_ROOT), None,
+            str(tmp_path / "memory.json"), "test-realtime", "Ethan",
+        )
+        async with TestClient(TestServer(app)) as client:
+            await register_client(client)
+            await client.post("/api/voice", json={"transcript": "记住一段数字"})
+            await client.post("/api/voice", json={"transcript": "四五六七八九二"})
+            recalled = await (await client.post(
+                "/api/voice", json={
+                    "transcript": "我刚才让你记住的数字是什么来着",
+                    "memoryQuery": "referential",
+                },
+            )).json()
+
+            injection = recalled["episodicMemory"]["retrieval"]["injection"]
+            assert injection["status"] == "injected"
+            assert any(item["summary"] == "四五六七八九二" for item in injection["evidence"])
+            assert "四五六七八九二" not in recalled["promptContext"]["text"]
+            assert "episode=" not in recalled["promptContext"]["text"]
+
+    asyncio.run(scenario())
+
+
 def test_voice_repeat_is_json_and_only_explicit_durable_preferences_create_memory(tmp_path):
     async def scenario():
         app = create_app(
@@ -106,14 +294,20 @@ def test_voice_repeat_is_json_and_only_explicit_durable_preferences_create_memor
             str(tmp_path / "memory.json"), "test-realtime", "Ethan",
         )
         async with TestClient(TestServer(app)) as client:
-            repeated_response = await client.post("/api/voice", json={"transcript": "再说一遍"})
+            await register_client(client)
+            repeated_response = await client.post("/api/voice", json={
+                "transcript": "再说一遍", "taskControl": "repeat",
+            })
             assert repeated_response.status == 200
             repeated = await repeated_response.json()
             assert repeated["task"]["decision"]["reason"] == "用户请求重复"
             assert repeated["memory"]["candidate"] is None
 
             preference = await (await client.post(
-                "/api/voice", json={"transcript": "以后每次到这里请提醒我慢一点"},
+                "/api/voice", json={
+                    "transcript": "以后每次到这里请提醒我慢一点",
+                    "preferenceIntent": "propose-durable",
+                },
             )).json()
             assert preference["memory"]["candidate"]["status"] == "pending"
             assert preference["memory"]["candidate"]["prompt"] == "以后每次到这里请提醒我慢一点"
@@ -135,7 +329,9 @@ def test_quick_control_uses_the_realtime_websocket(tmp_path, monkeypatch):
     class FakeBridge:
         def __init__(self, api_key, model, voice, instructions, emit, on_transcript):
             self.emit = emit
+            self.on_transcript = on_transcript
             self.requests = []
+            self.cancellations = []
             instances.append(self)
 
         async def connect(self):
@@ -143,6 +339,117 @@ def test_quick_control_uses_the_realtime_websocket(tmp_path, monkeypatch):
 
         def update_context(self, instructions):
             self.instructions = instructions
+
+        def request_response(self, instructions, priority=50, interrupt=False):
+            self.requests.append((instructions, priority, interrupt))
+
+        def append_audio(self, value):
+            return False
+
+        def append_video(self, value):
+            return False
+
+        def cancel_response(self, **kwargs):
+            self.cancellations.append(kwargs)
+            return False
+
+        async def close(self):
+            return None
+
+    monkeypatch.setenv("QWEN_API_KEY", "test-key")
+    monkeypatch.setattr("egoassist.realtime.omni.OmniBrowserBridge", FakeBridge)
+    patch_semantic_router(monkeypatch)
+
+    async def scenario():
+        memory_path = tmp_path / "memory.json"
+        app = create_app(
+            str(BUILTIN_SKILLS_ROOT), "kitchen-coach",
+            str(memory_path), "test-realtime", "Ethan",
+        )
+        async with TestClient(TestServer(app)) as client:
+            user = await register_client(client)
+            memory = PreferenceMemory(tmp_path / "users" / user["id"] / "preferences.json")
+            memory.propose_preference(
+                task="tomato-eggs", step="prepare", prompt="开始前提醒我把动作说慢一点。",
+                evidence="用户明确确认的语音节奏偏好",
+            )
+            memory.resolve_candidate(True)
+            ws = await client.ws_connect("/ws/realtime")
+            ready = await ws.receive_json()
+            assert ready["type"] == "ready"
+            assert ready["contextSessionId"]
+            initial_state = await ws.receive_json()
+            assert initial_state["type"] == "state"
+            assert initial_state["state"]["memoryMechanism"]["impact"]["status"] == "reused"
+            assert instances[0].requests[0][1] == 80
+            assert "low-trust data item" in instances[0].requests[0][0]
+            assert "开始前提醒我把动作说慢一点" not in instances[0].requests[0][0]
+            instances[0].requests.clear()
+            await ws.send_json({"type": "control", "transcript": "再说一遍"})
+            messages = [await ws.receive_json() for _ in range(3)]
+            assert [item["type"] for item in messages] == ["user_transcript", "state", "interrupted"]
+            assert messages[1]["state"]["memory"]["candidate"] is None
+            assert instances[0].requests[0][1:] == (100, True)
+            assert "上一条实际说出的指导" in instances[0].requests[0][0]
+
+            instances[0].requests.clear()
+            await ws.send_json({"type": "control", "transcript": "请停止当前语音输出"})
+            explicit_stop = [await ws.receive_json() for _ in range(3)]
+            assert [item["type"] for item in explicit_stop] == ["user_transcript", "state", "interrupted"]
+            assert explicit_stop[1]["state"]["task"]["paused"] is False
+            assert explicit_stop[1]["state"]["intentRouting"]["method"] == "semantic-turn-router-v2"
+            assert explicit_stop[1]["state"]["intentRouting"]["status"] == "suppressed-control"
+            assert instances[0].requests == []
+            assert instances[0].cancellations[-1]["reason"] == "stop-speaking-control"
+
+            instances[0].requests.clear()
+            instances[0].on_transcript("您别说了。")
+            stopped = await ws.receive_json()
+            assert stopped["type"] == "state"
+            assert instances[0].requests == []
+            assert instances[0].cancellations[-1] == {
+                "drop_queued_below": 101,
+                "reason": "stop-speaking-transcript",
+            }
+            await ws.close()
+
+            journal = tmp_path / "users" / user["id"] / "sessions" / f"{ready['contextSessionId']}.jsonl"
+            entries = [json.loads(line) for line in journal.read_text(encoding="utf-8").splitlines()]
+            decision = next(
+                item for item in reversed(entries)
+                if item.get("type") == "control_decision"
+            )
+            assert decision["decision"]["speechControl"] == "stop-speaking"
+            assert decision["decision"]["method"] == "semantic-turn-router-v2"
+
+    asyncio.run(scenario())
+
+
+def test_websocket_sessions_isolate_runtime_memory_and_resume_from_journal(tmp_path, monkeypatch):
+    instances = []
+
+    class FakeBridge:
+        def __init__(self, api_key, model, voice, instructions, emit, on_transcript):
+            self.emit = emit
+            self.requests = []
+            self.instructions = instructions
+            instances.append(self)
+
+        async def connect(self):
+            await self.emit({"type": "ready"})
+
+        def set_context_harness(self, harness):
+            self.harness = harness
+
+        def set_tools(self, declarations, handler):
+            self.declarations = declarations
+            self.tool_handler = handler
+
+        def update_context(self, instructions):
+            self.instructions = instructions
+
+        def inject_context_data(self, label, value):
+            return True
 
         def request_response(self, instructions, priority=50, interrupt=False):
             self.requests.append((instructions, priority, interrupt))
@@ -161,34 +468,79 @@ def test_quick_control_uses_the_realtime_websocket(tmp_path, monkeypatch):
 
     monkeypatch.setenv("QWEN_API_KEY", "test-key")
     monkeypatch.setattr("egoassist.realtime.omni.OmniBrowserBridge", FakeBridge)
+    patch_semantic_router(monkeypatch)
+
+    async def initial_messages(ws):
+        ready = await ws.receive_json()
+        state = await ws.receive_json()
+        assert ready["contextSessionId"]
+        return ready, state["state"]
+
+    async def control(ws, transcript):
+        await ws.send_json({"type": "control", "transcript": transcript})
+        messages = [await ws.receive_json() for _ in range(3)]
+        assert [item["type"] for item in messages] == ["user_transcript", "state", "interrupted"]
+        return messages[1]["state"]
 
     async def scenario():
         memory_path = tmp_path / "memory.json"
-        memory = PreferenceMemory(memory_path)
-        memory.propose_preference(
-            task="tomato-eggs", step="prepare", prompt="开始前提醒我把动作说慢一点。",
-            evidence="用户明确确认的语音节奏偏好",
-        )
-        memory.resolve_candidate(True)
         app = create_app(
-            str(BUILTIN_SKILLS_ROOT), "kitchen-coach",
+            str(BUILTIN_SKILLS_ROOT), None,
             str(memory_path), "test-realtime", "Ethan",
         )
         async with TestClient(TestServer(app)) as client:
-            ws = await client.ws_connect("/ws/realtime")
-            assert (await ws.receive_json())["type"] == "ready"
-            initial_state = await ws.receive_json()
-            assert initial_state["type"] == "state"
-            assert initial_state["state"]["memoryMechanism"]["impact"]["status"] == "reused"
-            assert instances[0].requests[0][1] == 80
-            assert "用户明确确认的长期记忆" in instances[0].requests[0][0]
-            instances[0].requests.clear()
-            await ws.send_json({"type": "control", "transcript": "再说一遍"})
-            messages = [await ws.receive_json() for _ in range(3)]
-            assert [item["type"] for item in messages] == ["user_transcript", "state", "interrupted"]
-            assert messages[1]["state"]["memory"]["candidate"] is None
-            assert instances[0].requests[0][1:] == (100, True)
-            assert "上一条实际说出的指导" in instances[0].requests[0][0]
-            await ws.close()
+            user = await register_client(client)
+            first = await client.ws_connect("/ws/realtime?session=first-session")
+            second = await client.ws_connect("/ws/realtime?session=second-session")
+            await initial_messages(first)
+            await initial_messages(second)
+            assert "<available_skills>" in instances[0].instructions
+            assert "kitchen-coach" in instances[0].instructions
+            assert "assembly-coach" in instances[0].instructions
+            assert "Never silently substitute the default recipe" not in instances[0].instructions
+            assert instances[0].declarations == []
+            with pytest.raises(ValueError, match="not available"):
+                instances[0].tool_handler(
+                    "activate_skill",
+                    {"skill": "kitchen-coach", "evidence": "做宫保鸡丁"},
+                    False,
+                )
+            with pytest.raises(WSServerHandshakeError) as duplicate_error:
+                await client.ws_connect("/ws/realtime?session=first-session")
+            assert duplicate_error.value.status == 409
+
+            first_state = await control(first, "cook fruit salad")
+            second_state = await control(second, "assemble flat pack stool")
+            assert {item["name"] for item in instances[0].declarations} == {
+                "set_timer", "request_human_help",
+            }
+            assert "activate_skill" not in {item["name"] for item in instances[0].declarations}
+            assert first_state["activeSkill"]["name"] == "kitchen-coach"
+            assert first_state["task"]["task"]["id"] == "fruit-salad"
+            assert second_state["activeSkill"]["name"] == "assembly-coach"
+            assert second_state["task"]["task"]["id"] == "flat-pack-stool"
+
+            await first.send_json({"type": "refresh"})
+            refreshed = (await first.receive_json())["state"]
+            assert refreshed["task"]["task"]["id"] == "fruit-salad"
+            recent = json.dumps(refreshed["episodicMemory"]["recent"], ensure_ascii=False)
+            assert "cook fruit salad" in recent
+            assert "assemble flat pack stool" not in recent
+
+            await first.close()
+            await second.close()
+
+            resumed = await client.ws_connect("/ws/realtime?session=first-session")
+            ready, resumed_state = await initial_messages(resumed)
+            assert ready["contextSessionId"] == "first-session"
+            assert resumed_state["activeSkill"]["name"] == "kitchen-coach"
+            assert resumed_state["task"]["task"]["id"] == "fruit-salad"
+            await resumed.close()
+
+        sessions = tmp_path / "users" / user["id"] / "sessions"
+        first_log = (sessions / "first-session.jsonl").read_text(encoding="utf-8")
+        second_log = (sessions / "second-session.jsonl").read_text(encoding="utf-8")
+        assert "cook fruit salad" in first_log and "assemble flat pack stool" not in first_log
+        assert "assemble flat pack stool" in second_log and "cook fruit salad" not in second_log
 
     asyncio.run(scenario())
