@@ -7,6 +7,7 @@ let connectingPromise = null;
 let selectedEventId = null, pipelineDetails = [];
 let currentUser = null, selectedSessionId = null, authMode = "login";
 let sessionCatalog = [], memoryPolicySaving = false;
+let mirrorCamera = localStorage.getItem("egoassist.camera.mirror") !== "false";
 const playbackSources = new Set();
 
 async function request(path, options = {}) {
@@ -323,7 +324,7 @@ async function ensureMedia() {
     audio: {channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true}
   });
   $("#video").srcObject = stream;
-  $("#video").style.transform = "scaleX(-1)";
+  applyCameraOrientation();
   $("#cameraEmpty").hidden = true;
   $("#cameraState").textContent = "摄像头与麦克风在线";
   $("#cameraButton").textContent = "关闭设备";
@@ -378,9 +379,20 @@ function sendVideoFrame() {
   const video = $("#video"), canvas = $("#canvas"), scale = Math.min(1, 768 / video.videoWidth);
   canvas.width = Math.floor(video.videoWidth * scale);
   canvas.height = Math.floor(video.videoHeight * scale);
-  canvas.getContext("2d").drawImage(video, 0, 0, canvas.width, canvas.height);
+  const context = canvas.getContext("2d");
+  context.save();
+  if (mirrorCamera) {
+    context.translate(canvas.width, 0);
+    context.scale(-1, 1);
+  }
+  context.drawImage(video, 0, 0, canvas.width, canvas.height);
+  context.restore();
   const image = canvas.toDataURL("image/jpeg", 0.72).split(",", 2)[1];
   socket.send(JSON.stringify({type: "video", image}));
+}
+
+function applyCameraOrientation() {
+  $("#video").classList.toggle("mirrored", mirrorCamera);
 }
 
 function sendMediaConfiguration(ws) {
@@ -389,6 +401,11 @@ function sendMediaConfiguration(ws) {
   ws.send(JSON.stringify({
     type: "media_config",
     playbackCapture: false,
+    video: {
+      mirrored: mirrorCamera,
+      previewMatchesModelInput: true,
+      coordinateConvention: mirrorCamera ? "horizontally-mirrored" : "camera-native"
+    },
     audio: {
       deviceId: settings.deviceId ? "present" : "unreported",
       channelCount: settings.channelCount,
@@ -543,6 +560,14 @@ async function switchRuntime(button, path, payload) {
 $("#realtimeButton").onclick = async () => { try { socket ? disconnectRealtime() : await connectRealtime(); } catch (error) { alert("启动失败：" + error.message); disconnectRealtime(); } };
 $("#cameraButton").onclick = async () => { try { stream ? stopMedia() : await ensureMedia(); } catch (error) { alert("设备访问失败：" + error.message); } };
 $("#videoFps").onchange = () => { if (!socket) return; clearInterval(videoTimer); videoTimer = setInterval(sendVideoFrame, 1000 / Number($("#videoFps").value)); };
+$("#mirrorCamera").checked = mirrorCamera;
+applyCameraOrientation();
+$("#mirrorCamera").onchange = event => {
+  mirrorCamera = event.currentTarget.checked;
+  localStorage.setItem("egoassist.camera.mirror", String(mirrorCamera));
+  applyCameraOrientation();
+  if (socket?.readyState === WebSocket.OPEN) sendMediaConfiguration(socket);
+};
 $$("[data-say]").forEach(button => button.onclick = () => sendControl(button));
 $("#reset").onclick = event => switchRuntime(event.currentTarget, "/api/task/reset", {});
 $("#skillSelect").onchange = event => switchRuntime(event.currentTarget, "/api/skills/activate", {skill: event.currentTarget.value});

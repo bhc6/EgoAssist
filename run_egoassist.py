@@ -1527,7 +1527,7 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
         session_runtime = session_runtime_from(journal, seed_runtime)
         session_routing = registry.route("")
         session_episode_injection = {"status": "no-evidence", "query": "", "episodeIds": [], "evidence": []}
-        session_media_configuration: dict = {}
+        session_media_configuration: dict = {"audio": {}, "video": {}}
         semantic_router = SemanticTurnRouter(api_key)
         initial_context = harness.build(harness_layers(session_runtime))
 
@@ -1746,11 +1746,38 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                         interval = session_runtime.skill.manifest.get("proactive_check_seconds", 4) if session_runtime.skill else 4
                         bridge.maybe_check_proactively(float(interval))
                 elif kind == "media_config":
+                    raw_video_configuration = payload.get("video", {})
+                    video_configuration = (
+                        raw_video_configuration
+                        if isinstance(raw_video_configuration, dict)
+                        else {}
+                    )
+                    raw_audio_configuration = payload.get("audio", {})
+                    audio_configuration = (
+                        raw_audio_configuration
+                        if isinstance(raw_audio_configuration, dict)
+                        else {}
+                    )
+                    mirrored = bool(video_configuration.get("mirrored", False))
                     session_media_configuration.clear()
-                    session_media_configuration.update(payload.get("audio", {}))
+                    session_media_configuration.update({
+                        "audio": dict(audio_configuration),
+                        "video": {
+                            "mirrored": mirrored,
+                            "previewMatchesModelInput": bool(
+                                video_configuration.get("previewMatchesModelInput", False)
+                            ),
+                            "coordinateConvention": (
+                                "horizontally-mirrored" if mirrored else "camera-native"
+                            ),
+                        },
+                    })
                     trace_event(
                         "media.audio.configuration", "browser-media",
-                        {"audio": dict(session_media_configuration), "playbackCapture": bool(payload.get("playbackCapture", False))},
+                        {
+                            **session_media_configuration,
+                            "playbackCapture": bool(payload.get("playbackCapture", False)),
+                        },
                     )
                 elif kind == "cancel":
                     bridge.cancel_response()

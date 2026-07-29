@@ -96,7 +96,18 @@
   min-width: 240px;
 }
 
-.camera video {
+.device-actions label {
+  margin-left: 0;
+}
+
+.device-actions .camera-mirror {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: auto;
+}
+
+.camera video.mirrored {
   transform: scaleX(-1);
 }
 

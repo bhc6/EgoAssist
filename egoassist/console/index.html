@@ -7,7 +7,7 @@
   <link rel="icon" href="data:,">
   <link rel="stylesheet" href="styles.css">
   <link rel="stylesheet" href="memory-controls.css">
-  <link rel="stylesheet" href="responsive.css">
+  <link rel="stylesheet" href="responsive.css?v=20260729-mirror">
 </head>
 <body class="auth-required">
   <div id="authGate" class="auth-gate">
@@ -58,6 +58,7 @@
         <div class="device-actions">
           <button id="realtimeButton" class="primary">启动全双工</button>
           <button id="cameraButton" title="仅管理摄像头与麦克风设备">启用设备</button>
+          <label class="camera-mirror" title="开启时预览和模型输入同时左右翻转；第一视角智能眼镜应关闭"><input id="mirrorCamera" type="checkbox" checked>镜像</label>
           <label>FPS<select id="videoFps"><option>1</option><option selected>2</option><option>4</option></select></label>
         </div>
         <div class="speech-stream">
@@ -99,6 +100,6 @@
 
   <footer>研究原型 · 界面只展示可观测事件、显式策略和结构化状态，不展示或声称访问模型隐藏思维链。</footer>
   <dialog id="taskDialog"><form method="dialog" id="taskForm"><h2>创建当前 Skill 的任务</h2><label>任务名称<input id="customTitle" required maxlength="80" placeholder="例如：整理书桌"></label><label>参考知识锚点<textarea id="customSteps" required rows="7" placeholder="每行一个目标、证据或安全检查"></textarea></label><p>锚点是可独立满足、跳过或修正的假设，不规定唯一执行顺序。</p><div class="dialog-actions"><button id="cancelTask" type="button">取消</button><button id="createTask" type="submit" value="default" class="primary">创建并激活</button></div></form></dialog>
-  <script src="app.js"></script>
+  <script src="app.js?v=20260729-mirror"></script>
 </body>
 </html>

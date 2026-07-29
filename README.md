@@ -86,6 +86,11 @@ The microphone remains active while the assistant speaks. Browser capture reques
 - user: `conversation.item.input_audio_transcription.completed`;
 - assistant: `response.audio_transcript.*` only after its exact `response_id` is classified as a user-visible audio request.
 
+Camera orientation is an explicit capture control. `mirrored` flips both the local preview and the JPEG sent to the
+provider, so their left/right coordinates cannot diverge. It is enabled by default for user-facing camera tests and
+should be disabled for camera-native first-person smart glasses. The selected convention is included in
+`media.audio.configuration` audit events and runtime state for each case.
+
 Recent assistant output is compared with new input transcription to flag likely residual echo. The flag is observation-only: input is not dropped because a user may intentionally repeat the assistant. This is not biometric speaker diarization, and the UI states that boundary explicitly.
 
 Provider event names are not visibility permissions. Each dialogue response ID is bound to its requested `purpose` and `outputMode`. Only `conversation/audio` and `proactive-utterance/audio` cross the browser playback and caption boundary. Gate artifacts stay in the separate perception session; stale IDs and unattributed dialogue output fail closed and emit `response.output.suppressed`. The browser independently checks the same typed `purpose`.
