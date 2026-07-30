@@ -47,6 +47,18 @@ class IntentEnvelope(ProductContract):
     correlation: CorrelationIds = Field(default_factory=CorrelationIds)
 
 
+class IntentCandidate(ProductContract):
+    kind: Literal[
+        "foreground-dialogue",
+        "background-job",
+        "background-reminder",
+        "persistent-task",
+        "waiting-input",
+    ]
+    text: str = Field(min_length=1, max_length=500)
+    parameters: dict[str, Any] = Field(default_factory=dict)
+
+
 class JobRecord(ProductContract):
     job_id: str = Field(min_length=1)
     intent_id: str = Field(min_length=1)

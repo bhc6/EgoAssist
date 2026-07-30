@@ -28,6 +28,13 @@ from .semantic import (
     is_explicit_memory_request, memory_draft_candidate,
 )
 from .work_ledger import CaseWorkLedger
+from .livekit_transport import (
+    LIVEKIT_DATA_TOPIC,
+    LiveKitInteractionTransport,
+    LiveKitSettings,
+    livekit_capability,
+)
+from .intent_decomposition import normalize_intent_candidates
 
 __all__ = [
     "PreferenceMemory", "RealtimeEpisodeMemory", "StructuredPerceptionAdapter",
@@ -39,6 +46,11 @@ __all__ = [
     "SemanticTurnRouter", "TURN_ROUTER_POLICY_VERSION", "explicit_memory_fallback_atoms",
     "is_explicit_memory_request", "memory_draft_candidate",
     "CaseWorkLedger",
+    "LIVEKIT_DATA_TOPIC",
+    "LiveKitInteractionTransport",
+    "LiveKitSettings",
+    "livekit_capability",
+    "normalize_intent_candidates",
     "executable_tool_declarations", "platform_capability_available",
     "platform_capability_truth", "public_tool_declaration",
     "skill_capability_truth", "tool_truth",

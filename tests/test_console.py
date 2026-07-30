@@ -47,7 +47,11 @@ def test_frontend_exposes_memory_pipeline_and_treats_steps_as_reference_map():
     assert "/api/sessions/memory-policy" in script
     assert '"?session=" + encodeURIComponent(selectedSessionId)' in script
     assert 'id="mirrorCamera"' in html
-    assert 'app.js?v=20260729-timeline-memory' in html
+    assert 'vendor/livekit-client.umd.js?v=2.21.0' in html
+    assert 'app.js?v=20260730-livekit-m3' in html
+    assert '/api/livekit/token' in script
+    assert 'activateWebSocketMediaFallback' in script
+    assert 'interactionTransport === "livekit"' in script
     assert 'context.translate(canvas.width, 0)' in script
     assert 'coordinateConvention: mirrorCamera ? "horizontally-mirrored" : "camera-native"' in script
     assert 'classList.toggle("mirrored", mirrorCamera)' in script

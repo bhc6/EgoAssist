@@ -10,6 +10,7 @@ from egoassist.product import (
     ConversationTurn,
     CorrelationIds,
     HumanHelpRequest,
+    IntentCandidate,
     JobRecord,
     ProductDatabase,
     ResultRecord,
@@ -51,7 +52,10 @@ def test_contracts_round_trip_and_reject_untyped_provider_fields():
         connector="test", purpose="safety", consent_id="consent-1",
         idempotency_key="help-1",
     )
-    assert job.job_id and result.result_id and request.connector
+    candidate = IntentCandidate(
+        kind="foreground-dialogue", text="answer this", parameters={},
+    )
+    assert job.job_id and result.result_id and request.connector and candidate.kind
 
 
 def test_ports_are_small_protocol_boundaries():

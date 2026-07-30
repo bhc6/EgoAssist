@@ -10,9 +10,10 @@ import time
 from typing import Any, Callable, Mapping
 
 from egoassist.memory.timeline import looks_like_question, normalize_identity
+from egoassist.product.contracts import IntentCandidate
 
 
-TURN_ROUTER_POLICY_VERSION = "semantic-turn-router-v5"
+TURN_ROUTER_POLICY_VERSION = "semantic-turn-router-v6"
 TASK_CONTROLS = {
     "none", "confirm-step", "rollback", "repeat",
     "pause-task", "resume-task", "request-help",
@@ -244,15 +245,11 @@ class SemanticTurnRouter:
                 "memoryQuery", "memoryKind", "memoryText", "memoryKey",
                 "memoryScope", "memoryConsent", "skillControl", "skill",
             }
-            structured_fields = {"memoryDraft", "memoryAtoms", "memoryQuerySpec"}
+            structured_fields = {"memoryDraft", "memoryAtoms", "memoryQuerySpec", "intents"}
             lifecycle_fields = {"intentKind"}
-            allowed_shapes = {
-                frozenset(legacy_fields),
-                frozenset(legacy_fields | structured_fields),
-                frozenset(legacy_fields | lifecycle_fields),
-                frozenset(legacy_fields | structured_fields | lifecycle_fields),
-            }
-            if frozenset(parsed) not in allowed_shapes:
+            if not legacy_fields.issubset(parsed) or set(parsed) - (
+                legacy_fields | structured_fields | lifecycle_fields
+            ):
                 raise ValueError("router output has unexpected fields")
             memory_atoms = self._normalize_atoms(parsed.get("memoryAtoms", []))
             memory_draft = self._normalize_draft(parsed.get("memoryDraft"))
@@ -327,6 +324,7 @@ class SemanticTurnRouter:
                 "foreground-dialogue", "background-job", "background-reminder", "persistent-task", "waiting-input",
             }:
                 raise ValueError("invalid intent lifecycle label")
+            intents = self._normalize_intents(parsed.get("intents"), str(text))
             return {
                 "method": TURN_ROUTER_POLICY_VERSION,
                 "model": self.model,
@@ -346,6 +344,7 @@ class SemanticTurnRouter:
                 "skillControl": None if skill_control == "none" else skill_control,
                 "selectedSkill": skill if skill in allowed_skills else None,
                 "intentKind": intent_kind,
+                "intents": intents,
                 "skillStatus": (
                     "matched" if skill in allowed_skills
                     else "ambiguous" if skill == "ambiguous"
@@ -379,6 +378,7 @@ class SemanticTurnRouter:
                 "skillControl": None,
                 "selectedSkill": None,
                 "intentKind": "foreground-dialogue",
+                "intents": [],
                 "skillStatus": "unavailable",
                 "latencyMs": round((time.perf_counter() - started) * 1000, 1),
                 "policyVersion": TURN_ROUTER_POLICY_VERSION,
@@ -411,8 +411,8 @@ class SemanticTurnRouter:
                         "Classify one user turn using only its semantic meaning. Return one JSON object with exactly "
                         "fifteen fields: speechControl, taskControl, preferenceIntent, memoryQuery, memoryKind, "
                         "memoryText, memoryKey, memoryScope, memoryConsent, skillControl, skill, memoryDraft, "
-                        "memoryAtoms, memoryQuerySpec, and intentKind. The first eleven fields and intentKind are strings. memoryDraft and "
-                        "memoryQuerySpec are objects or null; memoryAtoms is an array. "
+                        "memoryAtoms, memoryQuerySpec, intentKind, and intents. The first eleven fields and intentKind are strings. memoryDraft and "
+                        "memoryQuerySpec are objects or null; memoryAtoms and intents are arrays. "
                         "Set speechControl to stop-speaking only when the user is "
                         "directly instructing the assistant to stop or pause its current spoken output and wants no "
                         "further verbal response. Negated, quoted, reported, hypothetical, or ambiguous mentions are "
@@ -435,6 +435,12 @@ class SemanticTurnRouter:
                         "background-job only for independent work explicitly expected to continue after this reply; persistent-task "
                         "only for a resumable task the user explicitly wants preserved while changing topics; otherwise use "
                         "waiting-input when an explicit memoryDraft still lacks required fields; otherwise use foreground-dialogue. "
+                        "Also split the turn into zero to four independent intent objects. Each object has exactly kind, text, and parameters. "
+                        "kind uses the same lifecycle labels, text is the exact minimal clause, and parameters is an object. A turn that asks "
+                        "for a later reminder and an immediate answer must contain separate background-reminder and foreground-dialogue objects. "
+                        "For a relative reminder, parameters has exactly delaySeconds as a positive integer and label as the requested action. "
+                        "Do not invent a duration. If timing is absent or ambiguous, use waiting-input instead of background-reminder. "
+                        "A stop-speaking-only control may use an empty intents array. Topic changes never imply cancellation of another intent. "
                         "Independently produce zero to three atomic behavioral memoryAtoms from the user's own current-turn "
                         "claim. Questions, requests for an answer, greetings, filler, and assistant claims are memoryKind "
                         "none with memoryText, memoryKey, memoryScope, and memoryConsent all none. An explicit request to "
@@ -469,6 +475,27 @@ class SemanticTurnRouter:
         if response.status_code != 200:
             raise RuntimeError(str(getattr(response, "message", "semantic turn router failed")))
         return str(response.output.choices[0].message.content).strip()
+
+    @staticmethod
+    def _normalize_intents(value: Any, transcript: str) -> list[dict[str, Any]]:
+        if value is None:
+            return []
+        if not isinstance(value, list) or len(value) > 4:
+            raise ValueError("intents must contain at most four items")
+        result = []
+        for item in value:
+            candidate = IntentCandidate.model_validate(item)
+            parameters = dict(candidate.parameters)
+            if candidate.kind == "background-reminder":
+                if set(parameters) != {"delaySeconds", "label"}:
+                    raise ValueError("relative reminder parameters must be delaySeconds and label")
+                delay = parameters.get("delaySeconds")
+                if isinstance(delay, bool) or not isinstance(delay, int) or not 1 <= delay <= 31_536_000:
+                    raise ValueError("invalid reminder delaySeconds")
+                if not isinstance(parameters.get("label"), str) or not parameters["label"].strip():
+                    raise ValueError("invalid reminder label")
+            result.append(candidate.model_dump())
+        return result
 
     @staticmethod
     def _normalize_atoms(value: Any) -> list[dict[str, str]]:

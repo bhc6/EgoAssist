@@ -41,9 +41,13 @@ from egoassist.realtime import (
     explicit_memory_fallback_atoms,
     is_explicit_memory_request,
     memory_draft_candidate,
+    normalize_intent_candidates,
     TaskSpec,
     TurnTakingPolicy,
     executable_tool_declarations,
+    LiveKitInteractionTransport,
+    LiveKitSettings,
+    livekit_capability,
     platform_capability_available,
     platform_capability_truth,
     public_tool_declaration,
@@ -220,6 +224,12 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
     product_database = ProductDatabase(Path(memory_path).with_name("product.sqlite3"))
     product_database.create_schema()
     capability_overrides: dict[str, dict[str, Any]] = {}
+    livekit_settings = LiveKitSettings.from_env()
+    livekit_transport = (
+        LiveKitInteractionTransport(livekit_settings)
+        if livekit_settings is not None else None
+    )
+    capability_overrides["realtime-media"] = livekit_capability(livekit_settings)
     reminder_runtime: dict[str, Any] = {
         "status": "unconfigured",
         "coordinator": None,
@@ -1555,6 +1565,19 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                 "State that limitation plainly, do not imply that work will continue, and offer only an immediate "
                 "answer or a supported alternative."
             )
+        elif intent_execution.get("status") == "waiting-input":
+            instructions += (
+                " The durable action has not started because required timing is missing. Ask only for the missing "
+                "duration and never imply that a reminder exists."
+            )
+        elif intent_execution.get("status") == "queued":
+            accepted = list(intent_execution.get("accepted") or [])
+            instructions += (
+                " The reminder entries in this trusted execution receipt are already durably queued: "
+                + json.dumps(accepted, ensure_ascii=False)
+                + ". Briefly confirm their exact labels and times. Do not call set_timer again and do not claim any "
+                "other external action."
+            )
         timeline_write = result.get("timelineWrite") or {}
         card = timeline_write.get("card") or {}
         committed_card_ids = list(timeline_write.get("committedCardIds") or [])
@@ -1576,10 +1599,11 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                 " No active memory card was committed for this turn. Never claim that the request was remembered, "
                 "saved, or made persistent."
             )
-        instructions += (
-            " No tool result has been committed for this response yet. Never claim that a reminder, timer, message, "
-            "or other external action succeeded unless a later committed tool_result explicitly reports success."
-        )
+        if intent_execution.get("status") != "queued":
+            instructions += (
+                " No tool result has been committed for this response yet. Never claim that a reminder, timer, message, "
+                "or other external action succeeded unless a later committed tool_result explicitly reports success."
+            )
         return instructions
 
     def request_decision_speech(decision: dict, priority: int | None = None) -> None:
@@ -3165,10 +3189,24 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                 live_harnesses.pop(session_id, None)
             return ws
 
+        livekit_active = False
+
         async def emit(payload):
+            if livekit_active and livekit_transport is not None:
+                if payload.get("type") in {"audio", "interrupted"}:
+                    try:
+                        await livekit_transport.publish(session_id, payload)
+                    except Exception:
+                        LOGGER.exception("LiveKit output publish failed for case %s", session_id)
             if not ws.closed:
                 if payload.get("type") == "ready":
-                    payload = {**payload, "contextSessionId": session_id}
+                    payload = {
+                        **payload,
+                        "contextSessionId": session_id,
+                        "interactionTransport": "livekit" if livekit_active else "websocket-fallback",
+                    }
+                if livekit_active and payload.get("type") == "audio":
+                    return
                 await ws.send_json(payload)
 
         bridge = None
@@ -3510,14 +3548,61 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                 pending_draft_before = timeline.pending_draft(
                     user_id=user_id, case_id=session_id,
                 )
+                intent_candidates = normalize_intent_candidates(text, semantic)
+                scheduled_intents = []
+                remaining_candidates = []
+                for candidate in intent_candidates:
+                    parameters = dict(candidate.parameters)
+                    if (
+                        candidate.kind == "background-reminder"
+                        and parameters.get("delaySeconds") is not None
+                        and platform_capability_available("timer-delivery", capability_overrides)
+                    ):
+                        scheduled_intents.append(queue_reminder(
+                            owner,
+                            seconds=int(parameters["delaySeconds"]),
+                            label=str(parameters.get("label") or "Reminder"),
+                            turn_id=turn_id,
+                        ))
+                    else:
+                        remaining_candidates.append(candidate)
+                semantic = {
+                    **semantic,
+                    "intents": [item.model_dump() for item in intent_candidates],
+                    "acceptedIntents": scheduled_intents,
+                }
+                selected_candidate = next((
+                    item for item in remaining_candidates
+                    if item.kind in {"foreground-dialogue", "waiting-input"}
+                ), remaining_candidates[0] if remaining_candidates else None)
                 requested_intent_kind = str(
-                    semantic.get("intentKind") or "foreground-dialogue"
+                    selected_candidate.kind if selected_candidate is not None else "foreground-dialogue"
                 )
                 intent_kind = requested_intent_kind
-                if (
-                    requested_intent_kind
-                    in {"background-job", "background-reminder", "persistent-task"}
-                    and not platform_capability_available("background-execution")
+                requested_capability = (
+                    "timer-delivery" if requested_intent_kind == "background-reminder"
+                    else "background-execution"
+                )
+                has_required_parameters = not (
+                    requested_intent_kind == "background-reminder"
+                    and selected_candidate is not None
+                    and selected_candidate.parameters.get("delaySeconds") is None
+                )
+                if requested_intent_kind == "background-reminder" and not has_required_parameters:
+                    intent_kind = "waiting-input"
+                    semantic = {
+                        **semantic,
+                        "requestedIntentKind": requested_intent_kind,
+                        "intentKind": intent_kind,
+                        "intentExecution": {
+                            "status": "waiting-input",
+                            "capability": "timer-delivery",
+                            "reason": "A reminder duration is required before durable execution can start.",
+                        },
+                    }
+                elif (
+                    requested_intent_kind in {"background-job", "background-reminder", "persistent-task"}
+                    and not platform_capability_available(requested_capability, capability_overrides)
                 ):
                     intent_kind = "foreground-dialogue"
                     semantic = {
@@ -3526,8 +3611,18 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                         "intentKind": intent_kind,
                         "intentExecution": {
                             "status": "unsupported",
-                            "capability": "background-execution",
-                            "reason": "No durable workflow executor is connected.",
+                            "capability": requested_capability,
+                            "reason": f"No durable {requested_capability} executor is connected.",
+                        },
+                    }
+                elif scheduled_intents:
+                    semantic = {
+                        **semantic,
+                        "intentKind": intent_kind,
+                        "intentExecution": {
+                            "status": "queued",
+                            "capability": "timer-delivery",
+                            "accepted": scheduled_intents,
                         },
                     }
                 if semantic.get("memoryDraft") and intent_kind == "foreground-dialogue":
@@ -3907,6 +4002,49 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
             )
             enqueue_persisted_turn(captured)
 
+        async def handle_media_payload(payload: dict, *, source: str) -> bool:
+            kind = payload.get("type")
+            if kind == "audio":
+                audio_value = str(payload.get("audio", ""))
+                video_flushed = bridge.append_audio(audio_value)
+                media_audit.record_audio(len(audio_value), video_flushed=video_flushed)
+                if video_flushed:
+                    interval = session_runtime.skill.manifest.get("proactive_check_seconds", 4) if session_runtime.skill else 4
+                    bridge.maybe_check_proactively(float(interval))
+                return True
+            if kind == "video":
+                image_value = str(payload.get("image", ""))
+                media_audit.record_video(len(image_value))
+                if bridge.append_video(image_value):
+                    interval = session_runtime.skill.manifest.get("proactive_check_seconds", 4) if session_runtime.skill else 4
+                    bridge.maybe_check_proactively(float(interval))
+                return True
+            if kind == "media_gap":
+                media = str(payload.get("media", "unknown"))
+                gap = {
+                    "media": media,
+                    "reason": str(payload.get("reason", f"{source}-reported-gap")),
+                    "droppedChunks": max(0, int(payload.get("droppedChunks") or 0)),
+                    "droppedFrames": max(0, int(payload.get("droppedFrames") or 0)),
+                    "transport": str(payload.get("transport") or source),
+                }
+                session_trace("browser.media.gap", f"{source}-media", gap)
+                if not ws.closed:
+                    await ws.send_json({"type": "media_gap", **gap})
+                return True
+            return False
+
+        async def consume_livekit_media() -> None:
+            if livekit_transport is None:
+                return
+            async for payload in livekit_transport.events(session_id):
+                if payload.get("type") == "transport_status":
+                    if not ws.closed:
+                        await ws.send_json(dict(payload))
+                    continue
+                await handle_media_payload(dict(payload), source="livekit")
+
+        livekit_media_task = None
         try:
             owner.turn_queue = asyncio.Queue(
                 maxsize=max(4, int(os.getenv("EGOASSIST_TURN_QUEUE_CAPACITY", "64"))),
@@ -3943,7 +4081,25 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
             live_sockets.add(ws)
             live_sockets_by_user.setdefault(user_id, set()).add(ws)
             live_sockets_by_session.setdefault(session_id, set()).add(ws)
+            if livekit_transport is not None:
+                try:
+                    await livekit_transport.connect(session_id)
+                    livekit_active = True
+                    capability_overrides["realtime-media"] = livekit_capability(
+                        livekit_settings, connected=True,
+                    )
+                except Exception:
+                    LOGGER.exception("LiveKit room connection failed; using WebSocket fallback")
+                    capability_overrides["realtime-media"] = {
+                        "status": "available",
+                        "reason": "LiveKit room connection failed; bounded WebSocket media fallback is active.",
+                    }
             await bridge.connect()
+            if livekit_active:
+                livekit_media_task = asyncio.create_task(
+                    consume_livekit_media(),
+                    name=f"egoassist-livekit-media:{session_id}:{connection_epoch}",
+                )
             refresh_harness_context(bridge, harness, session_runtime)
             initial_hint, initial_recall = apply_memory_hint(
                 session_runtime,
@@ -3970,30 +4126,9 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                     continue
                 payload = json.loads(message.data)
                 kind = payload.get("type")
-                if kind == "audio":
-                    audio_value = str(payload.get("audio", ""))
-                    video_flushed = bridge.append_audio(audio_value)
-                    media_audit.record_audio(len(audio_value), video_flushed=video_flushed)
-                    if video_flushed:
-                        interval = session_runtime.skill.manifest.get("proactive_check_seconds", 4) if session_runtime.skill else 4
-                        bridge.maybe_check_proactively(float(interval))
-                elif kind == "video":
-                    image_value = str(payload.get("image", ""))
-                    media_audit.record_video(len(image_value))
-                    if bridge.append_video(image_value):
-                        interval = session_runtime.skill.manifest.get("proactive_check_seconds", 4) if session_runtime.skill else 4
-                        bridge.maybe_check_proactively(float(interval))
-                elif kind == "media_gap":
-                    media = str(payload.get("media", "unknown"))
-                    gap = {
-                        "media": media,
-                        "reason": str(payload.get("reason", "browser-reported-gap")),
-                        "droppedChunks": max(0, int(payload.get("droppedChunks") or 0)),
-                        "droppedFrames": max(0, int(payload.get("droppedFrames") or 0)),
-                    }
-                    session_trace("browser.media.gap", "browser-media", gap)
-                    await ws.send_json({"type": "media_gap", **gap})
-                elif kind == "media_config":
+                if await handle_media_payload(payload, source="websocket"):
+                    continue
+                if kind == "media_config":
                     raw_video_configuration = payload.get("video", {})
                     video_configuration = (
                         raw_video_configuration
@@ -4088,6 +4223,12 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
         finally:
             owns_reservation = owner.socket_token is socket_token
             try:
+                if livekit_media_task is not None:
+                    livekit_media_task.cancel()
+                    await asyncio.gather(livekit_media_task, return_exceptions=True)
+                if livekit_active and livekit_transport is not None:
+                    await livekit_transport.close(session_id)
+                    capability_overrides["realtime-media"] = livekit_capability(livekit_settings)
                 if owns_reservation:
                     owner.transitioning = True
                     await stop_case_connection(owner, notify=False)
@@ -4108,6 +4249,28 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                     live_harnesses.pop(session_id, None)
                     owner.transitioning = False
         return ws
+
+    async def post_livekit_token(request):
+        if livekit_transport is None or livekit_settings is None:
+            return web.json_response({
+                "enabled": False,
+                "transport": "websocket-fallback",
+                "capability": livekit_capability(None),
+            })
+        user_id = request[user_key]["id"]
+        payload = await request.json()
+        requested_session_id = str(payload.get("sessionId", "")).strip()
+        session_id = identity.claim_context_session(user_id, requested_session_id or None)
+        participant_id = f"participant-{user_id}-{uuid4().hex[:10]}"
+        return web.json_response({
+            "enabled": True,
+            "transport": "livekit",
+            "url": livekit_settings.url,
+            "room": livekit_transport.room_name(session_id),
+            "token": livekit_transport.issue_browser_token(session_id, participant_id),
+            "participantId": participant_id,
+            "expiresInSeconds": livekit_settings.token_ttl_seconds,
+        })
 
     @web.middleware
     async def errors(request, handler):
@@ -4233,6 +4396,8 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                 if schedulers:
                     await asyncio.gather(*schedulers, return_exceptions=True)
             finally:
+                if livekit_transport is not None:
+                    await livekit_transport.close_all()
                 lease.release()
 
     app.cleanup_ctx.append(runtime_root_lease_context)
@@ -4256,6 +4421,7 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
         web.post("/api/intents/focus", post_intent_focus),
         web.post("/api/jobs/cancel", post_job_cancel),
         web.post("/api/reminders", post_reminder_create),
+        web.post("/api/livekit/token", post_livekit_token),
         web.post("/api/results/dismiss", post_result_dismiss),
         web.post("/api/candidate", post_candidate),
         web.post("/api/memory/delete", post_delete),

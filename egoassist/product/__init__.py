@@ -27,7 +27,7 @@ def __getattr__(name: str) -> Any:
 
 __all__ = [
     "ProductDatabase", "Base", "correlation_ids", "current_trace_id", "product_span",
-    "ConversationTurn", "CorrelationIds", "IntentEnvelope", "JobRecord", "JobAttempt",
+    "ConversationTurn", "CorrelationIds", "IntentCandidate", "IntentEnvelope", "JobRecord", "JobAttempt",
     "ResultRecord", "NotificationRequest", "NotificationReceipt", "ArtifactDescriptor",
     "HumanHelpRequest", "HumanHelpReceipt", "ObservationEvidence", "ProviderDisclosure",
     "InteractionTransport", "WorkflowPort", "NotificationPort", "ArtifactPort",

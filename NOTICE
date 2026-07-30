@@ -2,3 +2,7 @@ EgoAssist
 Copyright 2026 EgoAssist contributors
 
 This product is licensed under the Apache License, Version 2.0.
+
+The bundled `egoassist/console/vendor/livekit-client.umd.js` is derived from
+LiveKit Client SDK for JavaScript 2.21.0, Copyright LiveKit, Inc., licensed
+under the Apache License, Version 2.0.

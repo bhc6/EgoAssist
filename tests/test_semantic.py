@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 from egoassist.realtime import (
     SemanticTurnRouter, TURN_ROUTER_POLICY_VERSION, explicit_memory_fallback_atoms,
-    is_explicit_memory_request, memory_draft_candidate,
+    is_explicit_memory_request, memory_draft_candidate, normalize_intent_candidates,
 )
 
 
@@ -113,6 +113,51 @@ def test_legacy_semantic_output_defaults_to_foreground_intent():
     )
     result = asyncio.run(router.classify("ordinary turn", []))
     assert result["intentKind"] == "foreground-dialogue"
+
+
+def test_semantic_router_accepts_atomic_foreground_and_reminder_intents():
+    router = SemanticTurnRouter(
+        "test-key",
+        generation_call=lambda **_: provider_response(decision(
+            intentKind="foreground-dialogue",
+            intents=[
+                {
+                    "kind": "background-reminder",
+                    "text": "remind me in 5 minutes to turn off the oven",
+                    "parameters": {"delaySeconds": 300, "label": "turn off the oven"},
+                },
+                {
+                    "kind": "foreground-dialogue",
+                    "text": "what temperature should I use",
+                    "parameters": {},
+                },
+            ],
+        )),
+    )
+
+    result = asyncio.run(router.classify(
+        "remind me in 5 minutes to turn off the oven, and what temperature should I use?", [],
+    ))
+
+    assert result["status"] == "classified"
+    assert [item["kind"] for item in result["intents"]] == [
+        "background-reminder", "foreground-dialogue",
+    ]
+    assert result["intents"][0]["parameters"]["delaySeconds"] == 300
+
+
+def test_intent_decomposition_parses_relative_delay_but_never_invents_one():
+    parsed = normalize_intent_candidates(
+        "remind me in 2 minutes to check the rice",
+        {"intentKind": "background-reminder"},
+    )
+    ambiguous = normalize_intent_candidates(
+        "remind me to check the rice",
+        {"intentKind": "background-reminder"},
+    )
+
+    assert parsed[0].parameters == {"delaySeconds": 120, "label": "check the rice"}
+    assert ambiguous[0].parameters == {"label": "check the rice"}
 
 
 def test_semantic_router_accepts_typed_skill_deactivation():

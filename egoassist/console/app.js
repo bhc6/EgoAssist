@@ -2,6 +2,8 @@ const $ = selector => document.querySelector(selector);
 const $$ = selector => [...document.querySelectorAll(selector)];
 const esc = value => String(value ?? "").replace(/[&<>"']/g, character => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"}[character]));
 let state, stream, socket, audioContext, microphoneSource, processor, videoTimer;
+let livekitRoom = null, livekitAudioElements = [];
+let interactionTransport = "websocket-fallback";
 let playbackTime = 0, assistantText = "";
 let connectingPromise = null;
 let connectionGeneration = 0;
@@ -438,10 +440,88 @@ function stopMedia() {
   processor = microphoneSource = null;
   if (stream) stream.getTracks().forEach(track => track.stop());
   stream = null;
+  disconnectLiveKit();
   $("#video").srcObject = null;
   $("#cameraEmpty").hidden = false;
   $("#cameraState").textContent = "摄像头未启动";
   $("#cameraButton").textContent = "启用设备";
+}
+
+function clearLiveKitAudio() {
+  livekitAudioElements.forEach(element => element.remove());
+  livekitAudioElements = [];
+}
+
+async function disconnectLiveKit() {
+  const room = livekitRoom;
+  livekitRoom = null;
+  interactionTransport = "websocket-fallback";
+  clearLiveKitAudio();
+  if (room) await room.disconnect().catch(() => {});
+}
+
+async function activateWebSocketMediaFallback() {
+  interactionTransport = "websocket-fallback";
+  if (!stream || !socket || socket.readyState !== WebSocket.OPEN) return;
+  await startAudioCapture();
+  const fps = Number($("#videoFps").value);
+  if (videoTimer) clearInterval(videoTimer);
+  videoTimer = setInterval(sendVideoFrame, 1000 / fps);
+}
+
+async function connectLiveKitMedia(connectionSessionId) {
+  if (!window.LivekitClient) return false;
+  let credentials;
+  try {
+    credentials = await post("/api/livekit/token", {sessionId: connectionSessionId});
+  } catch (_) {
+    return false;
+  }
+  if (!credentials.enabled) return false;
+  const {Room, RoomEvent, Track} = window.LivekitClient;
+  const room = new Room({adaptiveStream: true, dynacast: true, disconnectOnPageLeave: true});
+  room.on(RoomEvent.TrackSubscribed, track => {
+    if (track.kind !== Track.Kind.Audio) return;
+    const element = track.attach();
+    element.autoplay = true;
+    element.dataset.egoassistLivekitAudio = "true";
+    document.body.appendChild(element);
+    livekitAudioElements.push(element);
+  });
+  room.on(RoomEvent.TrackUnsubscribed, track => track.detach().forEach(element => element.remove()));
+  room.on(RoomEvent.Reconnecting, () => {
+    $("#duplexState").textContent = "LiveKit 媒体正在重连，控制通道保持在线";
+  });
+  room.on(RoomEvent.Reconnected, () => {
+    interactionTransport = "livekit";
+    stopAudioCapture();
+    if (videoTimer) clearInterval(videoTimer);
+    videoTimer = null;
+    $("#duplexState").textContent = "LiveKit 媒体已恢复";
+  });
+  room.on(RoomEvent.Disconnected, () => {
+    if (livekitRoom !== room) return;
+    livekitRoom = null;
+    clearLiveKitAudio();
+    activateWebSocketMediaFallback().catch(() => {});
+  });
+  try {
+    await room.connect(credentials.url, credentials.token, {autoSubscribe: true});
+    const audioTrack = stream?.getAudioTracks()[0];
+    const videoTrack = stream?.getVideoTracks()[0];
+    if (audioTrack) {
+      await room.localParticipant.publishTrack(audioTrack, {source: Track.Source.Microphone});
+    }
+    if (videoTrack) {
+      await room.localParticipant.publishTrack(videoTrack, {source: Track.Source.Camera});
+    }
+  } catch (_) {
+    await room.disconnect().catch(() => {});
+    return false;
+  }
+  livekitRoom = room;
+  interactionTransport = "livekit";
+  return true;
 }
 
 function floatToPcm16Base64(floatSamples, sourceRate) {
@@ -486,6 +566,7 @@ async function startAudioCapture() {
 }
 
 function sendVideoFrame() {
+  if (interactionTransport === "livekit") return;
   if (!socket || socket.readyState !== WebSocket.OPEN || !stream || $("#video").readyState < 2) return;
   if (socket.bufferedAmount > VIDEO_BUFFER_HIGH_WATER) {
     droppedVideoFrames += 1;
@@ -583,8 +664,10 @@ async function connectRealtimeSession(generation) {
   const connectionSessionId = selectedSessionId;
   await ensureMedia();
   if (generation !== connectionGeneration) return;
-  await startAudioCapture();
+  const livekitConnected = await connectLiveKitMedia(connectionSessionId);
+  if (!livekitConnected) await startAudioCapture();
   if (generation !== connectionGeneration) {
+    await disconnectLiveKit();
     stopAudioCapture();
     return;
   }
@@ -602,9 +685,12 @@ async function connectRealtimeSession(generation) {
   ws.onopen = () => {
     if (socket !== ws || generation !== connectionGeneration) { ws.close(); return; }
     $("#duplexState").textContent = "正在连接实时模型…";
-    const fps = Number($("#videoFps").value);
-    if (videoTimer) clearInterval(videoTimer);
-    videoTimer = setInterval(sendVideoFrame, 1000 / fps);
+    if (interactionTransport !== "livekit") {
+      startAudioCapture().catch(() => {});
+      const fps = Number($("#videoFps").value);
+      if (videoTimer) clearInterval(videoTimer);
+      videoTimer = setInterval(sendVideoFrame, 1000 / fps);
+    }
   };
   ws.onmessage = event => {
     if (socket !== ws || generation !== connectionGeneration) return;
@@ -616,9 +702,11 @@ async function connectRealtimeSession(generation) {
       refreshSessionList(selectedSessionId).catch(() => {});
       resolveReady();
       sendMediaConfiguration(ws);
-      $("#duplexState").textContent = "全双工在线 · 直接说话，可随时打断";
+      interactionTransport = message.interactionTransport === "livekit" && livekitRoom
+        ? "livekit" : interactionTransport;
+      $("#duplexState").textContent = (interactionTransport === "livekit" ? "LiveKit" : "WebSocket fallback") + " · 直接说话，可随时打断";
       $("#realtimeButton").textContent = "结束陪练";
-    } else if (message.type === "audio" && ["conversation", "proactive-utterance"].includes(message.purpose)) {
+    } else if (message.type === "audio" && interactionTransport !== "livekit" && ["conversation", "proactive-utterance"].includes(message.purpose)) {
       $("#duplexState").textContent = "助手正在说 · 你可以随时打断";
       playPcm24(message.audio);
     } else if (message.type === "interrupted") {
@@ -654,6 +742,9 @@ async function connectRealtimeSession(generation) {
       $("#duplexState").textContent = "任务已切换，正在重建实时会话…";
     } else if (message.type === "reconnecting") {
       $("#duplexState").textContent = "实时模型会话正在自动恢复 · 麦克风音频短暂缓冲中";
+    } else if (message.type === "transport_status") {
+      $("#duplexState").textContent = message.status === "connected"
+        ? "LiveKit 媒体在线" : "LiveKit 媒体已断开，正在切换回退通道";
     } else if (message.type === "error") {
       alert(message.message);
     }
@@ -683,6 +774,7 @@ function disconnectRealtime() {
   connectionGeneration += 1;
   if (mediaPromise) mediaGeneration += 1;
   stopPlayback();
+  disconnectLiveKit();
   const ws = socket;
   socket = null;
   if (ws) ws.close();

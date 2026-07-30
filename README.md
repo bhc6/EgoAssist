@@ -381,6 +381,15 @@ one stable result to the durable ResultInbox before optional ntfy delivery. The
 tool first returns `queued`, not `scheduled`, and a failed workflow becomes a
 visible failed job/result rather than a success claim.
 
+Realtime browser media uses LiveKit when `LIVEKIT_URL`, `LIVEKIT_API_KEY`, and
+`LIVEKIT_API_SECRET` are all configured and the room connection succeeds. The
+browser publishes its microphone and camera as native tracks; the interaction
+core subscribes and normalizes them for the existing provider bridge, and speech
+is returned on one LiveKit audio track. Control, TurnInbox persistence, intent
+attribution, TimelineMemory, MemoryDraft, and speech policy remain EgoAssist
+responsibilities. A failed room connection is displayed as a bounded WebSocket
+media fallback, never as a successful LiveKit connection.
+
 ## Configuration
 
 Command-line options:
@@ -410,6 +419,9 @@ EGOASSIST_RESPONSE_FINISH_TIMEOUT=45
 EGOASSIST_TEMPORAL_TARGET=127.0.0.1:7233
 EGOASSIST_TEMPORAL_NAMESPACE=default
 EGOASSIST_TEMPORAL_TASK_QUEUE=egoassist-reminders-v1
+LIVEKIT_URL=ws://127.0.0.1:7880
+LIVEKIT_API_KEY=
+LIVEKIT_API_SECRET=
 # Optional push in addition to the persistent ResultInbox:
 EGOASSIST_NTFY_SERVER=https://ntfy.sh
 EGOASSIST_NTFY_TOPIC=

@@ -94,6 +94,21 @@ require EgoAssist recognizers and explicit consent policy.
 - [Alembic documentation](https://alembic.sqlalchemy.org/)
 - [PDF.js documentation](https://mozilla.github.io/pdf.js/)
 
+## Compatibility Decisions Recorded During Implementation
+
+- The latest OpenTelemetry release observed in this snapshot remains `1.44.0`,
+  but LiveKit Agents `1.6.7` currently resolves the Python runtime to OTel
+  `1.39.1` and protobuf `6.33.6`. EgoAssist pins that tested compatible set in
+  `pyproject.toml` and `requirements-lock.txt`; this is an intentional
+  compatibility lock, not a claim that 1.39 is latest.
+- `livekit-client@2.21.0` is locked by `package-lock.json` and its official UMD
+  distribution is vendored for offline console delivery. Runtime CDN loading is
+  not used.
+- LiveKit is limited to room/media/reconnect ownership. Temporal remains the
+  durable workflow owner, while EgoAssist retains intent, memory, safety, and
+  output arbitration. Pipecat and LangGraph remain deferred to avoid duplicate
+  lifecycle engines.
+
 ## Revalidation Policy
 
 - Recheck versions, security advisories, licenses, and maintenance status before
