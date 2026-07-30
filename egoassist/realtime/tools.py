@@ -55,11 +55,21 @@ class SkillToolExecutor:
     ) -> None:
         self._handlers = dict(DEFAULT_HANDLERS if handlers is None else handlers)
         self.audit: list[dict[str, Any]] = [dict(item) for item in (audit or [])]
+        self._mcp_providers: list[Any] = []  # MCPToolProvider instances
 
     def register_handler(self, name: str, handler: ToolHandler) -> None:
         if not name or name in self._handlers:
             raise ValueError(f"tool handler is already registered or invalid: {name}")
         self._handlers[name] = handler
+
+    def attach_mcp_provider(self, provider: Any) -> None:
+        """Attach an MCPToolProvider; its tools become available via mcp.* handlers.
+
+        This is async-safe: MCP tool handlers are stored and invoked later.
+        """
+        self._mcp_providers.append(provider)
+        for handler_name, handler_fn in provider.as_handlers().items():
+            self.register_handler(handler_name, handler_fn)
 
     def execute(
         self,

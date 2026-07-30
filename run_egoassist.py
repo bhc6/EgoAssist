@@ -74,7 +74,10 @@ from egoassist.product.reminders import (
     ReminderWorkflowInput,
     TemporalReminderCoordinator,
 )
-from temporalio.worker import Worker
+try:
+    from temporalio.worker import Worker  # type: ignore[import-untyped]
+except ImportError:
+    Worker = None  # type: ignore[assignment,misc]
 
 
 ROOT = Path(__file__).resolve().parent
@@ -188,7 +191,7 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
 
     from egoassist.realtime.omni import OmniBrowserBridge
 
-    user_key = web.RequestKey("egoassist.user", dict | None)
+    user_key: Any = "egoassist.user"  # plain string key for request storage (no web.RequestKey in aiohttp)
 
     registry = SkillRegistry(skills_path)
     ledger = EventLedger()
@@ -257,7 +260,7 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
             else "EGOASSIST_HUMAN_HELP_WEBHOOK is not configured."
         ),
     }
-    livekit_settings = LiveKitSettings.from_env()
+    livekit_settings = LiveKitSettings.from_env() if LiveKitSettings is not None else None
     livekit_transport = (
         LiveKitInteractionTransport(livekit_settings)
         if livekit_settings is not None else None
@@ -2235,6 +2238,7 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
             else:
                 raise ValueError("custom task steps must be text or structured objects")
             steps.append(step)
+
         def build_spec() -> TaskSpec:
             if active_runtime.skill is None:
                 raise ValueError("activate a domain skill before creating a task")
@@ -2331,43 +2335,43 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                 query_spec=semantic_decision.get("memoryQuerySpec"),
             )
         if episodic_retrieval is not None and durable_retrieval is not None:
-                merged_by_id = {
-                    item["episodeId"]: item
-                    for item in (
-                        episodic_retrieval.get("candidates", [])
-                        + durable_retrieval.get("candidates", [])
-                    )
-                }
-                merged_candidates = sorted(
-                    merged_by_id.values(),
-                    key=lambda item: (item.get("score", 0.0), item.get("record", {}).get("timestamp", "")),
-                    reverse=True,
+            merged_by_id = {
+                item["episodeId"]: item
+                for item in (
+                    episodic_retrieval.get("candidates", [])
+                    + durable_retrieval.get("candidates", [])
                 )
-                minimum_score = max(
-                    float(episodic_retrieval.get("minimumScore") or 0.18),
-                    float(durable_retrieval.get("minimumScore") or 0.18),
-                )
-                merged_selected = [
-                    item for item in merged_candidates
-                    if item.get("score", 0.0) >= minimum_score
-                ][:5]
-                selected_ids = {item["episodeId"] for item in merged_selected}
-                for item in merged_candidates:
-                    item["selected"] = item["episodeId"] in selected_ids
-                    if item.get("score") and not item["selected"] and "outside-top-k" not in item["rejectionReasons"]:
-                        item["rejectionReasons"].append("outside-top-k")
-                episodic_retrieval = {
-                    **episodic_retrieval,
-                    "scope": {
-                        **episodic_retrieval["scope"],
-                        "memoryScope": "case+participant",
-                        "allowCrossSession": True,
-                    },
-                    "candidates": merged_candidates[:20],
-                    "selected": merged_selected,
-                    "minimumScore": minimum_score,
-                    "claimBoundary": "Merged same-case event cards and explicitly durable participant cards.",
-                }
+            }
+            merged_candidates = sorted(
+                merged_by_id.values(),
+                key=lambda item: (item.get("score", 0.0), item.get("record", {}).get("timestamp", "")),
+                reverse=True,
+            )
+            minimum_score = max(
+                float(episodic_retrieval.get("minimumScore") or 0.18),
+                float(durable_retrieval.get("minimumScore") or 0.18),
+            )
+            merged_selected = [
+                item for item in merged_candidates
+                if item.get("score", 0.0) >= minimum_score
+            ][:5]
+            selected_ids = {item["episodeId"] for item in merged_selected}
+            for item in merged_candidates:
+                item["selected"] = item["episodeId"] in selected_ids
+                if item.get("score") and not item["selected"] and "outside-top-k" not in item["rejectionReasons"]:
+                    item["rejectionReasons"].append("outside-top-k")
+            episodic_retrieval = {
+                **episodic_retrieval,
+                "scope": {
+                    **episodic_retrieval["scope"],
+                    "memoryScope": "case+participant",
+                    "allowCrossSession": True,
+                },
+                "candidates": merged_candidates[:20],
+                "selected": merged_selected,
+                "minimumScore": minimum_score,
+                "claimBoundary": "Merged same-case event cards and explicitly durable participant cards.",
+            }
         elif durable_retrieval is not None:
             episodic_retrieval = {
                 **durable_retrieval,
@@ -3737,7 +3741,7 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
         bridge = None
         try:
             experiment_case = identity.get_context_session(user_id, session_id)
-            session_memory_policy = experiment_case["memoryPolicy"]
+            _ = experiment_case.get("memoryPolicy")  # reserved for future per-session override
             journal = owner.journal
             harness = owner.harness
             session_tools = owner.tools

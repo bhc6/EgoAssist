@@ -35,12 +35,20 @@ from .semantic import (
     is_explicit_memory_request, memory_draft_candidate,
 )
 from .work_ledger import CaseWorkLedger
-from .livekit_transport import (
-    LIVEKIT_DATA_TOPIC,
-    LiveKitInteractionTransport,
-    LiveKitSettings,
-    livekit_capability,
-)
+try:
+    from .livekit_transport import (
+        LIVEKIT_DATA_TOPIC,
+        LiveKitInteractionTransport,
+        LiveKitSettings,
+        livekit_capability,
+    )
+except ImportError:  # livekit is an optional dependency
+    LIVEKIT_DATA_TOPIC = None  # type: ignore[assignment]
+    LiveKitInteractionTransport = None  # type: ignore[assignment,misc]
+    LiveKitSettings = None  # type: ignore[assignment,misc]
+
+    def livekit_capability(*_args, **_kwargs) -> dict:  # type: ignore[misc]
+        return {"available": False, "reason": "livekit-agents is not installed."}
 from .intent_decomposition import normalize_intent_candidates
 
 __all__ = [

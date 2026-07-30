@@ -5,7 +5,11 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Iterable
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from .interface import MemoryBackend  # noqa: F401 – used in docstrings/subclassers
+    from .store import HierarchicalMemory
 
 from .store import MemoryItem
 from .timeline import TimelineMemory
@@ -80,3 +84,88 @@ def import_visual_items(
         if card:
             cards.append(card)
     return cards
+
+
+# ---------------------------------------------------------------------------
+# Protocol adapters for MemoryBackend
+# ---------------------------------------------------------------------------
+
+class TimelineMemoryAdapter:
+    """MemoryBackend-compatible wrapper around TimelineMemory."""
+
+    def __init__(self, timeline: TimelineMemory, *, user_id: str, case_id: str | None = None, scope: str = "participant"):
+        self._timeline = timeline
+        self._user_id = user_id
+        self._case_id = case_id
+        self._scope = scope
+
+    def ingest_text(self, text: str, *, user_id: str, kind: str, metadata: dict[str, Any]) -> str:
+        card = self._timeline.remember(
+            text,
+            user_id=user_id,
+            case_id=self._case_id,
+            scope=self._scope,
+            kind=kind,
+            tier="short",
+            metadata=metadata,
+        )
+        return card["id"] if card else ""
+
+    def retrieve_text(self, query: str, *, user_id: str, limit: int = 8) -> list[dict[str, Any]]:
+        result = self._timeline.retrieve(
+            query,
+            user_id=user_id,
+            case_id=self._case_id,
+            scope=self._scope,
+            limit=limit,
+        )
+        selected = result.get("selected", [])
+        return [
+            {
+                "id": item["cardId"],
+                "text": item["card"]["text"],
+                "score": item["score"],
+                **item["card"],
+            }
+            for item in selected
+        ]
+
+
+class HierarchicalMemoryAdapter:
+    """MemoryBackend-compatible wrapper around HierarchicalMemory.
+
+    Note: HierarchicalMemory uses Segment-based ingest, so this adapter
+    converts text → synthetic Segment for compatibility.
+    """
+
+    def __init__(self, hierarchical: HierarchicalMemory):
+        self._hierarchical = hierarchical
+
+    def ingest_text(self, text: str, *, user_id: str, kind: str, metadata: dict[str, Any]) -> str:
+        # Synthetic segment: no frames, just text as caption
+        from ..capture.events import Segment
+        import numpy as np
+        seg = Segment(
+            t_start=0.0,
+            t_end=0.0,
+            frames=[],
+            frame_times=[],
+            frame_meta=[],
+            audio=[text],
+            audio_times=[0.0],
+        )
+        item = self._hierarchical.ingest(seg)
+        return str(item.id)
+
+    def retrieve_text(self, query: str, *, user_id: str, limit: int = 8) -> list[dict[str, Any]]:
+        from ..retrieval.router import route_and_retrieve
+        from ..config import Config
+        candidates = route_and_retrieve(query, self._hierarchical, self._hierarchical.backend, Config())
+        return [
+            {
+                "id": str(cand.item.id),
+                "text": cand.item.caption,
+                "score": cand.score,
+            }
+            for cand in candidates[:limit]
+        ]

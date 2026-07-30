@@ -7,13 +7,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import List, Optional  # noqa: F401 – Optional kept for subclassers
 
 import numpy as np
 
 from ..backends.base import VLMBackend
 from ..capture.events import Segment
 from ..config import Config
+from ..retrieval.index import VectorIndex, build_index
 
 
 @dataclass
@@ -36,9 +37,10 @@ class MemoryItem:
 
 
 class HierarchicalMemory:
-    def __init__(self, backend: VLMBackend, cfg: Config):
+    def __init__(self, backend: VLMBackend, cfg: Config, *, index: VectorIndex | None = None):
         self.backend = backend
         self.cfg = cfg
+        self._index = index or build_index(backend.dim)
         self._next_id = 0
         self.current: List[MemoryItem] = []
         self.short_term: List[MemoryItem] = []
@@ -66,6 +68,7 @@ class HierarchicalMemory:
                           keyframe_times=kf_times, keyframe_meta=kf_meta,
                           audio_events=audio_events, level="short")
         self._items_by_id[item.id] = item
+        self._index.add(item.id, emb)
         self.short_term.append(item)
         self._update_current(item)
         self._since_consolidate += 1
@@ -113,16 +116,33 @@ class HierarchicalMemory:
             [meta for _, _, meta in timed_frames],
             8,
         )
-        return MemoryItem(
+        merged = MemoryItem(
             id=self._new_id(), t_start=group[0].t_start, t_end=group[-1].t_end,
             embedding=emb.astype(np.float32), caption="; ".join(caps[:4]),
             keyframes=kf, keyframe_times=kf_times, keyframe_meta=kf_meta,
             audio_events=[event for m in group for event in m.audio_events],
             level="long",
             child_ids=[m.id for m in group])
+        # Update index: remove old child IDs, add merged item
+        for child in group:
+            self._index.remove(child.id)
+        self._index.add(merged.id, merged.embedding)
+        return merged
 
     def all_items(self) -> List[MemoryItem]:
         return self.short_term + self.long_term
+
+    def retrieve_by_vector(self, query_vec: np.ndarray, k: int) -> List[MemoryItem]:
+        """Retrieve top-k most similar items using the index."""
+        # If index is out of sync (e.g., test directly sets current/short_term), rebuild
+        if self._index.size() == 0 and self.all_items():
+            for item in self.all_items():
+                if item.id not in self._items_by_id:
+                    self._items_by_id[item.id] = item
+                self._index.add(item.id, item.embedding)
+
+        hits = self._index.search(query_vec, k)
+        return [self._items_by_id[item_id] for item_id, _score in hits if item_id in self._items_by_id]
 
     def _new_id(self) -> int:
         i = self._next_id

@@ -7,9 +7,33 @@ from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from temporalio import activity, workflow
-from temporalio.client import Client
-from temporalio.common import RetryPolicy, WorkflowIDReusePolicy
+try:
+    from temporalio import activity, workflow  # type: ignore[import-untyped]
+    from temporalio.client import Client  # type: ignore[import-untyped]
+    from temporalio.common import RetryPolicy, WorkflowIDReusePolicy  # type: ignore[import-untyped]
+    _TEMPORAL_AVAILABLE = True
+except ImportError:
+    _TEMPORAL_AVAILABLE = False
+
+    class _Stub:  # type: ignore[no-untyped-def]
+        """Pass-through stub for temporalio decorators and context managers."""
+        def __getattr__(self, name: str) -> "_Stub":
+            return _Stub()
+        def __call__(self, *args: Any, **kwargs: Any) -> Any:
+            # If used as a bare decorator, pass the decorated object through.
+            if len(args) == 1 and callable(args[0]) and not kwargs:
+                return args[0]
+            return _Stub()
+        def __enter__(self) -> "_Stub":
+            return self
+        def __exit__(self, *args: Any) -> bool:
+            return False
+
+    activity = _Stub()  # type: ignore[assignment]
+    workflow = _Stub()  # type: ignore[assignment]
+    Client = None  # type: ignore[assignment,misc]
+    RetryPolicy = None  # type: ignore[assignment,misc]
+    WorkflowIDReusePolicy = None  # type: ignore[assignment,misc]
 
 with workflow.unsafe.imports_passed_through():
     from pathlib import Path

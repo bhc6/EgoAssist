@@ -202,10 +202,34 @@ class TimelineMemory:
         connection.execute("PRAGMA busy_timeout=10000")
         return _ClosingConnection(connection)
 
+    def _connect_init(self) -> sqlite3.Connection:
+        """Autocommit connection used exclusively by _initialize().
+
+        _initialize() mixes executescript() (which always runs in autocommit) with
+        regular execute() calls.  Python's sqlite3 module tracks implicit-transaction
+        state at the Python level, and calling executescript() leaves that state
+        inconsistent: subsequent DML execute() calls start a new implicit transaction,
+        but any FTS5 shadow-table writes done by the rebuild executescript() (autocommit)
+        are then re-read from inside that new transaction — which confuses SQLite 3.50+
+        and raises "database disk image is malformed".
+
+        isolation_level=None disables Python's implicit transaction management entirely,
+        so every statement is committed immediately and the FTS5 shadow tables are always
+        in a consistent state for the trigger that fires during the migration UPDATE.
+        """
+        connection = sqlite3.connect(str(self.path), timeout=10.0, isolation_level=None)
+        connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA foreign_keys=ON")
+        connection.execute("PRAGMA busy_timeout=10000")
+        return connection
+
     def _initialize(self) -> None:
-        with self._lock, self._connect() as connection:
-            connection.execute("PRAGMA journal_mode=WAL")
-            connection.executescript("""
+        conn = self._connect_init()
+        try:
+            with self._lock:
+                conn.execute("PRAGMA journal_mode=WAL")
+                # Step 1: core tables — NO FTS5 yet so migration UPDATE has no triggers
+                conn.executescript("""
                 CREATE TABLE IF NOT EXISTS timeline_meta (
                     key TEXT PRIMARY KEY,
                     value TEXT NOT NULL
@@ -270,41 +294,89 @@ class TimelineMemory:
                 CREATE INDEX IF NOT EXISTS memory_drafts_owner
                     ON memory_drafts(user_id, case_id, status, expires_at DESC);
             """)
-            version = connection.execute(
-                "SELECT value FROM timeline_meta WHERE key='schema_version'"
-            ).fetchone()
-            if version and int(version["value"]) not in {1, TIMELINE_SCHEMA_VERSION}:
-                raise ValueError(f"unsupported timeline schema version: {version['value']}")
-            columns = {
-                str(row["name"])
-                for row in connection.execute("PRAGMA table_info(memory_cards)").fetchall()
-            }
-            migrations = {
-                "recorded_at": "TEXT",
-                "effective_at": "TEXT",
-                "effective_end": "TEXT",
-                "timezone_name": "TEXT",
-                "utc_offset_minutes": "INTEGER",
-                "recurrence": "TEXT",
-                "subject": "TEXT",
-                "predicate": "TEXT",
-                "value": "TEXT",
-            }
-            for column, declaration in migrations.items():
-                if column not in columns:
-                    connection.execute(f"ALTER TABLE memory_cards ADD COLUMN {column} {declaration}")
-            connection.execute(
-                """UPDATE memory_cards
-                   SET recorded_at=COALESCE(recorded_at, created_at),
-                       effective_at=COALESCE(effective_at, happened_at),
-                       timezone_name=COALESCE(timezone_name, 'UTC'),
-                       utc_offset_minutes=COALESCE(utc_offset_minutes, 0),
-                       recurrence=COALESCE(recurrence, 'null')"""
-            )
-            connection.execute(
-                "INSERT OR REPLACE INTO timeline_meta(key, value) VALUES('schema_version', ?)",
-                (str(TIMELINE_SCHEMA_VERSION),),
-            )
+                # Step 2: schema migration — runs BEFORE FTS5 exists so no triggers fire.
+                version = conn.execute(
+                    "SELECT value FROM timeline_meta WHERE key='schema_version'"
+                ).fetchone()
+                if version and int(version["value"]) not in {1, TIMELINE_SCHEMA_VERSION}:
+                    raise ValueError(f"unsupported timeline schema version: {version['value']}")
+                columns = {
+                    str(row["name"])
+                    for row in conn.execute("PRAGMA table_info(memory_cards)").fetchall()
+                }
+                migrations = {
+                    "recorded_at": "TEXT",
+                    "effective_at": "TEXT",
+                    "effective_end": "TEXT",
+                    "timezone_name": "TEXT",
+                    "utc_offset_minutes": "INTEGER",
+                    "recurrence": "TEXT",
+                    "subject": "TEXT",
+                    "predicate": "TEXT",
+                    "value": "TEXT",
+                }
+                for column, declaration in migrations.items():
+                    if column not in columns:
+                        conn.execute(
+                            f"ALTER TABLE memory_cards ADD COLUMN {column} {declaration}"
+                        )
+                conn.execute(
+                    """UPDATE memory_cards
+                       SET recorded_at=COALESCE(recorded_at, created_at),
+                           effective_at=COALESCE(effective_at, happened_at),
+                           timezone_name=COALESCE(timezone_name, 'UTC'),
+                           utc_offset_minutes=COALESCE(utc_offset_minutes, 0),
+                           recurrence=COALESCE(recurrence, 'null')"""
+                )
+                conn.execute(
+                    "INSERT OR REPLACE INTO timeline_meta(key, value) VALUES('schema_version', ?)",
+                    (str(TIMELINE_SCHEMA_VERSION),),
+                )
+                # Step 3: FTS5 virtual table + triggers — created after migration so the
+                # schema is stable and all existing rows have the required columns.
+                # Content-table FTS5 requires delete-then-reinsert for updates/deletes;
+                # a direct UPDATE on memory_fts is not valid and corrupts shadow tables.
+                try:
+                    conn.executescript("""
+                    CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(
+                        text, normalized_text,
+                        content=memory_cards,
+                        tokenize='trigram'
+                    );
+                    CREATE TRIGGER IF NOT EXISTS memory_cards_fts_insert
+                        AFTER INSERT ON memory_cards BEGIN
+                            INSERT INTO memory_fts(rowid, text, normalized_text)
+                            VALUES (new.rowid, new.text, new.normalized_text);
+                        END;
+                    CREATE TRIGGER IF NOT EXISTS memory_cards_fts_update_before
+                        BEFORE UPDATE ON memory_cards BEGIN
+                            INSERT INTO memory_fts(memory_fts, rowid, text, normalized_text)
+                            VALUES ('delete', old.rowid, old.text, old.normalized_text);
+                        END;
+                    CREATE TRIGGER IF NOT EXISTS memory_cards_fts_update_after
+                        AFTER UPDATE ON memory_cards BEGIN
+                            INSERT INTO memory_fts(rowid, text, normalized_text)
+                            VALUES (new.rowid, new.text, new.normalized_text);
+                        END;
+                    CREATE TRIGGER IF NOT EXISTS memory_cards_fts_delete
+                        BEFORE DELETE ON memory_cards BEGIN
+                            INSERT INTO memory_fts(memory_fts, rowid, text, normalized_text)
+                            VALUES ('delete', old.rowid, old.text, old.normalized_text);
+                        END;
+                    """)
+                    # Populate FTS5 from existing rows (first-time or post-migration).
+                    fts_count = conn.execute(
+                        "SELECT count(*) FROM memory_fts"
+                    ).fetchone()[0]
+                    row_count = conn.execute(
+                        "SELECT count(*) FROM memory_cards"
+                    ).fetchone()[0]
+                    if fts_count < row_count:
+                        conn.execute("INSERT INTO memory_fts(memory_fts) VALUES('rebuild')")
+                except Exception:
+                    pass  # FTS5 not compiled in this SQLite build; non-fatal
+        finally:
+            conn.close()
 
     def remember(
         self,
@@ -773,6 +845,29 @@ class TimelineMemory:
         wants_long = any(marker in query_normalized for marker in _LONG_HINTS)
         today_key = clock.local_now.date().isoformat()
         range_start, range_end = query_time_range(query, clock)
+
+        # Batch FTS5 scoring for all candidates
+        fts_scores: dict[str, float] = {}
+        if query_terms and rows:
+            try:
+                fts_query_str = " OR ".join(f'"{term}"' for term in query_terms)
+                row_ids = [row["id"] for row in rows]
+                placeholders = ",".join("?" * len(row_ids))
+                with self._lock, self._connect() as fts_conn:
+                    fts_rows = fts_conn.execute(
+                        f"""SELECT mc.id, bm25(mf) as score
+                            FROM memory_fts mf
+                            JOIN memory_cards mc ON mc.rowid = mf.rowid
+                            WHERE mf MATCH ?
+                              AND mc.id IN ({placeholders})""",
+                        [fts_query_str] + row_ids,
+                    ).fetchall()
+                    for fts_row in fts_rows:
+                        # bm25() returns negative scores; more negative = better
+                        fts_scores[fts_row[0]] = min(1.0, max(0.0, -float(fts_row[1]) / 10.0))
+            except Exception:
+                pass  # FTS5 not available or query error; fall back to Jaccard
+
         candidates = []
         for row in rows:
             card = self._row_to_card(row, include_embedding=True)
@@ -804,6 +899,11 @@ class TimelineMemory:
             overlap = len(query_terms & card_terms)
             union = max(1, len(query_terms | card_terms))
             lexical = overlap / union if query_terms else 0.0
+
+            # Use pre-computed FTS5 score if available and better than Jaccard
+            fts_score = fts_scores.get(card["id"], 0.0)
+            lexical = max(lexical, fts_score)
+
             vector = card.pop("_embedding")
             semantic = float(np.dot(query_vector, vector)) if query_vector.size == vector.size else 0.0
             semantic = max(0.0, semantic)

@@ -11,13 +11,15 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import List
+from typing import TYPE_CHECKING, List
 
 import numpy as np
 
 from ..backends.base import VLMBackend
 from ..config import Config
-from ..memory.store import MemoryItem
+
+if TYPE_CHECKING:
+    from ..memory.store import MemoryItem
 
 
 @dataclass
