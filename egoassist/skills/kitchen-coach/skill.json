@@ -12,6 +12,17 @@
     "max_protection_ms": 2500
   },
   "memory_policy": {"write": "confirm", "trigger": ["task_id", "step_id"]},
+  "artifacts": [
+    {
+      "id": "kitchen-coach-reference",
+      "title": "Kitchen safety and checkpoint reference",
+      "path": "references/kitchen-reference.pdf",
+      "mediaType": "application/pdf",
+      "tasks": ["*"],
+      "steps": ["*"],
+      "source": "bundled-reviewed-reference"
+    }
+  ],
   "tools": [
     {
       "name": "set_timer",

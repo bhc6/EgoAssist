@@ -5,6 +5,7 @@
     "vendor:livekit": "node scripts/vendor-livekit.mjs"
   },
   "dependencies": {
-    "livekit-client": "2.21.0"
+    "livekit-client": "2.21.0",
+    "pdfjs-dist": "6.2.108"
   }
 }

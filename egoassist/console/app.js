@@ -12,6 +12,8 @@ let mediaGeneration = 0;
 let selectedEventId = null, pipelineDetails = [];
 let currentUser = null, selectedSessionId = null, authMode = "login";
 let sessionCatalog = [], memoryPolicySaving = false;
+let pdfjs = null, artifactDocument = null, artifactPageNumber = 1, artifactScale = 1;
+let artifactRenderGeneration = 0, artifactRenderTask = null, pendingHumanHelpPreview = null;
 let mirrorCamera = localStorage.getItem("egoassist.camera.mirror") !== "false";
 const playbackSources = new Set();
 const AUDIO_BUFFER_HIGH_WATER = 512 * 1024;
@@ -216,6 +218,107 @@ function workLabel(item, fallback) {
   return semantic.summary || semantic.input || item.payload?.text || item.skillRef?.task || fallback;
 }
 
+async function renderArtifactPage() {
+  if (!artifactDocument) return;
+  const generation = ++artifactRenderGeneration;
+  const previousTask = artifactRenderTask;
+  if (previousTask) {
+    previousTask.cancel();
+    try { await previousTask.promise; }
+    catch (error) { if (error?.name !== "RenderingCancelledException") throw error; }
+  }
+  if (generation !== artifactRenderGeneration) return;
+  const page = await artifactDocument.getPage(artifactPageNumber);
+  if (generation !== artifactRenderGeneration) return;
+  const viewport = page.getViewport({scale: artifactScale});
+  const ratio = Math.max(1, window.devicePixelRatio || 1);
+  const canvas = $("#artifactCanvas");
+  canvas.width = Math.floor(viewport.width * ratio);
+  canvas.height = Math.floor(viewport.height * ratio);
+  canvas.style.width = Math.floor(viewport.width) + "px";
+  canvas.style.height = Math.floor(viewport.height) + "px";
+  const renderTask = page.render({canvasContext: canvas.getContext("2d"), viewport, transform: [ratio, 0, 0, ratio, 0, 0]});
+  artifactRenderTask = renderTask;
+  try {
+    await renderTask.promise;
+  } catch (error) {
+    if (error?.name !== "RenderingCancelledException") throw error;
+    return;
+  } finally {
+    if (artifactRenderTask === renderTask) artifactRenderTask = null;
+  }
+  if (generation !== artifactRenderGeneration) return;
+  $("#artifactPage").textContent = artifactPageNumber + " / " + artifactDocument.numPages;
+  $("#artifactZoom").textContent = Math.round(artifactScale * 100) + "%";
+  $("#artifactPrevious").disabled = artifactPageNumber <= 1;
+  $("#artifactNext").disabled = artifactPageNumber >= artifactDocument.numPages;
+}
+
+async function openArtifact(artifactId) {
+  const artifact = (state.artifacts || []).find(item => item.artifact_id === artifactId);
+  if (!artifact) return alert("该资料不再属于当前任务步骤，请刷新后重试");
+  artifactRenderGeneration += 1;
+  artifactDocument = null;
+  artifactPageNumber = 1;
+  artifactScale = 1;
+  $("#artifactTitle").textContent = artifact.title;
+  $("#artifactProvenance").textContent = [
+    artifact.provenance?.source, artifact.provenance?.skill,
+    state.task?.task?.id, artifact.step_id, artifact.checksum,
+  ].filter(Boolean).join(" · ");
+  $("#artifactCanvas").hidden = artifact.media_type !== "application/pdf";
+  $("#artifactImage").hidden = !artifact.media_type.startsWith("image/");
+  $("#artifactDialog").showModal();
+  const contentUrl = artifact.previewUrl + "?session=" + encodeURIComponent(selectedSessionId);
+  try {
+    if (artifact.media_type === "application/pdf") {
+      pdfjs ||= await import("./vendor/pdf.mjs?v=6.2.108");
+      pdfjs.GlobalWorkerOptions.workerSrc = "./vendor/pdf.worker.mjs?v=6.2.108";
+      const loadedDocument = await pdfjs.getDocument({url: contentUrl, withCredentials: true}).promise;
+      if (!$("#artifactDialog").open) {
+        await loadedDocument.destroy();
+        return;
+      }
+      artifactDocument = loadedDocument;
+      await renderArtifactPage();
+    } else {
+      $("#artifactImage").src = contentUrl;
+      $("#artifactPage").textContent = "image";
+      $("#artifactZoom").textContent = "fit";
+    }
+  } catch (error) {
+    $("#artifactDialog").close();
+    alert("参考资料加载失败：" + error.message);
+  }
+}
+
+function resetHumanHelpDialog() {
+  pendingHumanHelpPreview = null;
+  $("#humanHelpCompose").hidden = false;
+  $("#humanHelpPreview").hidden = true;
+  $("#humanHelpConsentRow").hidden = true;
+  $("#humanHelpConsent").checked = false;
+  $("#humanHelpBack").hidden = true;
+  $("#humanHelpContinue").textContent = "检查发送内容";
+}
+
+function showHumanHelpPreview(payload) {
+  pendingHumanHelpPreview = payload;
+  const preview = payload.preview;
+  $("#humanHelpCompose").hidden = true;
+  $("#humanHelpPreview").hidden = false;
+  $("#humanHelpPreview").innerHTML =
+    "<dl><dt>用途</dt><dd>" + esc(preview.purpose) + "</dd>" +
+    "<dt>正文</dt><dd>" + esc(preview.message) + "</dd>" +
+    "<dt>任务上下文</dt><dd>" + esc(Object.values(preview.taskContext).filter(Boolean).join(" / ") || "未加载任务") + "</dd>" +
+    "<dt>数据类别</dt><dd>" + esc(preview.dataCategories.join("、")) + "</dd>" +
+    "<dt>接收方</dt><dd>" + esc(preview.destination) + "</dd>" +
+    "<dt>授权有效期</dt><dd>" + esc(payload.expiresAt) + "</dd></dl>";
+  $("#humanHelpConsentRow").hidden = false;
+  $("#humanHelpBack").hidden = false;
+  $("#humanHelpContinue").textContent = "同意并发送";
+}
+
 function renderWorkCenter() {
   const ledger = state.workLedger || {intents: [], jobs: [], resultInbox: [], foregroundIntentId: null};
   const capabilities = state.capabilityCatalog?.platform || [];
@@ -223,10 +326,16 @@ function renderWorkCenter() {
   const timerCapability = capabilities.find(item => item.id === "timer-delivery") || {
     status: "unsupported", reason: "Temporal reminder service is not configured.",
   };
+  const humanHelpCapability = capabilities.find(item => item.id === "human-help") || {
+    status: "unconfigured", reason: "No human-help connector is configured.",
+  };
   $("#createReminder").disabled = timerCapability.status !== "available";
   $("#reminderAvailability").textContent = timerCapability.status === "available"
     ? "Temporal · durable"
     : timerCapability.status + " · " + timerCapability.reason;
+  $("#requestHumanHelp").disabled = humanHelpCapability.status !== "available";
+  $("#humanHelpAvailability").textContent = humanHelpCapability.status === "available"
+    ? "webhook · consent required" : humanHelpCapability.status + " · " + humanHelpCapability.reason;
   $("#capabilityTruth").innerHTML = capabilities.map(item =>
     "<span class='capability-state " + esc(item.status) + "' title='" + esc(item.reason) + "'><b>" +
     esc(item.label + " · " + item.status) + "</b></span>"
@@ -256,11 +365,20 @@ function renderWorkCenter() {
   $("#resultInbox").innerHTML = ledger.resultInbox.length ? [...ledger.resultInbox].reverse().map(item => {
     const content = typeof item.content === "string" ? item.content : JSON.stringify(item.content);
     const dismissible = !["delivered", "dismissed"].includes(item.status);
+    const artifact = item.content?.artifact || item.content?.result?.artifact;
     return "<article class='work-row " + esc(item.status) + "'><div><b>" + esc(content) +
       "</b><small>" + esc(item.status + " · priority " + item.priority) + "</small></div>" +
-      (dismissible ? "<button data-dismiss-result='" + esc(item.resultId) + "'>确认</button>" : "") +
+      "<div class='work-row-actions'>" +
+      (artifact ? "<button data-open-artifact='" + esc(artifact.artifact_id) + "'>查看</button>" : "") +
+      (dismissible ? "<button data-dismiss-result='" + esc(item.resultId) + "'>确认</button>" : "") + "</div>" +
       "</article>";
   }).join("") : "<p class='empty-state'>暂无待处理结果</p>";
+
+  $("#artifactList").innerHTML = (state.artifacts || []).length ? state.artifacts.map(item =>
+    "<article class='work-row'><div><b>" + esc(item.title) + "</b><small>" +
+    esc(item.media_type + " · " + item.step_id) + "</small></div><button data-open-artifact='" +
+    esc(item.artifact_id) + "'>查看</button></article>"
+  ).join("") : "<p class='empty-state compact'>当前步骤没有已授权资料</p>";
 
   $$('[data-focus-intent]').forEach(button => button.onclick = () => run(button, post("/api/intents/focus", {
     sessionId: selectedSessionId, intentId: button.dataset.focusIntent,
@@ -271,6 +389,7 @@ function renderWorkCenter() {
   $$('[data-dismiss-result]').forEach(button => button.onclick = () => run(button, post("/api/results/dismiss", {
     sessionId: selectedSessionId, resultId: button.dataset.dismissResult,
   }).then(payload => payload.state || payload)));
+  $$('[data-open-artifact]').forEach(button => button.onclick = () => openArtifact(button.dataset.openArtifact));
 }
 
 function render(next) {
@@ -365,6 +484,7 @@ async function executeTool(button) {
     });
     $("#toolResult").textContent = JSON.stringify(payload.result);
     render(payload.state);
+    if (payload.result?.artifact?.artifact_id) await openArtifact(payload.result.artifact.artifact_id);
   } catch (error) { alert(error.message); }
 }
 
@@ -849,6 +969,69 @@ $("#taskForm").onsubmit = async event => {
     $("#taskDialog").close();
     if (wasRealtime) await connectRealtime();
   } catch (error) { alert(error.message); }
+};
+$("#artifactClose").onclick = () => $("#artifactDialog").close();
+$("#artifactPrevious").onclick = async () => {
+  if (!artifactDocument || artifactPageNumber <= 1) return;
+  artifactPageNumber -= 1;
+  await renderArtifactPage();
+};
+$("#artifactNext").onclick = async () => {
+  if (!artifactDocument || artifactPageNumber >= artifactDocument.numPages) return;
+  artifactPageNumber += 1;
+  await renderArtifactPage();
+};
+$("#artifactZoomOut").onclick = async () => {
+  if (!artifactDocument) return;
+  artifactScale = Math.max(0.5, artifactScale - 0.15);
+  await renderArtifactPage();
+};
+$("#artifactZoomIn").onclick = async () => {
+  if (!artifactDocument) return;
+  artifactScale = Math.min(2.5, artifactScale + 0.15);
+  await renderArtifactPage();
+};
+$("#artifactDialog").onclose = () => {
+  artifactRenderGeneration += 1;
+  artifactRenderTask?.cancel();
+  artifactRenderTask = null;
+  if (typeof artifactDocument?.destroy === "function") {
+    Promise.resolve(artifactDocument.destroy()).catch(() => {});
+  }
+  artifactDocument = null;
+  $("#artifactImage").removeAttribute("src");
+};
+$("#requestHumanHelp").onclick = () => {
+  resetHumanHelpDialog();
+  $("#humanHelpMessage").value = "";
+  $("#humanHelpDialog").showModal();
+};
+$("#humanHelpCancel").onclick = () => $("#humanHelpDialog").close();
+$("#humanHelpBack").onclick = () => resetHumanHelpDialog();
+$("#humanHelpForm").onsubmit = async event => {
+  event.preventDefault();
+  const button = $("#humanHelpContinue");
+  button.disabled = true;
+  try {
+    if (!pendingHumanHelpPreview) {
+      const preview = await post("/api/human-help/preview", {
+        sessionId: selectedSessionId,
+        purpose: $("#humanHelpPurpose").value.trim(),
+        message: $("#humanHelpMessage").value.trim(),
+      });
+      showHumanHelpPreview(preview);
+      return;
+    }
+    if (!$("#humanHelpConsent").checked) throw Error("请先核对并同意本次发送的数据和接收方");
+    const payload = await post("/api/human-help/submit", {
+      sessionId: selectedSessionId,
+      previewId: pendingHumanHelpPreview.previewId,
+      accepted: true,
+    });
+    render(payload.state);
+    $("#humanHelpDialog").close();
+  } catch (error) { alert(error.message); }
+  finally { button.disabled = false; }
 };
 $("#reminderForm").onsubmit = async event => {
   event.preventDefault();

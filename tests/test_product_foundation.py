@@ -1,3 +1,4 @@
+import asyncio
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -18,6 +19,8 @@ from egoassist.product import (
     product_span,
 )
 from egoassist.product.models import ConversationTurnRow
+from egoassist.product.artifacts import LocalArtifactPort
+from egoassist.product.human_help import WebhookHumanHelpPort
 from egoassist.realtime import CaseWorkLedger, SessionJournal
 
 
@@ -109,3 +112,80 @@ def test_correlation_helpers_never_require_transcript_payloads():
     assert ids == {"turn_id": "turn-1", "intent_id": "intent-1"}
     with product_span("test.span", {"turn_id": "turn-1", "text": "secret"}):
         pass
+
+
+def test_local_artifact_port_scopes_catalog_and_rejects_path_escape(tmp_path):
+    root = tmp_path / "skill"
+    root.mkdir()
+    reference = root / "reference.pdf"
+    reference.write_bytes(b"%PDF-test")
+    port = LocalArtifactPort([{
+        "id": "reference-1", "root": root, "path": "reference.pdf",
+        "mediaType": "application/pdf", "skill": "assembly-coach",
+        "tasks": ["task-1"], "steps": ["step-1"],
+    }])
+
+    visible = port.list_for_task(
+        owner_id="user-1", skill="assembly-coach", task_id="task-1", step_id="step-1",
+    )
+    assert visible[0]["artifact_id"] == "reference-1"
+    assert visible[0]["step_id"] == "step-1"
+    assert visible[0]["checksum"].startswith("sha256:")
+    assert port.list_for_task(
+        owner_id="user-1", skill="other", task_id="task-1", step_id="step-1",
+    ) == []
+
+    outside = tmp_path / "outside.pdf"
+    outside.write_bytes(b"%PDF-outside")
+    with pytest.raises(ValueError, match="under its Skill"):
+        LocalArtifactPort([{
+            "id": "escaped", "root": root, "path": "../outside.pdf",
+            "mediaType": "application/pdf",
+        }])
+
+
+def test_human_help_connector_preserves_idempotency_and_receipt(monkeypatch):
+    captured = {}
+
+    class Response:
+        status = 200
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_):
+            return None
+
+        async def json(self, content_type=None):
+            return {"status": "acknowledged", "requestId": "remote-1", "message": "queued"}
+
+    class Session:
+        def __init__(self, *, timeout):
+            captured["timeout"] = timeout.total
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_):
+            return None
+
+        def post(self, endpoint, *, json, headers):
+            captured.update(endpoint=endpoint, json=json, headers=headers)
+            return Response()
+
+    request = HumanHelpRequest(
+        request_id="help-1", user_id="user-1", intent_id="intent-1",
+        connector="webhook", purpose="task assistance", preview={"message": "please help"},
+        consent_id="consent-1", idempotency_key="help:help-1",
+    )
+    port = WebhookHumanHelpPort(
+        "https://help.example.test/intake", token="secret", timeout_seconds=3,
+        session_factory=Session,
+    )
+    receipt = asyncio.run(port.submit(request))
+
+    assert receipt.status == "acknowledged"
+    assert receipt.external_request_id == "remote-1"
+    assert captured["headers"]["Idempotency-Key"] == "help:help-1"
+    assert captured["headers"]["Authorization"] == "Bearer secret"
+    assert port.public_summary()["endpointOrigin"] == "https://help.example.test"

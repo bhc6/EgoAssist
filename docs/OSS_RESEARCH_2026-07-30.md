@@ -39,6 +39,11 @@ MCP documentation redirected to its dated `2026-07-28` documentation snapshot.
 | [PDF.js](https://github.com/mozilla/pdf.js) | 53,641 | `v6.2.108` | 2026-07-28 | Apache-2.0 | Select for PDF artifacts |
 | [PhotoSwipe](https://github.com/dimsemenov/PhotoSwipe) | 25,224 | No GitHub latest release | last push 2025-12-04 | MIT | Candidate image viewer |
 
+The npm registry was checked again during M4 implementation on 2026-07-30.
+`pdfjs-dist` still reported `6.2.108` as current, published 2026-07-28. The
+vendored console modules and lockfile use that exact version; `npm audit
+--omit=dev` reported zero known vulnerabilities.
+
 ## Selection Rationale
 
 ### LiveKit over a custom WebSocket media stack

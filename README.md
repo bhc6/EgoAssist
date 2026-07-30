@@ -24,12 +24,12 @@ Current capability truth:
 
 - full-duplex media, interruption, durable transcripts, scoped memory, and tool
   confirmation are implemented research infrastructure;
-- Work Ledger records and projects lifecycle state but is not a background task
-  executor;
-- timers/reminders, remote human help, reference display, automatic structured
-  task perception, and online outcome evaluation are not production features;
-- bundled local acknowledgement and deadline handlers are demo or unsupported
-  adapters and must not be interpreted as completed real-world effects.
+- Work Ledger is a user-facing projection; Temporal, not the ledger, executes
+  configured reminder workflows;
+- task-scoped PDF/image references are implemented; remote human help is available
+  only when a real webhook is configured and the user approves the exact preview;
+- automatic structured task perception and online outcome evaluation remain
+  experimental/offline-only and must not be interpreted as completed effects.
 
 The selected migration foundations are LiveKit for realtime transport, Temporal
 for durable execution, MCP for external connector boundaries, SQLAlchemy/Alembic
@@ -390,6 +390,20 @@ attribution, TimelineMemory, MemoryDraft, and speech policy remain EgoAssist
 responsibilities. A failed room connection is displayed as a bounded WebSocket
 media fallback, never as a successful LiveKit connection.
 
+Task references are declared in each Skill manifest and become visible only when
+that Skill and a concrete task/checkpoint are current. The server resolves only
+catalogued files beneath the Skill root, records a checksum and access receipt,
+and authorizes every content request against the current case. PDF.js `6.2.108`
+owns browser PDF rendering, page navigation, and zoom; EgoAssist owns task and
+checkpoint selection. Images use the same authorization path and a native viewer.
+
+Remote human help is `unconfigured` unless `EGOASSIST_HUMAN_HELP_WEBHOOK` is set.
+The model cannot submit this request. The console first persists and displays the
+exact purpose, message, current task context, data categories, and destination
+origin. Only a second request with explicit user consent invokes the webhook with
+a stable `Idempotency-Key`. Submitted, acknowledged, resolved, failed, and timed
+out receipts are persisted and surfaced through Intent/Job/ResultInbox state.
+
 ## Configuration
 
 Command-line options:
@@ -426,6 +440,9 @@ LIVEKIT_API_SECRET=
 EGOASSIST_NTFY_SERVER=https://ntfy.sh
 EGOASSIST_NTFY_TOPIC=
 EGOASSIST_NTFY_TOKEN=
+EGOASSIST_HUMAN_HELP_WEBHOOK=
+EGOASSIST_HUMAN_HELP_TOKEN=
+EGOASSIST_HUMAN_HELP_TIMEOUT=8
 
 EGOASSIST_CONTEXT_WINDOW=32768
 EGOASSIST_CONTEXT_RESERVE=4096
@@ -511,8 +528,8 @@ Known capability boundaries:
   memory root, not distributed active-active serving.
 - The default online retriever is transparent and reproducible, but is not a
   learned semantic-memory system.
-- Timers and reminders remain unsupported until a durable scheduler and delivery
-  channel are implemented.
+- Timers and reminders remain unavailable unless the Temporal worker starts;
+  human help remains unavailable unless a real webhook connector is configured.
 - Raw audio and camera frames are not retained by TimelineMemory.
 
 ## License

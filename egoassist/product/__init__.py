@@ -12,6 +12,8 @@ _MODULES = (
     "egoassist.product.database",
     "egoassist.product.models",
     "egoassist.product.telemetry",
+    "egoassist.product.artifacts",
+    "egoassist.product.human_help",
 )
 
 
@@ -32,4 +34,5 @@ __all__ = [
     "HumanHelpRequest", "HumanHelpReceipt", "ObservationEvidence", "ProviderDisclosure",
     "InteractionTransport", "WorkflowPort", "NotificationPort", "ArtifactPort",
     "HumanHelpPort", "PerceptionPort",
+    "LocalArtifactPort", "WebhookHumanHelpPort",
 ]

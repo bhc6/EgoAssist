@@ -54,7 +54,12 @@ from egoassist.realtime import (
 )
 from egoassist.realtime.media_audit import MediaAuditAccumulator
 from egoassist.realtime.tools import tool_result_succeeded
-from egoassist.product import ProductDatabase
+from egoassist.product import (
+    HumanHelpRequest,
+    LocalArtifactPort,
+    ProductDatabase,
+    WebhookHumanHelpPort,
+)
 from egoassist.product.notifications import NtfyNotificationPort
 from egoassist.product.reminders import (
     DEFAULT_TASK_QUEUE,
@@ -224,6 +229,28 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
     product_database = ProductDatabase(Path(memory_path).with_name("product.sqlite3"))
     product_database.create_schema()
     capability_overrides: dict[str, dict[str, Any]] = {}
+    artifact_catalog = [
+        {**dict(item), "root": package.root, "skill": package.name}
+        for package in registry.skills.values()
+        for item in package.manifest.get("artifacts", [])
+    ]
+    artifact_port = LocalArtifactPort(artifact_catalog)
+    human_help_port = WebhookHumanHelpPort.from_env()
+    capability_overrides["reference-display"] = {
+        "status": "available" if artifact_catalog else "unconfigured",
+        "reason": (
+            "Task-scoped artifact authorization and the PDF.js/image viewer are connected."
+            if artifact_catalog else "No Skill declares a reference artifact."
+        ),
+    }
+    capability_overrides["human-help"] = {
+        "status": "available" if human_help_port is not None else "unconfigured",
+        "reason": (
+            "A consent-gated webhook connector with durable receipts is configured."
+            if human_help_port is not None
+            else "EGOASSIST_HUMAN_HELP_WEBHOOK is not configured."
+        ),
+    }
     livekit_settings = LiveKitSettings.from_env()
     livekit_transport = (
         LiveKitInteractionTransport(livekit_settings)
@@ -252,8 +279,26 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                     "reason": "Temporal workflow and durable ResultInbox delivery are connected.",
                 }
                 item["handler"] = "builtin.temporal-reminder.v1"
+            if item.get("name") == "show_reference" and any(
+                str(artifact.get("skill")) == package.name for artifact in artifact_catalog
+            ):
+                item["availability"] = {
+                    "status": "available",
+                    "reason": "A task-scoped artifact resolver and browser viewer are connected.",
+                }
+                item["handler"] = "builtin.artifact-reference.v1"
             declarations.append(item)
         return declarations
+
+    def artifacts_for_runtime(active_runtime: SkillRuntime, owner_id: str) -> list[dict[str, Any]]:
+        if active_runtime.skill is None or active_runtime.task is None:
+            return []
+        return artifact_port.list_for_task(
+            owner_id=owner_id,
+            skill=active_runtime.skill.name,
+            task_id=active_runtime.task.spec.id,
+            step_id=active_runtime.task.current_step.id,
+        )
 
     def runtime_skill_summary(package) -> dict:
         summary = package.public_summary()
@@ -923,6 +968,12 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                 "jobs": [], "resultInbox": [],
             }
         )
+        visible_artifacts = artifacts_for_runtime(active_runtime, user_scope)
+        human_help_summary = (
+            human_help_port.public_summary()
+            if human_help_port is not None
+            else {"configured": False, "connector": None}
+        )
         capability_catalog = {
             "platform": platform_capability_truth(capability_overrides),
             "skills": [
@@ -1065,6 +1116,8 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                 "sessionId": visible_session_id,
                 "scheduler": scheduler,
                 "workLedger": work_ledger_snapshot,
+                "artifacts": visible_artifacts,
+                "humanHelp": human_help_summary,
                 "productPersistence": {
                     "status": "projected" if product_projection is not None else "idle",
                     "projection": product_projection,
@@ -1175,6 +1228,8 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
             "sessionId": visible_session_id,
             "scheduler": scheduler,
             "workLedger": work_ledger_snapshot,
+            "artifacts": visible_artifacts,
+            "humanHelp": human_help_summary,
             "capabilityCatalog": capability_catalog,
             "turnTakingPolicy": {
                 **TurnTakingPolicy.from_manifest(active_runtime.skill.manifest).public(),
@@ -1777,6 +1832,254 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
         user_id = request[user_key]["id"]
         session_id = str(request.query.get("session", "")).strip() or None
         return web.json_response(scoped_state_for_user(user_id, session_id))
+
+    async def get_artifacts(request):
+        user_id = request[user_key]["id"]
+        session_id = str(request.query.get("session", "")).strip()
+        if not session_id:
+            raise ValueError("session is required")
+        identity.get_context_session(user_id, session_id)
+        owner = case_owner(user_id, session_id)
+        return web.json_response({
+            "artifacts": artifacts_for_runtime(owner.runtime, user_id),
+            "sessionId": session_id,
+        })
+
+    async def get_artifact_content(request):
+        user_id = request[user_key]["id"]
+        session_id = str(request.query.get("session", "")).strip()
+        artifact_id = str(request.match_info.get("artifact_id", "")).strip()
+        if not session_id or not artifact_id:
+            raise ValueError("session and artifact id are required")
+        identity.get_context_session(user_id, session_id)
+        owner = case_owner(user_id, session_id)
+        authorized = {
+            item["artifact_id"]: item
+            for item in artifacts_for_runtime(owner.runtime, user_id)
+        }
+        descriptor = authorized.get(artifact_id)
+        if descriptor is None:
+            raise web.HTTPNotFound(text="artifact is not authorized for the current checkpoint")
+        path, media_type = artifact_port.content(artifact_id)
+        owner.journal.append(
+            "artifact_access_receipt",
+            {
+                "artifactId": artifact_id,
+                "userId": user_id,
+                "skill": descriptor.get("provenance", {}).get("skill"),
+                "task": owner.runtime.task.spec.id if owner.runtime.task else None,
+                "checkpoint": owner.runtime.task.current_step.id if owner.runtime.task else None,
+                "checksum": descriptor.get("checksum"),
+                "status": "resolved",
+            },
+        )
+        return web.FileResponse(
+            path,
+            headers={
+                "Content-Type": media_type,
+                "Cache-Control": "private, no-store",
+                "X-Content-Type-Options": "nosniff",
+            },
+        )
+
+    async def post_human_help_preview(request):
+        if human_help_port is None:
+            raise web.HTTPServiceUnavailable(
+                text="human-help connector is not configured",
+                content_type="text/plain",
+            )
+        user_id = request[user_key]["id"]
+        payload = await request.json()
+        session_id = str(payload.get("sessionId", "")).strip()
+        purpose = str(payload.get("purpose", "")).strip()
+        message = str(payload.get("message", "")).strip()
+        if not session_id or not purpose or not message:
+            raise ValueError("sessionId, purpose, and message are required")
+        if len(purpose) > 200 or len(message) > 2000:
+            raise ValueError("human-help preview exceeds the supported length")
+        identity.get_context_session(user_id, session_id)
+        owner = case_owner(user_id, session_id)
+        preview_id = uuid4().hex[:16]
+        request_id = f"help-{uuid4().hex[:16]}"
+        consent_id = f"consent-{uuid4().hex[:16]}"
+        task = owner.runtime.task
+        preview = {
+            "purpose": purpose,
+            "message": message,
+            "taskContext": {
+                "skill": owner.runtime.skill.name if owner.runtime.skill else None,
+                "task": task.spec.id if task else None,
+                "checkpoint": task.current_step.id if task else None,
+            },
+            "dataCategories": ["user-authored-message", "current-task-context"],
+            "destination": human_help_port.public_summary()["endpointOrigin"],
+        }
+        expires_at = datetime.now(timezone.utc) + timedelta(minutes=10)
+        owner.journal.append(
+            "human_help_preview",
+            {
+                "previewId": preview_id,
+                "requestId": request_id,
+                "consentId": consent_id,
+                "turnId": f"turn-{request_id}",
+                "intentId": f"intent-{request_id}",
+                "jobId": f"job-{request_id}",
+                "resultId": f"result-{request_id}",
+                "preview": preview,
+                "expiresAt": expires_at.isoformat(),
+                "status": "awaiting-consent",
+            },
+            idempotency_key=f"human-help-preview:{preview_id}",
+        )
+        return web.json_response({
+            "previewId": preview_id,
+            "preview": preview,
+            "expiresAt": expires_at.isoformat(),
+            "consentRequired": True,
+        })
+
+    async def post_human_help_submit(request):
+        if human_help_port is None:
+            raise web.HTTPServiceUnavailable(
+                text="human-help connector is not configured",
+                content_type="text/plain",
+            )
+        user_id = request[user_key]["id"]
+        payload = await request.json()
+        session_id = str(payload.get("sessionId", "")).strip()
+        preview_id = str(payload.get("previewId", "")).strip()
+        if not session_id or not preview_id or payload.get("accepted") is not True:
+            raise ValueError("sessionId, previewId, and explicit accepted=true are required")
+        identity.get_context_session(user_id, session_id)
+        owner = case_owner(user_id, session_id)
+        async with owner.mutation_lock:
+            entries = owner.journal.entries()
+            preview_entry = next((
+                item for item in reversed(entries)
+                if item.get("type") == "human_help_preview"
+                and str(item.get("previewId", "")) == preview_id
+            ), None)
+            if preview_entry is None:
+                raise ValueError("human-help preview not found")
+            existing_receipt = next((
+                item for item in reversed(entries)
+                if item.get("type") == "human_help_receipt"
+                and str(item.get("previewId", "")) == preview_id
+            ), None)
+            if existing_receipt is not None:
+                return web.json_response({
+                    "receipt": dict(existing_receipt.get("receipt") or {}),
+                    "deduplicated": True,
+                    "state": scoped_state_for_user(
+                        user_id, session_id, runtime_override=owner.runtime,
+                    ),
+                })
+            expires_at = datetime.fromisoformat(
+                str(preview_entry["expiresAt"]).replace("Z", "+00:00")
+            )
+            if expires_at < datetime.now(timezone.utc):
+                raise ValueError("human-help preview has expired")
+            consent_id = str(preview_entry["consentId"])
+            owner.journal.append(
+                "human_help_consent",
+                {
+                    "consentId": consent_id,
+                    "previewId": preview_id,
+                    "requestId": preview_entry["requestId"],
+                    "purpose": preview_entry["preview"]["purpose"],
+                    "dataCategories": preview_entry["preview"]["dataCategories"],
+                    "destination": preview_entry["preview"]["destination"],
+                    "status": "granted",
+                },
+                idempotency_key=f"human-help-consent:{consent_id}",
+            )
+            ledger = owner.work_ledger or CaseWorkLedger(owner.journal)
+            turn = ledger.capture_turn(
+                preview_entry["preview"]["message"],
+                source="explicit-human-help-request",
+                turn_id=str(preview_entry["turnId"]),
+            )
+            intent = ledger.create_intent(
+                turn["turnId"],
+                intent_id=str(preview_entry["intentId"]),
+                kind="background-job",
+                status="running-background",
+                payload={"purpose": preview_entry["preview"]["purpose"], "previewId": preview_id},
+                skill_ref=preview_entry["preview"]["taskContext"],
+            )
+            job = ledger.create_job(
+                intent["intentId"],
+                job_id=str(preview_entry["jobId"]),
+                kind="human-help-submit",
+                status="running",
+                payload={
+                    "requestId": preview_entry["requestId"],
+                    "previewId": preview_id,
+                    "connector": "webhook",
+                },
+            )
+            connector_request = HumanHelpRequest(
+                request_id=str(preview_entry["requestId"]),
+                user_id=user_id,
+                intent_id=intent["intentId"],
+                connector="webhook",
+                purpose=str(preview_entry["preview"]["purpose"]),
+                preview=dict(preview_entry["preview"]),
+                consent_id=consent_id,
+                idempotency_key=f"human-help:{preview_entry['requestId']}",
+            )
+            owner.journal.append(
+                "human_help_request",
+                {
+                    "previewId": preview_id,
+                    "request": connector_request.model_dump(mode="json"),
+                    "status": "submitting",
+                },
+                idempotency_key=f"human-help-request:{preview_entry['requestId']}",
+            )
+            receipt = await human_help_port.submit(connector_request)
+            receipt_payload = receipt.model_dump(mode="json")
+            owner.journal.append(
+                "human_help_receipt",
+                {
+                    "previewId": preview_id,
+                    "requestId": preview_entry["requestId"],
+                    "receipt": receipt_payload,
+                    "status": receipt.status,
+                },
+                idempotency_key=f"human-help-receipt:{preview_entry['requestId']}",
+            )
+            succeeded = receipt.status in {"submitted", "acknowledged", "resolved"}
+            result = ledger.enqueue_result(
+                intent["intentId"],
+                {
+                    "kind": "human-help",
+                    "purpose": connector_request.purpose,
+                    "status": receipt.status,
+                    "message": receipt.message,
+                    "error": receipt.error,
+                    "externalRequestId": receipt.external_request_id,
+                },
+                job_id=job["jobId"],
+                result_id=str(preview_entry["resultId"]),
+                priority=90 if succeeded else 100,
+                delivery="display",
+            )
+            ledger.set_job_status(
+                job["jobId"], "completed" if succeeded else "failed",
+                detail={"resultId": result["resultId"], "receiptStatus": receipt.status},
+            )
+            ledger.set_intent_status(
+                intent["intentId"], "completed" if succeeded else "failed",
+                detail={"resultId": result["resultId"], "receiptStatus": receipt.status},
+            )
+            return web.json_response({
+                "receipt": receipt_payload,
+                "deduplicated": False,
+                "state": scoped_state_for_user(
+                    user_id, session_id, runtime_override=owner.runtime,
+                ),
+            })
 
     async def get_index(request):
         return web.FileResponse(WEB_ROOT / "index.html")
@@ -3120,6 +3423,18 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                         "arguments": dict(arguments),
                         "result": dict(result),
                     })
+                elif tool_name == "show_reference" and declaration and declaration.get("handler") == "builtin.artifact-reference.v1":
+                    available = artifacts_for_runtime(active_runtime, user_id)
+                    if not available:
+                        raise ValueError("no artifact is authorized for the current checkpoint")
+                    result = {"status": "resolved", "artifact": available[0]}
+                    active_tools.audit.append({
+                        "time": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                        "tool": tool_name,
+                        "handler": "builtin.artifact-reference.v1",
+                        "arguments": dict(arguments),
+                        "result": dict(result),
+                    })
                 else:
                     result = active_tools.execute(
                         tool=tool_name,
@@ -3353,6 +3668,20 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                     "time": datetime.now(timezone.utc).isoformat(timespec="seconds"),
                     "tool": name,
                     "handler": "builtin.temporal-reminder.v1",
+                    "arguments": dict(arguments),
+                    "result": dict(result),
+                })
+                persist_tool_audit(owner, audit_count)
+                return result
+            if name == "show_reference" and declaration and declaration.get("handler") == "builtin.artifact-reference.v1":
+                available = artifacts_for_runtime(session_runtime, user_id)
+                if not available:
+                    raise ValueError("no artifact is authorized for the current checkpoint")
+                result = {"status": "resolved", "artifact": available[0]}
+                session_tools.audit.append({
+                    "time": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                    "tool": name,
+                    "handler": "builtin.artifact-reference.v1",
                     "arguments": dict(arguments),
                     "result": dict(result),
                 })
@@ -4411,6 +4740,10 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
         web.post("/api/sessions", post_session),
         web.post("/api/sessions/memory-policy", post_memory_policy),
         web.get("/api/state", get_state),
+        web.get("/api/artifacts", get_artifacts),
+        web.get("/api/artifacts/{artifact_id}/content", get_artifact_content),
+        web.post("/api/human-help/preview", post_human_help_preview),
+        web.post("/api/human-help/submit", post_human_help_submit),
         web.post("/api/skills/activate", post_activate),
         web.post("/api/tasks/select", post_task_select),
         web.post("/api/tasks/create", post_task_create),

@@ -12,16 +12,36 @@
     "max_protection_ms": 1800
   },
   "memory_policy": {"write": "confirm", "trigger": ["task_id", "step_id"]},
+  "artifacts": [
+    {
+      "id": "flat-pack-stool-reference",
+      "title": "Flat-pack assembly safety reference",
+      "path": "references/assembly-reference.pdf",
+      "mediaType": "application/pdf",
+      "tasks": ["flat-pack-stool"],
+      "steps": ["*"],
+      "source": "bundled-reviewed-reference"
+    },
+    {
+      "id": "water-filter-reference",
+      "title": "Water filter installation reference",
+      "path": "references/water-filter-reference.pdf",
+      "mediaType": "application/pdf",
+      "tasks": ["water-filter"],
+      "steps": ["*"],
+      "source": "bundled-reviewed-reference"
+    }
+  ],
   "tools": [
     {
       "name": "show_reference",
-      "description": "Reference display is unavailable until an artifact resolver and viewer are connected",
+      "description": "Open the reference artifact authorized for the current task checkpoint",
       "availability": {
         "status": "unsupported",
         "reason": "No task artifact resolver or browser viewer is connected."
       },
       "requires_confirmation": false,
-      "handler": "builtin.local-acknowledgement.v1",
+      "handler": "builtin.artifact-reference.v1",
       "arguments": {"type": "object", "additionalProperties": false, "properties": {}},
       "result": {"status": "unsupported", "message": "No artifact resolver or viewer is connected."}
     },

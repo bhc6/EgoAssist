@@ -48,7 +48,7 @@ def test_frontend_exposes_memory_pipeline_and_treats_steps_as_reference_map():
     assert '"?session=" + encodeURIComponent(selectedSessionId)' in script
     assert 'id="mirrorCamera"' in html
     assert 'vendor/livekit-client.umd.js?v=2.21.0' in html
-    assert 'app.js?v=20260730-livekit-m3' in html
+    assert 'app.js?v=20260730-m4' in html
     assert '/api/livekit/token' in script
     assert 'activateWebSocketMediaFallback' in script
     assert 'interactionTransport === "livekit"' in script
@@ -114,3 +114,21 @@ def test_frontend_exposes_operable_work_center_and_capability_truth():
     assert 'id="reminderForm"' in html
     assert 'post("/api/reminders"' in script
     assert 'item.id === "timer-delivery"' in script
+
+
+def test_frontend_renders_task_artifacts_and_consent_gated_human_help():
+    html = (CONSOLE_ROOT / "index.html").read_text(encoding="utf-8")
+    script = (CONSOLE_ROOT / "app.js").read_text(encoding="utf-8")
+
+    for identifier in (
+        "artifactList", "artifactDialog", "artifactCanvas", "artifactPrevious",
+        "artifactNext", "artifactZoomIn", "artifactZoomOut", "humanHelpDialog",
+        "humanHelpPreview", "humanHelpConsent",
+    ):
+        assert f'id="{identifier}"' in html
+    assert 'import("./vendor/pdf.mjs?v=6.2.108")' in script
+    assert 'pdfjs.GlobalWorkerOptions.workerSrc' in script
+    assert 'post("/api/human-help/preview"' in script
+    assert 'post("/api/human-help/submit"' in script
+    assert 'accepted: true' in script
+    assert "preview.destination" in script

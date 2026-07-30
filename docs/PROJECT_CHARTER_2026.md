@@ -82,8 +82,8 @@ are reserved for evidence-backed state transitions.
 | Work Ledger | Infrastructure only | It is a projection, not an executor |
 | Background intent execution | Unsupported | Hide until a durable workflow runs it |
 | Timer/reminder delivery | Unsupported | The deadline calculator is not a timer |
-| Human help | Demo-only | A local acknowledgement is not escalation |
-| Reference display | Unsupported | No artifact resolver or viewer is connected |
+| Human help | Conditional | Available only with a configured webhook and explicit preview consent |
+| Reference display | Implemented | Task/checkpoint authorization plus PDF.js/image viewer |
 | Structured realtime task perception | Experimental/offline | Adapter is not wired to the live task path |
 | Skill capability labels | Descriptive metadata | Never expose them as executable features |
 | Online evaluation | Offline/replay only | No online metric without truth collection |
@@ -344,7 +344,7 @@ is marked complete only after its exit gate and regression suite pass.
 | M1 Foundation | Complete | Pydantic contracts, typed infrastructure ports, SQLAlchemy models, reversible Alembic migration `b0688201c8ee`, OpenTelemetry ID filtering, and an idempotent JSONL compatibility projector are implemented and tested. Runtime state now projects each case journal into the product DB without replacing TimelineMemory. |
 | M2 Reliable timer | Complete | Temporal SDK `1.31.0` owns durable timers, retry, signals, and workflow IDs. The activity writes a stable ResultInbox item before optional ntfy delivery, records per-attempt receipts, and deduplicates repeated activity execution. Task Center supports create/cancel/result acknowledgement. Official time-skipping server tests cover worker restart, fire, cancel, duplicate activity, disconnected UI recovery, and conditional capability exposure. |
 | M3 Interaction transport | Complete | LiveKit Python/JS SDKs own room media behind `InteractionTransport`; authenticated room-scoped tokens, native browser tracks, one assistant audio track, explicit health truth, and bounded WebSocket fallback are implemented. Semantic router v6 emits typed atomic intents. A Temporal time-skipping black-box test proves foreground dialogue, a durable reminder, and EgoAssist MemoryDraft waiting-input state survive disconnect/trigger/reconnect without cross-attribution or silent loss. |
-| M4 Artifacts and human help | Not started | Both remain unavailable or demo-only. |
+| M4 Artifacts and human help | Complete | Skill manifests declare task-scoped PDF artifacts; the resolver enforces path, owner, active Skill/task/checkpoint, checksum, and access receipts; PDF.js 6.2.108 renders pages with navigation and zoom. Human help requires an exact persisted browser preview and explicit consent before a configured webhook receives a stable idempotency key. Connector receipts and Intent/Job/ResultInbox outcomes expose acknowledged, failed, timed-out, and deduplicated paths; unconfigured deployments remain unavailable. |
 | M5 Structured perception | Not started | Realtime checkpoint-constrained perception remains experimental. |
 | M6 Privacy and evaluation | Not started | Existing memory deletion remains preserved; complete governance is pending. |
 
