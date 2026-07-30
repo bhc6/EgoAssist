@@ -893,6 +893,9 @@ async function connectRealtimeSession(generation) {
         ? "livekit" : interactionTransport;
       $("#duplexState").textContent = (interactionTransport === "livekit" ? "LiveKit" : "WebSocket fallback") + " · 直接说话，可随时打断";
       $("#realtimeButton").textContent = "结束陪练";
+    } else if (message.type === "provider_unavailable") {
+      $("#duplexState").textContent = "Provider offline · local console remains available";
+      $("#assistantCaption").innerHTML = "<span>REALTIME PROVIDER UNAVAILABLE</span><p>" + esc(message.reason || "network or DNS unavailable") + "</p>";
     } else if (message.type === "audio" && interactionTransport !== "livekit" && ["conversation", "proactive-utterance"].includes(message.purpose)) {
       $("#duplexState").textContent = "助手正在说 · 你可以随时打断";
       playPcm24(message.audio);

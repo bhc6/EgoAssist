@@ -203,6 +203,43 @@ def test_fake_dns_uses_doh_records(monkeypatch):
     assert _realtime_public_ips() == ["39.96.198.249"]
 
 
+def test_fake_dns_cascades_when_first_doh_endpoint_is_blocked(monkeypatch):
+    monkeypatch.delenv("DASHSCOPE_REALTIME_IPS", raising=False)
+    monkeypatch.setenv("DASHSCOPE_DOH_URLS", "https://blocked.example/resolve,https://working.example/resolve")
+    monkeypatch.setattr(socket, "getaddrinfo", lambda *args, **kwargs: [
+        (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("198.18.2.176", 443)),
+    ])
+    calls = []
+
+    class Response:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"Answer": [{"type": 1, "data": "39.96.198.249"}]}
+
+    def resolve(url, **kwargs):
+        calls.append(url)
+        if "blocked" in url:
+            raise OSError("socket blocked")
+        return Response()
+
+    monkeypatch.setattr("egoassist.realtime.omni.requests.get", resolve)
+    assert _realtime_public_ips() == ["39.96.198.249"]
+    assert calls == ["https://blocked.example/resolve", "https://working.example/resolve"]
+
+
+def test_fake_dns_reports_actionable_error_when_all_resolvers_are_blocked(monkeypatch):
+    monkeypatch.delenv("DASHSCOPE_REALTIME_IPS", raising=False)
+    monkeypatch.setenv("DASHSCOPE_DOH_URLS", "https://blocked.example/resolve")
+    monkeypatch.setattr(socket, "getaddrinfo", lambda *args, **kwargs: [
+        (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("198.18.2.176", 443)),
+    ])
+    monkeypatch.setattr("egoassist.realtime.omni.requests.get", lambda *args, **kwargs: (_ for _ in ()).throw(OSError("socket blocked")))
+    with pytest.raises(ConnectionError, match="DASHSCOPE_REALTIME_IPS"):
+        _realtime_public_ips()
+
+
 def test_connection_override_preserves_global_resolver(monkeypatch):
     monkeypatch.setenv("DASHSCOPE_REALTIME_IPS", "39.96.198.249")
     original = socket.getaddrinfo

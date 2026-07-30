@@ -101,18 +101,44 @@ def _realtime_public_ips(host: str = _DASHSCOPE_HOST) -> list[str]:
     override = os.getenv("DASHSCOPE_REALTIME_IPS", "")
     if override:
         return [item.strip() for item in override.split(",") if item.strip()]
-    system_ips = sorted({item[4][0] for item in socket.getaddrinfo(host, 443, type=socket.SOCK_STREAM)})
+    try:
+        system_ips = sorted({item[4][0] for item in socket.getaddrinfo(host, 443, type=socket.SOCK_STREAM)})
+    except (OSError, socket.gaierror) as exc:
+        raise ConnectionError(
+            f"DashScope DNS lookup failed for {host}; configure DASHSCOPE_REALTIME_IPS or a working resolver"
+        ) from exc
     if system_ips and not all(_is_fake_ip(item) for item in system_ips):
         return []
-    response = requests.get(
-        "https://dns.alidns.com/resolve",
-        params={"name": host, "type": "A"}, timeout=10,
+    resolver_urls = [
+        item.strip() for item in os.getenv(
+            "DASHSCOPE_DOH_URLS",
+            "https://cloudflare-dns.com/dns-query,https://dns.google/resolve,https://dns.alidns.com/resolve",
+        ).split(",") if item.strip()
+    ]
+    errors: list[str] = []
+    timeout = _bounded_timeout("EGOASSIST_DNS_TIMEOUT_SECONDS", 3.0, 0.5, 10.0)
+    for resolver_url in resolver_urls:
+        try:
+            headers = {"Accept": "application/dns-json"} if "cloudflare-dns.com" in resolver_url else {}
+            response = requests.get(
+                resolver_url, params={"name": host, "type": "A"},
+                headers=headers, timeout=timeout,
+            )
+            response.raise_for_status()
+            addresses = list(dict.fromkeys(
+                str(item["data"]) for item in response.json().get("Answer", [])
+                if item.get("type") == 1 and not _is_fake_ip(str(item.get("data", "")))
+            ))
+            if addresses:
+                return addresses
+            errors.append(f"{resolver_url}: no public A record")
+        except (requests.RequestException, OSError, ValueError, KeyError, TypeError) as exc:
+            errors.append(f"{resolver_url}: {type(exc).__name__}")
+    detail = "; ".join(errors[-3:]) or "no resolver configured"
+    raise ConnectionError(
+        f"DashScope DNS is unavailable for {host}. Set DASHSCOPE_REALTIME_IPS to approved provider IPs "
+        f"or allow one configured DoH endpoint ({detail})"
     )
-    response.raise_for_status()
-    return list(dict.fromkeys(
-        item["data"] for item in response.json().get("Answer", [])
-        if item.get("type") == 1 and not _is_fake_ip(str(item.get("data", "")))
-    ))
 
 
 def _connect_with_resolved_ip(conversation, host: str = _DASHSCOPE_HOST) -> None:
@@ -567,7 +593,17 @@ class OmniBrowserBridge:
         )
 
     async def connect(self) -> None:
-        await self._connect_dialogue()
+        try:
+            await self._connect_dialogue()
+        except (ConnectionError, OSError, TimeoutError, requests.RequestException) as exc:
+            self.connecting = False
+            message = str(exc)
+            self._trace("provider.session.unavailable", {
+                "lane": "dialogue", "category": "network", "error": message,
+            })
+            await self.emit({"type": "provider_unavailable", "lane": "dialogue", "reason": message})
+            await self.emit({"type": "ready", "lanes": self.provider_lanes_snapshot()})
+            return
         try:
             await self.perception.connect()
         except Exception as exc:
