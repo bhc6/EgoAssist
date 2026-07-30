@@ -4,11 +4,11 @@ from __future__ import annotations
 
 import json
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Any, Iterator
 
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, select, delete as sql_delete
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -22,6 +22,9 @@ from .models import (
     ObservationRow,
     ResultRow,
     UserRow,
+    DeviceRow, ConsentGrantRow, RetentionPolicyRow, IntentRelationRow, TaskPlanRow,
+    JobAttemptRow, ArtifactRow, DeliveryAttemptRow, MemoryCardRow, MemoryDraftRow,
+    AuditEventRow,
 )
 from .contracts import ObservationEvidence
 
@@ -55,6 +58,10 @@ class ProductDatabase:
     def drop_schema(self) -> None:
         Base.metadata.drop_all(self.engine)
 
+    def close(self) -> None:
+        """Release pooled connections when the runtime root is shut down."""
+        self.engine.dispose()
+
     @contextmanager
     def session(self) -> Iterator[Session]:
         session = self.session_factory()
@@ -72,6 +79,123 @@ class ProductDatabase:
             row = session.get(UserRow, str(user_id))
             if row is None:
                 session.add(UserRow(user_id=str(user_id), display_name=display_name or str(user_id)))
+
+    @staticmethod
+    def _row_payload(row: Any) -> dict[str, Any]:
+        """Return JSON-safe column data without exposing ORM internals."""
+        from sqlalchemy import inspect
+        result: dict[str, Any] = {}
+        for column in inspect(row).mapper.column_attrs:
+            value = getattr(row, column.key)
+            if isinstance(value, datetime):
+                value = value.isoformat()
+            result[column.key] = value
+        return result
+
+    def export_user(self, user_id: str) -> dict[str, Any]:
+        """Export every product-owned record for one account, preserving scope/provenance."""
+        self.create_schema()
+        user_id = str(user_id)
+        tables = (
+            (UserRow, "users", lambda row: row.user_id == user_id),
+            (DeviceRow, "devices", lambda row: row.user_id == user_id),
+            (ConsentGrantRow, "consentGrants", lambda row: row.user_id == user_id),
+            (RetentionPolicyRow, "retentionPolicies", lambda row: row.user_id == user_id),
+            (ConversationTurnRow, "conversationTurns", lambda row: row.user_id == user_id),
+            (IntentRow, "intents", lambda row: row.user_id == user_id),
+            (IntentRelationRow, "intentRelations", lambda row: row.source_intent_id.in_(select(IntentRow.intent_id).where(IntentRow.user_id == user_id)) | row.target_intent_id.in_(select(IntentRow.intent_id).where(IntentRow.user_id == user_id))),
+            (TaskPlanRow, "taskPlans", lambda row: row.intent_id.in_(select(IntentRow.intent_id).where(IntentRow.user_id == user_id))),
+            (JobRow, "jobs", lambda row: row.intent_id.in_(select(IntentRow.intent_id).where(IntentRow.user_id == user_id))),
+            (JobAttemptRow, "jobAttempts", lambda row: row.job_id.in_(select(JobRow.job_id).where(JobRow.intent_id.in_(select(IntentRow.intent_id).where(IntentRow.user_id == user_id))))),
+            (ArtifactRow, "artifacts", lambda row: row.owner_id == user_id),
+            (ResultRow, "results", lambda row: row.intent_id.in_(select(IntentRow.intent_id).where(IntentRow.user_id == user_id))),
+            (DeliveryAttemptRow, "deliveryAttempts", lambda row: row.result_id.in_(select(ResultRow.result_id).where(ResultRow.intent_id.in_(select(IntentRow.intent_id).where(IntentRow.user_id == user_id))))),
+            (MemoryCardRow, "memoryCards", lambda row: row.user_id == user_id),
+            (MemoryDraftRow, "memoryDrafts", lambda row: row.user_id == user_id),
+            (ObservationRow, "observations", lambda row: row.user_id == user_id),
+            (AuditEventRow, "auditEvents", lambda row: row.user_id == user_id),
+        )
+        with self.session() as session:
+            payload = {"schema": "egoassist.account-export.v1", "userId": user_id, "exportedAt": datetime.now(timezone.utc).isoformat(), "data": {}}
+            for model, name, predicate in tables:
+                payload["data"][name] = [self._row_payload(item) for item in session.scalars(select(model).where(predicate(model)))]
+            return payload
+
+    def delete_user(self, user_id: str) -> dict[str, int]:
+        """Hard-delete product projections for an account; safe to repeat."""
+        self.create_schema()
+        user_id = str(user_id)
+        counts: dict[str, int] = {}
+        with self.session() as session:
+            intent_ids = [row[0] for row in session.execute(select(IntentRow.intent_id).where(IntentRow.user_id == user_id))]
+            job_ids = [row[0] for row in session.execute(select(JobRow.job_id).where(JobRow.intent_id.in_(intent_ids or ["__none__"]))) ]
+            result_ids = [row[0] for row in session.execute(select(ResultRow.result_id).where(ResultRow.intent_id.in_(intent_ids or ["__none__"]))) ]
+            order = [
+                (DeliveryAttemptRow, DeliveryAttemptRow.result_id.in_(result_ids or ["__none__"])),
+                (JobAttemptRow, JobAttemptRow.job_id.in_(job_ids or ["__none__"])),
+                (TaskPlanRow, TaskPlanRow.intent_id.in_(intent_ids or ["__none__"])),
+                (IntentRelationRow, (IntentRelationRow.source_intent_id.in_(intent_ids or ["__none__"]) | IntentRelationRow.target_intent_id.in_(intent_ids or ["__none__"]))),
+                (ResultRow, ResultRow.result_id.in_(result_ids or ["__none__"])),
+                (JobRow, JobRow.job_id.in_(job_ids or ["__none__"])),
+                (IntentRow, IntentRow.intent_id.in_(intent_ids or ["__none__"])),
+                (ConversationTurnRow, ConversationTurnRow.user_id == user_id),
+                (DeviceRow, DeviceRow.user_id == user_id),
+                (ConsentGrantRow, ConsentGrantRow.user_id == user_id),
+                (RetentionPolicyRow, RetentionPolicyRow.user_id == user_id),
+                (ArtifactRow, ArtifactRow.owner_id == user_id),
+                (MemoryCardRow, MemoryCardRow.user_id == user_id),
+                (MemoryDraftRow, MemoryDraftRow.user_id == user_id),
+                (ObservationRow, ObservationRow.user_id == user_id),
+                (AuditEventRow, AuditEventRow.user_id == user_id),
+                (UserRow, UserRow.user_id == user_id),
+            ]
+            for model, criterion in order:
+                result = session.execute(sql_delete(model).where(criterion))
+                counts[model.__tablename__] = counts.get(model.__tablename__, 0) + int(result.rowcount or 0)
+        return counts
+
+    def set_retention_policy(self, user_id: str, category: str, retention_days: int, *, deletion_mode: str = "hard-delete") -> dict[str, Any]:
+        if int(retention_days) < 0 or int(retention_days) > 36500:
+            raise ValueError("retention_days must be between 0 and 36500")
+        self.ensure_user(str(user_id))
+        policy_id = f"retention:{user_id}:{category}"
+        with self.session() as session:
+            row = session.get(RetentionPolicyRow, policy_id)
+            if row is None:
+                row = RetentionPolicyRow(policy_id=policy_id, user_id=str(user_id), category=str(category), retention_days=int(retention_days), deletion_mode=str(deletion_mode))
+                session.add(row)
+            else:
+                row.retention_days = int(retention_days); row.deletion_mode = str(deletion_mode)
+            return self._row_payload(row)
+
+    def retention_policies(self, user_id: str) -> list[dict[str, Any]]:
+        with self.session() as session:
+            return [self._row_payload(row) for row in session.scalars(select(RetentionPolicyRow).where(RetentionPolicyRow.user_id == str(user_id)).order_by(RetentionPolicyRow.category))]
+
+    def apply_retention(self, *, now: datetime | None = None, user_id: str | None = None) -> dict[str, Any]:
+        """Apply configured policies and return bounded deletion evidence."""
+        now = now or datetime.now(timezone.utc)
+        users = [str(user_id)] if user_id else None
+        deleted: dict[str, int] = {}
+        with self.session() as session:
+            policies = list(session.scalars(select(RetentionPolicyRow).where(RetentionPolicyRow.user_id.in_(users) if users else True)))
+            for policy in policies:
+                cutoff = now - timedelta(days=int(policy.retention_days))
+                category = policy.category
+                model_column = {
+                    "transcript": (ConversationTurnRow, ConversationTurnRow.recorded_at),
+                    "observation": (ObservationRow, ObservationRow.received_at),
+                    "operational": (AuditEventRow, AuditEventRow.recorded_at),
+                }.get(category)
+                if model_column is None:
+                    continue
+                model, column = model_column
+                criterion = column < cutoff
+                if users:
+                    criterion = criterion & (model.user_id == str(user_id))
+                result = session.execute(sql_delete(model).where(criterion))
+                deleted[category] = deleted.get(category, 0) + int(result.rowcount or 0)
+        return {"appliedAt": now.isoformat(), "deleted": deleted, "evidence": "counts-only"}
 
     def record_observation(self, value: ObservationEvidence) -> None:
         """Persist one validated perception artifact idempotently."""

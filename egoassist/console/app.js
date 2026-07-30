@@ -148,6 +148,44 @@ async function enterConsole(user) {
   render(await request(selectedStatePath()));
   const selected = sessionCatalog.find(item => item.id === selectedSessionId);
   if (selected?.memoryPolicy) renderMemoryPolicy(selected.memoryPolicy, state.memoryProfiles || []);
+  await refreshPrivacy();
+}
+
+function renderPrivacy(payload) {
+  if (!payload) return;
+  $("#privacyStatus").textContent = payload.transport?.transportStatus || "已加载";
+  $("#privacyProviders").innerHTML = (payload.providers || []).map(item =>
+    "<article class='privacy-card'><b>" + esc(item.provider) + "</b><span>数据：" + esc((item.dataCategories || []).join(", ")) + "</span><span>用途：" + esc((item.purposes || []).join(", ")) + "</span><span>保留：" + esc(item.retention) + "</span></article>"
+  ).join("") || "<p>暂无供应商披露</p>";
+  const evaluation = payload.evaluation || {};
+  $("#privacyEvaluation").textContent = "真实结果样本 " + (evaluation.denominator || 0) + " · " + (evaluation.provenance || "等待用户确认、连接器回执或标注序列");
+  const policies = payload.retentionPolicies || [];
+  $("#privacyRetention").innerHTML = ["transcript", "observation", "operational", "memory"].map(category => {
+    const item = policies.find(value => value.category === category);
+    return "<label>" + esc(category) + "<input type='number' min='0' max='36500' data-retention-category='" + esc(category) + "' value='" + esc(item?.retention_days ?? 365) + "'></label>";
+  }).join("") + "<button id='saveRetention' type='button'>保存保留期限</button>";
+  $$('[data-retention-category]').forEach(input => input.onchange = () => { $("#privacyPolicyStatus").textContent = "待保存"; });
+  $("#saveRetention").onclick = async () => {
+    try {
+      for (const input of $$('[data-retention-category]')) await post("/api/privacy/retention", {category: input.dataset.retentionCategory, retentionDays: Number(input.value)});
+      await refreshPrivacy();
+      $("#privacyPolicyStatus").textContent = "已保存";
+    } catch (error) { alert(error.message); }
+  };
+}
+
+async function refreshPrivacy() {
+  try { renderPrivacy(await request("/api/privacy")); }
+  catch (error) { if (currentUser) $("#privacyStatus").textContent = error.message; }
+}
+
+async function downloadPrivacyExport() {
+  const response = await fetch("/api/privacy/export");
+  if (!response.ok) throw Error("导出失败");
+  const blob = await response.blob();
+  const link = document.createElement("a");
+  link.href = URL.createObjectURL(blob); link.download = "egoassist-account-export.json"; link.click();
+  setTimeout(() => URL.revokeObjectURL(link.href), 1000);
 }
 
 async function boot() {
@@ -979,6 +1017,14 @@ $("#preferenceEnabled").onchange = () => saveMemoryPolicy(customMemoryPolicy());
 $("#preferenceScope").onchange = () => saveMemoryPolicy(customMemoryPolicy());
 $("#episodicEnabled").onchange = () => saveMemoryPolicy(customMemoryPolicy());
 $("#episodicScope").onchange = () => saveMemoryPolicy(customMemoryPolicy());
+$("#privacyExport").onclick = async () => { try { await downloadPrivacyExport(); } catch (error) { alert(error.message); } };
+$("#privacyDelete").onclick = async () => {
+  if (!confirm("删除账户数据后不可恢复。继续？")) return;
+  try {
+    await post("/api/privacy/delete", {confirm: true});
+    showLogin();
+  } catch (error) { alert(error.message); }
+};
 $$('[data-replay]').forEach(button => button.onclick = () => run(button, post("/api/replay/observe", {
   kind: button.dataset.replay, sessionId: selectedSessionId
 })));

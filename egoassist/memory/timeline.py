@@ -13,6 +13,23 @@ from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping, Sequence
 from uuid import uuid4
 
+
+class _ClosingConnection:
+    """Make SQLite's transaction context also release the Windows file handle."""
+
+    def __init__(self, connection: sqlite3.Connection) -> None:
+        self._connection = connection
+
+    def __enter__(self) -> sqlite3.Connection:
+        self._connection.__enter__()
+        return self._connection
+
+    def __exit__(self, exc_type, exc_value, traceback) -> None:
+        try:
+            self._connection.__exit__(exc_type, exc_value, traceback)
+        finally:
+            self._connection.close()
+
 import numpy as np
 
 from .temporal import ClockContext, query_time_range
@@ -183,7 +200,7 @@ class TimelineMemory:
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA foreign_keys=ON")
         connection.execute("PRAGMA busy_timeout=10000")
-        return connection
+        return _ClosingConnection(connection)
 
     def _initialize(self) -> None:
         with self._lock, self._connect() as connection:
@@ -640,6 +657,40 @@ class TimelineMemory:
 
     def delete(self, card_id: str) -> dict[str, Any]:
         return self.update_status(card_id, "deleted")
+
+    def export_user(self, user_id: str) -> dict[str, Any]:
+        """Export scoped cards and drafts, retaining provenance and temporal fields."""
+        with self._lock, self._connect() as connection:
+            cards = connection.execute(
+                "SELECT * FROM memory_cards WHERE user_id=? ORDER BY happened_at, id", (str(user_id),)
+            ).fetchall()
+            drafts = connection.execute(
+                "SELECT * FROM memory_drafts WHERE user_id=? ORDER BY started_at, id", (str(user_id),)
+            ).fetchall()
+        return {
+            "schema": "egoassist.timeline-memory-export.v1",
+            "userId": str(user_id),
+            "cards": [self._row_to_card(row) for row in cards],
+            "drafts": [self._row_to_draft(row) for row in drafts],
+        }
+
+    def delete_user(self, user_id: str) -> dict[str, int]:
+        """Hard-delete all participant/case memory for a user; idempotent."""
+        with self._lock, self._connect() as connection:
+            card_count = connection.execute("SELECT COUNT(*) FROM memory_cards WHERE user_id=?", (str(user_id),)).fetchone()[0]
+            draft_count = connection.execute("SELECT COUNT(*) FROM memory_drafts WHERE user_id=?", (str(user_id),)).fetchone()[0]
+            connection.execute("DELETE FROM memory_cards WHERE user_id=?", (str(user_id),))
+            connection.execute("DELETE FROM memory_drafts WHERE user_id=?", (str(user_id),))
+        self._emit("timeline.memory.account_deleted", {"userId": str(user_id), "cards": int(card_count), "drafts": int(draft_count)})
+        return {"memoryCards": int(card_count), "memoryDrafts": int(draft_count)}
+
+    def apply_retention(self, *, user_id: str, cutoff: datetime | str) -> dict[str, int]:
+        """Remove expired memory cards/drafts for one account with bounded counts."""
+        cutoff_value = _iso(cutoff)
+        with self._lock, self._connect() as connection:
+            cards = connection.execute("DELETE FROM memory_cards WHERE user_id=? AND updated_at<?", (str(user_id), cutoff_value)).rowcount
+            drafts = connection.execute("DELETE FROM memory_drafts WHERE user_id=? AND updated_at<?", (str(user_id), cutoff_value)).rowcount
+        return {"memoryCards": int(cards or 0), "memoryDrafts": int(drafts or 0)}
 
     def cards(
         self,

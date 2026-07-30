@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Iterable
+from typing import Any, Iterable, Mapping
 
 
 @dataclass(frozen=True)
@@ -40,4 +40,27 @@ def summarize_interventions(records: Iterable[InterventionRecord]) -> dict[str, 
         "followup_reuse": len(reuse_hits) / len(reuse_expected) if reuse_expected else 0.0,
         "barge_in_success": sum(item.interrupted for item in interruption_trials) / len(interruption_trials) if interruption_trials else 0.0,
         "mean_latency_ms": sum(latencies) / len(latencies) if latencies else 0.0,
+    }
+
+
+def summarize_outcome_evidence(records: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
+    """Summarize only evidence with a real producer and publish its denominator."""
+    allowed_sources = {"user-acknowledgement", "connector-receipt", "annotated-sequence"}
+    supplied = [dict(item) for item in records]
+    items = [item for item in supplied if str(item.get("source", "")) in allowed_sources]
+    buckets: dict[str, dict[str, Any]] = {}
+    for item in items:
+        kind = str(item.get("kind", "unspecified"))
+        bucket = buckets.setdefault(kind, {"denominator": 0, "successes": 0, "sources": set()})
+        bucket["denominator"] += 1
+        bucket["successes"] += int(bool(item.get("success")))
+        bucket["sources"].add(str(item["source"]))
+    for bucket in buckets.values():
+        bucket["rate"] = bucket["successes"] / bucket["denominator"] if bucket["denominator"] else 0.0
+        bucket["sources"] = sorted(bucket["sources"])
+    return {
+        "denominator": len(items),
+        "metrics": buckets,
+        "excluded": len(supplied) - len(items),
+        "provenance": sorted({str(item["source"]) for item in items}),
     }

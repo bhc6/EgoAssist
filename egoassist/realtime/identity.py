@@ -192,6 +192,36 @@ class IdentityStore:
                 "DELETE FROM login_sessions WHERE token_hash = ?", (self._token_hash(token),),
             )
 
+    def export_user(self, user_id: str) -> dict[str, Any]:
+        """Export account ownership metadata without password or session secrets."""
+        with self._connect() as connection:
+            user = connection.execute(
+                "SELECT id, username, created_at FROM users WHERE id = ?", (str(user_id),)
+            ).fetchone()
+            if user is None:
+                return {"schema": "egoassist.identity-export.v1", "userId": str(user_id), "user": None, "contextSessions": []}
+            sessions = connection.execute(
+                """SELECT id, label, created_at, last_seen_at, memory_policy,
+                          timezone_name, utc_offset_minutes
+                   FROM context_sessions WHERE user_id = ? ORDER BY created_at""",
+                (str(user_id),),
+            ).fetchall()
+        return {
+            "schema": "egoassist.identity-export.v1",
+            "userId": str(user_id),
+            "user": {"id": str(user["id"]), "username": str(user["username"]), "createdAt": str(user["created_at"])},
+            "contextSessions": [self._public_context_session(row) for row in sessions],
+        }
+
+    def delete_user(self, user_id: str) -> dict[str, int]:
+        """Delete credentials and case ownership; cascade removes login sessions."""
+        with self._connect() as connection:
+            case_count = connection.execute(
+                "SELECT COUNT(*) AS count FROM context_sessions WHERE user_id = ?", (str(user_id),)
+            ).fetchone()["count"]
+            result = connection.execute("DELETE FROM users WHERE id = ?", (str(user_id),))
+        return {"users": int(result.rowcount or 0), "contextSessions": int(case_count or 0)}
+
     def claim_context_session(
         self,
         user_id: str,

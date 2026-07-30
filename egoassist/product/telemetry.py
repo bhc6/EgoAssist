@@ -11,6 +11,7 @@ from opentelemetry import trace
 
 
 _TRACER = trace.get_tracer("egoassist.product")
+_FORBIDDEN_LABEL_PARTS = {"text", "transcript", "prompt", "arguments", "tool_args", "payload", "message"}
 
 
 def correlation_ids(**values: str | None) -> dict[str, str]:
@@ -19,6 +20,18 @@ def correlation_ids(**values: str | None) -> dict[str, str]:
         for key, value in values.items()
         if value and (key.endswith("_id") or key == "trace_id")
     }
+
+
+def safe_metric_attributes(values: Mapping[str, Any]) -> dict[str, str | int | float | bool]:
+    """Keep metrics low-cardinality and reject user content by construction."""
+    result: dict[str, str | int | float | bool] = {}
+    for key, value in values.items():
+        normalized = str(key).casefold()
+        if any(part in normalized for part in _FORBIDDEN_LABEL_PARTS):
+            continue
+        if isinstance(value, (str, int, float, bool)) and len(str(value)) <= 80:
+            result[str(key)] = value
+    return result
 
 
 @contextmanager

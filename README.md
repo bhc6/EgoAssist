@@ -29,8 +29,9 @@ Current capability truth:
 - task-scoped PDF/image references are implemented; remote human help is available
   only when a real webhook is configured and the user approves the exact preview;
 - checkpoint-bound structured task perception is implemented as evidence only;
-  online outcome evaluation remains offline-only and must not be interpreted as
-  a completed real-world effect.
+  outcome evaluation accepts real user acknowledgements, connector receipts,
+  and annotated sequences, while the replay intervention evaluator remains
+  explicitly offline.
 
 The selected migration foundations are LiveKit for realtime transport, Temporal
 for durable execution, MCP for external connector boundaries, SQLAlchemy/Alembic
@@ -54,6 +55,8 @@ differentiating memory, interaction, intent, and safety policies.
 - Separate dialogue and perception provider sessions.
 - Observable routing, memory provenance, response scheduling, tool execution, and
   failure states in the research console.
+- Account-level export, deletion, category retention, provider disclosure, and
+  research-evidence denominators are available from the Privacy panel/API.
 
 ## Requirements
 
@@ -358,6 +361,26 @@ all profiles; they are controlled infrastructure, not behavioral-memory treatmen
 
 Legacy `preferences.json` and `episodes.json` files are import sources only. New
 writes go to TimelineMemory.
+
+## Privacy And Evaluation
+
+The Privacy panel and `/api/privacy` expose the provider disclosure, transport
+boundary, retention policies, evaluation provenance, and account controls.
+`/api/privacy/export` includes transcripts, intents/jobs/results, connector
+references, journals, TimelineMemory, MemoryDraft, case/participant scope, and
+real outcome evidence. `/api/privacy/delete` requires an explicit confirmation,
+is idempotent, removes those records, and returns a counts-only deletion proof.
+
+Retention is configured per account for transcript, observation, operational,
+and memory data. Operational projections redact common Chinese/domain PII and reject raw
+transcript, prompt, payload, and tool-argument metric labels. This is an
+observability boundary, not a substitute for consent. Non-loopback deployments
+must terminate TLS; deployed databases require an encrypted volume.
+
+The online evidence ledger only accepts user acknowledgements, connector
+receipts, or annotated perception sequences and always publishes a denominator.
+The legacy intervention summary is a deterministic offline evaluator and is
+labelled as such in the console and documentation.
 
 ## Skills And Tools
 

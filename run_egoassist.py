@@ -61,6 +61,9 @@ from egoassist.product import (
     PerceptionFrameContext,
     PerceptionHypothesis,
     ProductDatabase,
+    PrivacyGovernance,
+    OutcomeLedger,
+    OutcomeRecord,
     WebhookHumanHelpPort,
 )
 from egoassist.product.notifications import NtfyNotificationPort
@@ -447,6 +450,14 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                 episodic_for_case(user_id, session_id).import_legacy(case_dir / "episodes.json")
 
     migrate_legacy_memories()
+    outcome_ledger = OutcomeLedger(Path(memory_path).with_name("outcomes.jsonl"))
+    privacy_governance = PrivacyGovernance(
+        identity=identity,
+        product_database=product_database,
+        timeline=timeline,
+        user_memory_root=user_memory_root,
+        outcome_ledger=outcome_ledger,
+    )
 
     def runtime_for_user(user_id: str) -> SkillRuntime:
         if user_id not in user_runtimes:
@@ -2072,6 +2083,16 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
             )
             receipt = await human_help_port.submit(connector_request)
             receipt_payload = receipt.model_dump(mode="json")
+            outcome_ledger.record(OutcomeRecord(
+                outcome_id=f"connector:{preview_entry['requestId']}",
+                kind="human-help",
+                expected="acknowledged",
+                observed=str(receipt.status),
+                source="connector-receipt",
+                acknowledged=receipt.status in {"acknowledged", "resolved"},
+                user_id=user_id,
+                session_id=session_id,
+            ))
             owner.journal.append(
                 "human_help_receipt",
                 {
@@ -3276,6 +3297,12 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                     raise ValueError("no active task for replay observation")
                 observation = owner.runtime.task.replay_observation(str(payload.get("kind", "progress")))
                 owner.runtime.task.ingest(observation)
+                if payload.get("expectedKind"):
+                    outcome_ledger.record(OutcomeRecord(
+                        outcome_id=f"perception:{uuid4().hex[:16]}", kind="perception-sequence",
+                        expected=str(payload["expectedKind"]), observed=str(payload.get("kind", "progress")),
+                        source="annotated-sequence", acknowledged=False, user_id=user_id, session_id=session_id,
+                    ))
                 episode = scoped_episodic_memory(user_id, session_id, policy).remember(
                     observation.get("summary", ""), kind="observation",
                     source=str(observation.get("source", "research-replay")),
@@ -3297,6 +3324,12 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
             raise ValueError("no active task for replay observation")
         observation = active_runtime.task.replay_observation(str(payload.get("kind", "progress")))
         active_runtime.task.ingest(observation)
+        if payload.get("expectedKind"):
+            outcome_ledger.record(OutcomeRecord(
+                outcome_id=f"perception:{uuid4().hex[:16]}", kind="perception-sequence",
+                expected=str(payload["expectedKind"]), observed=str(payload.get("kind", "progress")),
+                source="annotated-sequence", acknowledged=False, user_id=user_id,
+            ))
         episodic_for_user(user_id).remember(
             observation.get("summary", ""), kind="observation",
             source=str(observation.get("source", "research-replay")),
@@ -3385,6 +3418,56 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                 },
             )
         return web.json_response(scoped_state_for_user(user_id, session_id))
+
+    async def get_privacy(request):
+        user_id = request[user_key]["id"]
+        return web.json_response({
+            **privacy_governance.disclosure(),
+            "retentionPolicies": product_database.retention_policies(user_id),
+            "evaluation": outcome_ledger.summarize(user_id=user_id),
+        })
+
+    async def get_privacy_export(request):
+        user_id = request[user_key]["id"]
+        response = web.json_response(privacy_governance.export_account(user_id))
+        response.headers["Content-Disposition"] = 'attachment; filename="egoassist-account-export.json"'
+        return response
+
+    async def post_privacy_retention(request):
+        user_id = request[user_key]["id"]
+        payload = await request.json()
+        category = str(payload.get("category", "")).strip()
+        if category not in {"transcript", "observation", "operational", "memory"}:
+            raise ValueError("unsupported retention category")
+        policy = product_database.set_retention_policy(
+            user_id, category, int(payload.get("retentionDays", 365)),
+            deletion_mode=str(payload.get("deletionMode", "hard-delete")),
+        )
+        applied = privacy_governance.retention(user_id=user_id) if bool(payload.get("applyNow")) else None
+        return web.json_response({"policy": policy, "applied": applied, "retentionPolicies": product_database.retention_policies(user_id)})
+
+    async def post_privacy_delete(request):
+        user_id = request[user_key]["id"]
+        payload = await request.json() if request.can_read_body else {}
+        if payload.get("confirm") is not True:
+            raise ValueError("account deletion requires confirm=true")
+        await invalidate_live_sessions(user_id)
+        evidence = privacy_governance.delete_account(user_id)
+        for session_id, owner in list(case_owners.items()):
+            if owner.user_id == user_id:
+                case_owners.pop(session_id, None)
+        user_memories.pop(user_id, None)
+        user_episodics.pop(user_id, None)
+        for key in [key for key in case_memories if key[0] == user_id]:
+            case_memories.pop(key, None)
+        for key in [key for key in case_episodics if key[0] == user_id]:
+            case_episodics.pop(key, None)
+        user_runtimes.pop(user_id, None)
+        user_routing.pop(user_id, None)
+        user_tools.pop(user_id, None)
+        response = web.json_response({"deleted": True, "evidence": evidence})
+        response.del_cookie(AUTH_COOKIE)
+        return response
 
     async def post_reset(request):
         user_id = request[user_key]["id"]
@@ -3499,6 +3582,16 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                 ledger.set_result_status(
                     result_id, "dismissed", detail={"reason": "explicit-user-dismiss"},
                 )
+            outcome_ledger.record(OutcomeRecord(
+                outcome_id=f"ack:{result_id}",
+                kind="result-delivery",
+                expected="dismissed",
+                observed="dismissed",
+                source="user-acknowledgement",
+                acknowledged=True,
+                user_id=user_id,
+                session_id=session_id,
+            ))
             result = ledger.results()[result_id]
         return web.json_response({
             "result": result,
@@ -5011,6 +5104,7 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
             finally:
                 if livekit_transport is not None:
                     await livekit_transport.close_all()
+                product_database.close()
                 lease.release()
 
     app.cleanup_ctx.append(runtime_root_lease_context)
@@ -5021,6 +5115,10 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
         web.post("/api/auth/logout", post_logout),
         web.get("/api/auth/me", get_me),
         web.get("/api/sessions", get_sessions),
+        web.get("/api/privacy", get_privacy),
+        web.get("/api/privacy/export", get_privacy_export),
+        web.post("/api/privacy/retention", post_privacy_retention),
+        web.post("/api/privacy/delete", post_privacy_delete),
         web.post("/api/sessions", post_session),
         web.post("/api/sessions/memory-policy", post_memory_policy),
         web.get("/api/state", get_state),
