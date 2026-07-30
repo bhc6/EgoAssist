@@ -70,8 +70,8 @@ PLATFORM_CAPABILITIES: tuple[dict[str, Any], ...] = (
     {
         "id": "structured-perception",
         "label": "Checkpoint-constrained visual perception",
-        "status": "experimental",
-        "reason": "The structured adapter is not connected to the realtime task path.",
+        "status": "available",
+        "reason": "Fresh frames are bound to task checkpoints, allowed paths, artifact provenance, and user-confirmed advancement.",
     },
     {
         "id": "online-evaluation",

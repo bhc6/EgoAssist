@@ -16,12 +16,14 @@ import socket
 import threading
 import time
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Callable
 from uuid import uuid4
 
 import requests
 
 from .tools import tool_result_succeeded
+from .perception import parse_perception_hypothesis, perception_prompt
 
 if TYPE_CHECKING:
     from .context_harness import ContextHarness
@@ -179,7 +181,8 @@ class _OmniPerceptionLane:
         self.connected = False
         self.closed = False
         self.active = False
-        self.pending_frame: str | None = None
+        self.pending_frame: tuple[str, dict[str, Any] | None] | None = None
+        self.active_context: dict[str, Any] | None = None
         self._buffer = ""
         self._generation = 0
         self._connect_lock = asyncio.Lock()
@@ -258,10 +261,10 @@ class _OmniPerceptionLane:
         if self.pending_frame and not self.active:
             self._dispatch_pending()
 
-    def request(self, image_b64: str) -> bool:
+    def request(self, image_b64: str, context: dict[str, Any] | None = None) -> bool:
         if not image_b64 or self.closed:
             return False
-        self.pending_frame = image_b64
+        self.pending_frame = (image_b64, dict(context) if context else None)
         if not self.connected:
             self._schedule_reconnect("perception-demand")
             return False
@@ -272,9 +275,10 @@ class _OmniPerceptionLane:
     def _dispatch_pending(self) -> bool:
         if not self.connected or self.active or not self.pending_frame or not self.conversation:
             return False
-        frame = self.pending_frame
+        frame, context = self.pending_frame
         self.pending_frame = None
         self.active = True
+        self.active_context = context
         self._buffer = ""
         try:
             # Qwen Omni requires audio to precede an image. This lane uses a
@@ -282,18 +286,23 @@ class _OmniPerceptionLane:
             self.conversation.append_audio(self._SILENT_PCM16)
             self.conversation.append_video(frame)
             self.conversation.commit()
+            instructions = perception_prompt(context) if context else self._GATE_INSTRUCTIONS
             self.conversation.create_response(
-                instructions=self._GATE_INSTRUCTIONS,
+                instructions=instructions,
                 output_modalities=[self.modalities.TEXT],
             )
             self.trace("perception.response.requested", {
                 "lane": "perception", "imageBase64Bytes": len(frame), "microphoneShared": False,
+                "frameId": context.get("frame_id") if context else None,
+                "contextId": context.get("context_id") if context else None,
+                "taskId": context.get("task_id") if context else None,
+                "checkpointId": context.get("checkpoint_id") if context else None,
             })
             return True
         except Exception as exc:
             self.active = False
             self.connected = False
-            self.pending_frame = frame
+            self.pending_frame = (frame, context)
             self.trace("perception.response.error", {"error": str(exc)})
             self._schedule_reconnect("dispatch-failed")
             return False
@@ -303,8 +312,14 @@ class _OmniPerceptionLane:
             return
         self.active = False
         self._buffer = ""
-        decision = OmniBrowserBridge.parse_proactive_gate(raw_text)
-        self.loop.call_soon_threadsafe(self.on_decision, decision)
+        context = self.active_context
+        self.active_context = None
+        if context:
+            decision = OmniBrowserBridge.parse_perception_output(raw_text)
+            self.loop.call_soon_threadsafe(self.on_decision, decision, context)
+        else:
+            decision = OmniBrowserBridge.parse_proactive_gate(raw_text)
+            self.loop.call_soon_threadsafe(self.on_decision, decision)
         if self.pending_frame:
             self.loop.call_soon_threadsafe(self._dispatch_pending)
 
@@ -322,6 +337,7 @@ class _OmniPerceptionLane:
             old = self.conversation
             self.connected = False
             self.active = False
+            self.active_context = None
             self._generation += 1
             if old:
                 try:
@@ -340,6 +356,8 @@ class _OmniPerceptionLane:
             "connected": self.connected,
             "active": self.active,
             "pendingFrame": bool(self.pending_frame),
+            "activeContextId": self.active_context.get("context_id") if self.active_context else None,
+            "activeFrameId": self.active_context.get("frame_id") if self.active_context else None,
             "microphoneShared": False,
             "turnDetection": "disabled-explicit-response",
         }
@@ -533,7 +551,9 @@ class OmniBrowserBridge:
         self.voice = voice
         self.instructions = instructions
         self.last_proactive_check = 0.0
-        self._latest_perception_frame: str | None = None
+        self._latest_perception_frame: dict[str, Any] | None = None
+        self._perception_context_provider: Callable[[str, datetime], dict[str, Any] | None] | None = None
+        self._perception_result_handler: Callable[[dict[str, Any], dict[str, Any]], Any] | None = None
         self.perception = _OmniPerceptionLane(
             api_key=api_key,
             model=model,
@@ -801,7 +821,11 @@ class OmniBrowserBridge:
             # loop, immediately after a fresh audio chunk. A prior audio append
             # may already have been auto-committed by server VAD.
             self._pending_video = image_b64
-            self._latest_perception_frame = image_b64
+            self._latest_perception_frame = {
+                "image": image_b64,
+                "frameId": f"frame-{uuid4().hex}",
+                "capturedAt": datetime.now(timezone.utc),
+            }
             return False
 
     def maybe_check_proactively(self, interval_seconds: float = 4.0) -> None:
@@ -811,8 +835,27 @@ class OmniBrowserBridge:
                 return
             self.last_proactive_check = now
         frame = getattr(self, "_latest_perception_frame", None)
-        if frame:
+        if not frame:
+            return
+        if isinstance(frame, str):
             self.perception.request(frame)
+            return
+        context = None
+        if self._perception_context_provider is not None:
+            try:
+                context = self._perception_context_provider(frame["frameId"], frame["capturedAt"])
+            except Exception as exc:
+                self._trace("perception.frame.suppressed", {
+                    "frameId": frame.get("frameId"), "reason": "context-provider-failed",
+                    "error": str(exc)[:240],
+                })
+                return
+            if context is None:
+                self._trace("perception.frame.suppressed", {
+                    "frameId": frame.get("frameId"), "reason": "no-active-task-context",
+                })
+                return
+        self.perception.request(frame["image"], context)
 
     def request_response(
         self,
@@ -1309,6 +1352,14 @@ class OmniBrowserBridge:
     ) -> None:
         self._response_lifecycle_handler = handler
 
+    def set_perception_handlers(
+        self,
+        context_provider: Callable[[str, datetime], dict[str, Any] | None] | None,
+        result_handler: Callable[[dict[str, Any], dict[str, Any]], Any] | None,
+    ) -> None:
+        self._perception_context_provider = context_provider
+        self._perception_result_handler = result_handler
+
     @staticmethod
     def _provider_tool_declarations(declarations: list[dict[str, Any]]) -> list[dict[str, Any]]:
         return [{
@@ -1394,9 +1445,35 @@ class OmniBrowserBridge:
         decision = self.parse_proactive_gate(raw_text)
         self._handle_proactive_decision(decision, response_id=response_id)
 
-    def _handle_proactive_decision(self, decision: dict[str, Any], response_id: str | None = None) -> None:
+    def _handle_proactive_decision(
+        self,
+        decision: dict[str, Any],
+        context: dict[str, Any] | None = None,
+        response_id: str | None = None,
+    ) -> None:
         """Audit an isolated perception decision and schedule speech on the dialogue lane."""
         self._trace("proactive.gate.decision", decision, response_id=response_id)
+        if context is not None:
+            if self._perception_result_handler is None:
+                self._trace("perception.observation.rejected", {
+                    "reason": "no-result-handler",
+                    "frameId": context.get("frame_id"),
+                    "contextId": context.get("context_id"),
+                })
+                return
+            try:
+                handled = self._perception_result_handler(context, decision)
+            except Exception as exc:
+                self._trace("perception.observation.rejected", {
+                    "reason": "result-handler-failed", "error": str(exc)[:240],
+                    "frameId": context.get("frame_id"),
+                })
+                return
+            if inspect.isawaitable(handled):
+                self.loop.create_task(self._complete_perception_result(handled))
+            else:
+                self._apply_perception_result(handled)
+            return
         if not decision["speak"]:
             return
         reason = decision["reason"]
@@ -1409,6 +1486,52 @@ class OmniBrowserBridge:
             reason=f"proactive-gate:{reason}",
             purpose="proactive-utterance",
         )
+
+    async def _complete_perception_result(self, handled) -> None:
+        try:
+            self._apply_perception_result(await handled)
+        except Exception as exc:
+            self._trace("perception.observation.rejected", {
+                "reason": "async-result-handler-failed", "error": str(exc)[:240],
+            })
+
+    def _apply_perception_result(self, handled: Any) -> None:
+        if not isinstance(handled, dict) or not handled.get("accepted"):
+            return
+        speech = handled.get("speech")
+        if not isinstance(speech, dict) or not speech.get("utterance"):
+            return
+        reason = str(speech.get("reason", "task-evidence"))
+        priority = 90 if reason == "hazard" else 35
+        self.request_response(
+            str(speech["utterance"])[:300],
+            priority=priority,
+            speech_policy="protected" if reason == "hazard" else "finish-clause",
+            reason=f"task-bound-perception:{reason}",
+            purpose="proactive-utterance",
+            origin=dict(handled.get("origin") or {}),
+        )
+
+    @staticmethod
+    def parse_perception_output(raw_text: str) -> dict[str, Any]:
+        """Parse provider output into evidence only; malformed output fails closed."""
+        try:
+            return {
+                "valid": True,
+                **parse_perception_hypothesis(raw_text).model_dump(mode="json"),
+            }
+        except (TypeError, ValueError, json.JSONDecodeError) as exc:
+            return {
+                "valid": False,
+                "error": str(exc)[:240],
+                "checkpoint_id": "unknown",
+                "completed": False,
+                "confidence": 0.0,
+                "summary": "",
+                "visible_evidence": [],
+                "hazards": [],
+                "unrelated": True,
+            }
 
     @staticmethod
     def parse_proactive_gate(raw_text: str) -> dict[str, Any]:

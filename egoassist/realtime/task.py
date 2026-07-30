@@ -8,6 +8,7 @@ from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
+from uuid import uuid4
 
 
 @dataclass(frozen=True)
@@ -159,6 +160,10 @@ class TaskSession:
         self._event_sink = event_sink
 
     def reset(self) -> dict[str, Any]:
+        self.perception_context_id = f"task-context-{uuid4().hex}"
+        self.checkpoint_epoch = 0
+        self.completion_evidence: list[dict[str, Any]] = []
+        self.perception_audit: list[dict[str, Any]] = []
         self.step_index = 0
         self.current_checkpoint_id = self.spec.steps[0].id
         self.checkpoints = {
@@ -219,6 +224,21 @@ class TaskSession:
         self.completed = bool(snapshot.get("completed", False))
         self.paused = bool(snapshot.get("paused", False))
         self.observation = snapshot.get("observation") if isinstance(snapshot.get("observation"), dict) else None
+        perception = snapshot.get("perception") if isinstance(snapshot.get("perception"), dict) else {}
+        self.perception_context_id = str(
+            perception.get("contextId") or f"task-context-{uuid4().hex}"
+        )
+        self.checkpoint_epoch = max(0, int(perception.get("checkpointEpoch", 0)))
+        completion_evidence = perception.get("completionEvidence", [])
+        self.completion_evidence = (
+            [dict(item) for item in completion_evidence if isinstance(item, dict)][-8:]
+            if isinstance(completion_evidence, list) else []
+        )
+        audit = perception.get("audit", [])
+        self.perception_audit = (
+            [dict(item) for item in reversed(audit) if isinstance(item, dict)][-12:]
+            if isinstance(audit, list) else []
+        )
         self.announced_memory_ids = {str(item) for item in snapshot.get("announcedMemoryIds", [])}
         self.decision = dict(decision)
         trace = snapshot.get("trace", [])
@@ -230,8 +250,56 @@ class TaskSession:
     def current_step(self) -> TaskStep:
         return next(step for step in self.spec.steps if step.id == self.current_checkpoint_id)
 
+    def allowed_perception_transitions(self) -> list[str]:
+        """Return the direct reversible path around the active checkpoint."""
+        values = []
+        if self.step_index > 0:
+            values.append(self.spec.steps[self.step_index - 1].id)
+        if self.step_index + 1 < len(self.spec.steps):
+            values.append(self.spec.steps[self.step_index + 1].id)
+        return values
+
+    def perception_binding(self) -> dict[str, Any]:
+        return {
+            "contextId": self.perception_context_id,
+            "taskId": self.spec.id,
+            "taskVersion": self.spec.version,
+            "taskProvenance": self.spec.provenance,
+            "checkpointId": self.current_checkpoint_id,
+            "checkpointEpoch": self.checkpoint_epoch,
+            "allowedTransitions": self.allowed_perception_transitions(),
+            "completionCriteria": self.current_step.completion,
+            "risk": self.current_step.risk,
+            "sourceReference": self.current_step.source,
+        }
+
+    def record_perception_rejection(
+        self,
+        reason: str,
+        *,
+        frame_id: str | None = None,
+        context_id: str | None = None,
+        detail: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        value = {
+            "time": self._now(),
+            "status": "rejected",
+            "reason": str(reason),
+            "frameId": frame_id,
+            "contextId": context_id,
+            "detail": dict(detail or {}),
+        }
+        self.perception_audit.append(value)
+        self.perception_audit = self.perception_audit[-12:]
+        self._emit("perception.observation.rejected", value)
+        return self.snapshot()
+
     def ingest(self, value: dict[str, Any]) -> dict[str, Any]:
         observation = self._validate(value)
+        valid_steps = {step.id for step in self.spec.steps}
+        if observation["step"] not in {*valid_steps, "unknown"}:
+            raise ValueError("observation checkpoint is not part of the active task")
+        observation["temporalConsistency"] = self._temporal_consistency(observation)
         self.observation = observation
         self.trace.append({"time": self._now(), **observation})
         evidence_event = self._emit("perception.observation.received", observation)
@@ -268,6 +336,31 @@ class TaskSession:
         self._emit("intervention.decision", self.decision, [evidence_id] if evidence_id else [])
         return self.snapshot()
 
+    def _temporal_consistency(self, observation: dict[str, Any]) -> dict[str, Any]:
+        frame_id = observation.get("frameId")
+        if not (
+            frame_id
+            and observation.get("completed")
+            and observation.get("step") == self.current_checkpoint_id
+            and observation.get("confidence", 0) >= 0.65
+        ):
+            return {"count": 0, "required": 2, "consistent": False}
+        self.completion_evidence = [
+            item for item in self.completion_evidence
+            if item.get("checkpointId") == self.current_checkpoint_id
+        ]
+        if not any(item.get("frameId") == frame_id for item in self.completion_evidence):
+            self.completion_evidence.append({
+                "frameId": frame_id,
+                "checkpointId": self.current_checkpoint_id,
+                "observedAt": observation.get("observedAt") or self._now(),
+                "confidence": observation.get("confidence", 0),
+                "source": observation.get("source"),
+            })
+        self.completion_evidence = self.completion_evidence[-8:]
+        count = len(self.completion_evidence)
+        return {"count": count, "required": 2, "consistent": count >= 2}
+
     def apply_voice_intent(self, intent: str | None, transcript: str = "") -> dict[str, Any]:
         """Apply a validated semantic label; never infer intent from transcript text."""
         intent = str(intent or "none")
@@ -285,6 +378,8 @@ class TaskSession:
             self.current_checkpoint_id = self.spec.steps[self.step_index].id
             self.checkpoints[self.current_checkpoint_id].update({"status": "active", "updatedBy": "user-rollback"})
             self.completed = False
+            self.checkpoint_epoch += 1
+            self.completion_evidence = []
             self.decision = self._decision("guide", self.current_step.instruction, "用户请求回退并重新检查", 1.0)
         elif intent == "repeat":
             self.decision = self._decision("guide", self.current_step.instruction, "用户请求重复", 1.0)
@@ -311,6 +406,8 @@ class TaskSession:
         if self.completed:
             return self.snapshot()
         finished = self.current_step
+        self.checkpoint_epoch += 1
+        self.completion_evidence = []
         self.checkpoints[finished.id].update({"status": "satisfied", "confidence": 1.0, "updatedBy": source})
         remaining = [step for step in self.spec.steps if self.checkpoints[step.id]["status"] not in {"satisfied", "skipped"}]
         if not remaining:
@@ -355,6 +452,12 @@ class TaskSession:
             "observation": self.observation,
             "decision": self.decision,
             "announcedMemoryIds": sorted(self.announced_memory_ids),
+            "perception": {
+                **self.perception_binding(),
+                "completionEvidence": [dict(item) for item in self.completion_evidence],
+                "audit": list(reversed(self.perception_audit[-12:])),
+                "policy": "evidence-only-user-confirmation-required",
+            },
             "trace": list(reversed(self.trace[-8:])),
         }
 
@@ -379,15 +482,33 @@ class TaskSession:
         hazards = value.get("hazards", [])
         if not isinstance(hazards, list):
             raise ValueError("hazards must be a list")
+        normalized_hazards = []
+        for item in hazards[:3]:
+            if not isinstance(item, dict):
+                raise ValueError("hazards must contain objects")
+            message = " ".join(str(item.get("message", "")).split())[:300]
+            if not message:
+                raise ValueError("hazard message is required")
+            normalized_hazards.append({
+                "type": str(item.get("type") or item.get("kind") or "task-safety")[:80],
+                "message": message,
+                "confidence": max(0.0, min(1.0, float(item.get("confidence", 0.0)))),
+            })
+        evidence = value.get("evidence") if isinstance(value.get("evidence"), dict) else {}
         return {
-            "step": str(value.get("step", "unknown")),
-            "completed": bool(value.get("completed", False)),
+            "observationId": str(value.get("observationId") or value.get("observation_id") or "") or None,
+            "step": str(value.get("step") or value.get("checkpointId") or value.get("checkpoint_id") or "unknown"),
+            "completed": bool(value.get("completed", evidence.get("completionHypothesis", False))),
             "confidence": max(0.0, min(1.0, float(value.get("confidence", 0.0)))),
-            "summary": str(value.get("summary", ""))[:300],
-            "hazards": hazards[:3],
+            "summary": str(value.get("summary") or evidence.get("summary") or "")[:500],
+            "hazards": normalized_hazards,
             "source": str(value.get("source", "external")),
-            "frameId": str(value.get("frameId", "")) or None,
-            "observedAt": str(value.get("observedAt", "")) or None,
+            "frameId": str(value.get("frameId") or evidence.get("frameId") or "") or None,
+            "observedAt": str(value.get("observedAt") or value.get("receivedAt") or value.get("received_at") or "") or None,
+            "frameAgeMs": value.get("frameAgeMs", value.get("frame_age_ms")),
+            "allowedTransitions": list(value.get("allowedTransitions") or value.get("allowed_transitions") or []),
+            "contextId": evidence.get("contextId"),
+            "visibleEvidence": list(evidence.get("visibleEvidence", []))[:8],
             "hypotheses": list(value.get("hypotheses", []))[:5] if isinstance(value.get("hypotheses", []), list) else [],
         }
 

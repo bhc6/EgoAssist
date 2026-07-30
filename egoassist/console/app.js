@@ -191,7 +191,7 @@ function renderPipeline(task, mechanism, step) {
     {stage: "capture", title: "音频 / 视频采集", status: stream ? "live" : "idle", summary: stream ? "16 kHz PCM + latest-only JPEG" : "等待浏览器设备", claim: "原始媒体只记录大小和时间，不在账本保存 Base64"},
     {stage: "attribution", title: "声道与说话者归因", status: stream ? "live" : "idle", summary: "input transcript ≠ spoken output transcript", claim: state.audioAttribution?.claimBoundary || "等待媒体配置"},
     {stage: "intent", title: "意图路由", status: routing.status === "matched" ? "live" : routing.status === "ambiguous" ? "warning" : "idle", summary: routing.status + " · " + (routing.selectedSkill || "general"), claim: routing.claimBoundary},
-    {stage: "perception", title: "结构化感知", status: lanes.perception?.connected ? "live" : "idle", summary: lanes.perception?.connected ? "独立视觉门控通道 · 不共享麦克风" : "感知通道未连接", claim: "视觉门控与用户对话使用不同 provider session；模型视觉上下文与已提交控制事件分开展示"},
+    {stage: "perception", title: "结构化感知", status: task?.observation ? "live" : lanes.perception?.connected ? "warning" : "idle", summary: task?.observation ? task.observation.step + " · age " + task.observation.frameAgeMs + " ms" : lanes.perception?.connected ? "等待任务绑定的新鲜帧" : "感知通道未连接", claim: "每帧绑定 task/version/checkpoint/epoch 与允许路径；模型只产出证据，用户确认才推进 checkpoint"},
     {stage: "task", title: "Skill / 任务假设", status: task ? "live" : state.activeSkill ? "warning" : "idle", summary: taskSummary, claim: task ? "Checkpoint ledger，不规定唯一执行路径" : "无证据时不加载领域工作流"},
     {stage: "knowledge", title: "知识增强", status: state.knowledgeMechanism.method === "none" ? "idle" : "warning", summary: state.knowledgeMechanism.method, claim: state.knowledgeMechanism.claimBoundary},
     {stage: "memory", title: "记忆检索", status: retrieval.status === "matched" || state.episodicMemory?.count ? "live" : "idle", summary: "preference " + (retrieval.candidates || []).length + " · episodes " + (state.episodicMemory?.count || 0), claim: "偏好与情景记忆分开；显示查询、候选、拒绝原因和实际注入结果"},
@@ -425,7 +425,10 @@ function render(next) {
     return "<article class='checkpoint " + esc(item.status) + "'><span>" + esc(item.status) + "<br>confidence " + Math.round((item.confidence || 0) * 100) + "%</span><div><h3>" + esc(item.title) + "</h3><p>" + esc(label + " · " + item.instruction) + "</p></div><b>evidence " + (item.evidenceIds || []).length + "</b></article>";
   }).join("") : "<p class='empty-state'>尚未建立任务假设。意图路由匹配后才加载领域工作流。</p>";
   $("#knowledge").innerHTML = "<b>" + esc(state.knowledgeMechanism.method) + "</b><br>selected: " + esc(step ? step.id + " / " + step.source : "none") + "<br><span>边界：" + esc(state.knowledgeMechanism.claimBoundary) + "</span>";
-  $("#vision").textContent = task?.observation ? task.observation.summary + " · " + Math.round(task.observation.confidence * 100) + "% · " + task.observation.source : "无结构化视觉观测；模型视觉上下文不会伪装为已提交事件";
+  const latestRejection = task?.perception?.audit?.[0];
+  $("#vision").textContent = task?.observation
+    ? task.observation.step + " · accepted · age " + task.observation.frameAgeMs + " ms · " + Math.round(task.observation.confidence * 100) + "%"
+    : latestRejection ? "rejected · " + latestRejection.reason : "等待任务绑定的结构化视觉证据";
   $("#memoryScope").textContent = "exact-trigger-lookup · " + (mechanism.scope.skill || "general") + " / " + (mechanism.scope.task || "unscoped");
   renderMemoryPolicy(state.memoryPolicy, state.memoryProfiles || []);
   $("#memorySystems").innerHTML = state.memorySystems.map(item => "<article class='system-card " + esc(item.status) + "'><b>" + esc(item.name) + "</b><span>" + esc(item.status + " · " + item.implementation) + "</span></article>").join("");
@@ -461,6 +464,7 @@ function render(next) {
   renderWorkCenter();
   renderPipeline(task, mechanism, step);
   renderTimeline(state.events || []);
+  renderPerceptionEvidence(task);
   renderManualSteps();
 }
 
@@ -488,9 +492,34 @@ async function executeTool(button) {
   } catch (error) { alert(error.message); }
 }
 
+function renderPerceptionEvidence(task) {
+  const root = $("#perceptionEvidence");
+  if (!task) {
+    root.innerHTML = "<p class='empty-state compact'>无活动任务感知上下文</p>";
+    return;
+  }
+  const policy = task.perception || {};
+  const observation = task.observation || null;
+  const consistency = observation?.temporalConsistency || {count: 0, required: 2, consistent: false};
+  const audit = policy.audit || [];
+  const evidence = observation?.visibleEvidence || [];
+  root.innerHTML = "<header><b>PERCEPTION EVIDENCE</b><span>" + esc(observation ? "accepted" : audit.length ? "rejected" : "waiting") + "</span></header>" +
+    "<div class='perception-grid'>" +
+      "<div><small>BOUND TASK / VERSION</small><b>" + esc(task.task.id + " / " + task.task.version) + "</b></div>" +
+      "<div><small>CHECKPOINT / EPOCH</small><b>" + esc(policy.checkpointId + " / " + policy.checkpointEpoch) + "</b></div>" +
+      "<div><small>ALLOWED PATH</small><b>" + esc((policy.allowedTransitions || []).join(" · ") || "none") + "</b></div>" +
+      "<div><small>FRAME / AGE</small><b>" + esc(observation ? (observation.frameId || "manual") + " / " + observation.frameAgeMs + " ms" : "waiting") + "</b></div>" +
+      "<div><small>CONSISTENCY</small><b>" + esc(consistency.count + " / " + consistency.required + (consistency.consistent ? " · consistent" : " · confirmation pending")) + "</b></div>" +
+      "<div><small>CONTEXT ID</small><b>" + esc(observation?.contextId || policy.contextId || "-") + "</b></div>" +
+    "</div>" +
+    (evidence.length ? "<ul>" + evidence.map(item => "<li>" + esc(item) + "</li>").join("") + "</ul>" : "") +
+    (audit.length ? "<div class='perception-audit'><small>LATEST REJECTION</small>" + esc(audit[0].reason + " · " + (audit[0].frameId || "no frame")) + "</div>" : "");
+}
+
 function renderManualSteps() {
   if (!state) return;
-  $("#manualSteps").innerHTML = state.task ? state.task.steps.map(item => "<button data-step='" + esc(item.id) + "'>外部观察：" + esc(item.title) + "</button>").join("") : "";
+  const allowed = new Set(state.task ? [state.task.currentCheckpointId, ...(state.task.perception?.allowedTransitions || [])] : []);
+  $("#manualSteps").innerHTML = state.task ? state.task.steps.map(item => "<button data-step='" + esc(item.id) + "' " + (allowed.has(item.id) ? "" : "disabled title='不在当前允许路径'") + ">研究证据：" + esc(item.title) + "</button>").join("") : "";
   $$("[data-step]").forEach(button => button.onclick = () => run(button, post("/api/task/observe", {
     step: button.dataset.step, completed: false, confidence: 0.92,
     summary: "外部感知：" + button.dataset.step, hazards: [], source: "manual/ui",

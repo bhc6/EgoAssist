@@ -149,6 +149,42 @@ class HumanHelpReceipt(ProductContract):
     error: str | None = None
 
 
+class PerceptionHazard(ProductContract):
+    kind: str = Field(min_length=1, max_length=80)
+    message: str = Field(min_length=1, max_length=300)
+    confidence: float = Field(ge=0, le=1)
+
+
+class PerceptionFrameContext(ProductContract):
+    schema_version: Literal["perception-context.v1"] = "perception-context.v1"
+    context_id: str = Field(min_length=1)
+    frame_id: str = Field(min_length=1)
+    user_id: str = Field(min_length=1)
+    session_id: str = Field(min_length=1)
+    skill_id: str = Field(min_length=1)
+    task_id: str = Field(min_length=1)
+    task_version: str = Field(min_length=1)
+    task_provenance: str = Field(min_length=1)
+    checkpoint_id: str = Field(min_length=1)
+    checkpoint_epoch: int = Field(ge=0)
+    allowed_transitions: list[str] = Field(default_factory=list)
+    completion_criteria: str = Field(min_length=1, max_length=1200)
+    risk: Literal["low", "medium", "high"]
+    source_reference: str = Field(max_length=500)
+    authorized_artifacts: list[dict[str, Any]] = Field(default_factory=list)
+    frame_captured_at: datetime
+
+
+class PerceptionHypothesis(ProductContract):
+    checkpoint_id: str = Field(min_length=1)
+    completed: bool = False
+    confidence: float = Field(ge=0, le=1)
+    summary: str = Field(max_length=500)
+    visible_evidence: list[str] = Field(default_factory=list, max_length=8)
+    hazards: list[PerceptionHazard] = Field(default_factory=list, max_length=3)
+    unrelated: bool = False
+
+
 class ObservationEvidence(ProductContract):
     observation_id: str = Field(min_length=1)
     user_id: str = Field(min_length=1)
@@ -160,7 +196,7 @@ class ObservationEvidence(ProductContract):
     frame_age_ms: int = Field(ge=0)
     allowed_transitions: list[str] = Field(default_factory=list)
     confidence: float = Field(ge=0, le=1)
-    hazards: list[str] = Field(default_factory=list)
+    hazards: list[PerceptionHazard] = Field(default_factory=list)
     source: str = Field(min_length=1)
     evidence: dict[str, Any] = Field(default_factory=dict)
 

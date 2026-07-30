@@ -19,9 +19,11 @@ from .models import (
     ConversationTurnRow,
     IntentRow,
     JobRow,
+    ObservationRow,
     ResultRow,
     UserRow,
 )
+from .contracts import ObservationEvidence
 
 
 def _timestamp(value: Any) -> datetime:
@@ -70,6 +72,32 @@ class ProductDatabase:
             row = session.get(UserRow, str(user_id))
             if row is None:
                 session.add(UserRow(user_id=str(user_id), display_name=display_name or str(user_id)))
+
+    def record_observation(self, value: ObservationEvidence) -> None:
+        """Persist one validated perception artifact idempotently."""
+        self.create_schema()
+        with self.session() as session:
+            user = session.get(UserRow, value.user_id)
+            if user is None:
+                session.add(UserRow(user_id=value.user_id, display_name=value.user_id))
+                session.flush()
+            if session.get(ObservationRow, value.observation_id) is not None:
+                return
+            session.add(ObservationRow(
+                observation_id=value.observation_id,
+                user_id=value.user_id,
+                session_id=value.session_id,
+                task_id=value.task_id,
+                checkpoint_id=value.checkpoint_id,
+                frame_captured_at=value.frame_captured_at,
+                received_at=value.received_at,
+                frame_age_ms=value.frame_age_ms,
+                allowed_transitions=list(value.allowed_transitions),
+                confidence=value.confidence,
+                hazards=[item.model_dump(mode="json") for item in value.hazards],
+                source=value.source,
+                evidence=dict(value.evidence),
+            ))
 
     def project_journal(
         self,

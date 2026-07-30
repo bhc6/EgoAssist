@@ -28,8 +28,9 @@ Current capability truth:
   configured reminder workflows;
 - task-scoped PDF/image references are implemented; remote human help is available
   only when a real webhook is configured and the user approves the exact preview;
-- automatic structured task perception and online outcome evaluation remain
-  experimental/offline-only and must not be interpreted as completed effects.
+- checkpoint-bound structured task perception is implemented as evidence only;
+  online outcome evaluation remains offline-only and must not be interpreted as
+  a completed real-world effect.
 
 The selected migration foundations are LiveKit for realtime transport, Temporal
 for durable execution, MCP for external connector boundaries, SQLAlchemy/Alembic
@@ -147,17 +148,25 @@ browser login -> participant -> experiment case -> authenticated WebSocket
                                       |
                          interruptible browser audio
 
-                 periodic latest frame -> isolated perception lane
+                 periodic latest frame -> immutable task/checkpoint context
                                       |
-                      validated structured gate decision
+                      isolated perception provider lane
                                       |
-                  optional proactive utterance on dialogue lane
+                     validated ObservationEvidence
+                                      |
+             TaskSession confirmation gate + TimelineMemory policy
+                                      |
+                  optional task-bound utterance on dialogue lane
 ```
 
 The dialogue lane owns user audio, ordered camera context, and user-visible
 responses. The perception lane receives no microphone stream and has no direct
-browser audio route. A validated `speak=true` gate may enqueue a separate proactive
-utterance; malformed, stale, or unattributed output fails closed.
+browser audio route. Each frame is bound to the user, case, Skill, task version,
+checkpoint epoch, direct allowed path, completion criteria, artifact checksums,
+and capture time. Provider output is evidence, not task truth. Malformed, stale,
+unrelated, changed-context, and forbidden-path output fails closed. Repeated
+fresh evidence may ask for confirmation, but only an explicit user confirmation
+advances the checkpoint.
 
 Dialogue video is coalesced until the provider confirms an active speech segment;
 the newest frame is then flushed after audio ordering is established. Each VAD

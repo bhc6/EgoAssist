@@ -2,7 +2,14 @@
 
 from .engine import PreferenceMemory
 from .episodes import RealtimeEpisodeMemory
-from .perception import StructuredPerceptionAdapter
+from .perception import (
+    MAX_FRAME_AGE_MS,
+    PerceptionValidation,
+    StructuredPerceptionAdapter,
+    parse_perception_hypothesis,
+    perception_prompt,
+    validate_perception_result,
+)
 from .task import TaskSession, TaskSpec
 from .skills import SkillPackage, SkillRegistry, SkillRuntime
 from .tools import SkillToolExecutor
@@ -38,6 +45,8 @@ from .intent_decomposition import normalize_intent_candidates
 
 __all__ = [
     "PreferenceMemory", "RealtimeEpisodeMemory", "StructuredPerceptionAdapter",
+    "MAX_FRAME_AGE_MS", "PerceptionValidation", "parse_perception_hypothesis",
+    "perception_prompt", "validate_perception_result",
     "TaskSession", "TaskSpec", "SkillPackage", "SkillRegistry",
     "SkillRuntime", "SkillToolExecutor", "EventLedger", "TurnTakingPolicy",
     "ContextHarness", "ContextLayer", "ContextSettings", "SessionJournal", "estimate_tokens",

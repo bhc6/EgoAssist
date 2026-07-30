@@ -51,12 +51,15 @@ from egoassist.realtime import (
     platform_capability_available,
     platform_capability_truth,
     public_tool_declaration,
+    validate_perception_result,
 )
 from egoassist.realtime.media_audit import MediaAuditAccumulator
 from egoassist.realtime.tools import tool_result_succeeded
 from egoassist.product import (
     HumanHelpRequest,
     LocalArtifactPort,
+    PerceptionFrameContext,
+    PerceptionHypothesis,
     ProductDatabase,
     WebhookHumanHelpPort,
 )
@@ -298,6 +301,36 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
             skill=active_runtime.skill.name,
             task_id=active_runtime.task.spec.id,
             step_id=active_runtime.task.current_step.id,
+        )
+
+    def perception_context_for_runtime(
+        active_runtime: SkillRuntime,
+        *,
+        user_id: str,
+        session_id: str,
+        frame_id: str,
+        captured_at: datetime,
+    ) -> PerceptionFrameContext | None:
+        if active_runtime.skill is None or active_runtime.task is None:
+            return None
+        binding = active_runtime.task.perception_binding()
+        return PerceptionFrameContext(
+            context_id=binding["contextId"],
+            frame_id=frame_id,
+            user_id=user_id,
+            session_id=session_id,
+            skill_id=active_runtime.skill.name,
+            task_id=binding["taskId"],
+            task_version=binding["taskVersion"],
+            task_provenance=binding["taskProvenance"],
+            checkpoint_id=binding["checkpointId"],
+            checkpoint_epoch=binding["checkpointEpoch"],
+            allowed_transitions=binding["allowedTransitions"],
+            completion_criteria=binding["completionCriteria"],
+            risk=binding["risk"],
+            source_reference=binding["sourceReference"],
+            authorized_artifacts=artifacts_for_runtime(active_runtime, user_id),
+            frame_captured_at=captured_at,
         )
 
     def runtime_skill_summary(package) -> dict:
@@ -3105,6 +3138,76 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
         user_routing[user_id] = result["routingState"]
         return await get_state(request)
 
+    def validate_external_observation(
+        active_runtime: SkillRuntime,
+        payload: dict[str, Any],
+        *,
+        user_id: str,
+        session_id: str,
+    ):
+        captured_at = datetime.now(timezone.utc)
+        raw_captured_at = payload.get("frameCapturedAt") or payload.get("observedAt")
+        if raw_captured_at:
+            try:
+                captured_at = datetime.fromisoformat(
+                    str(raw_captured_at).replace("Z", "+00:00")
+                )
+                if captured_at.tzinfo is None:
+                    captured_at = captured_at.replace(tzinfo=timezone.utc)
+            except ValueError as exc:
+                raise ValueError("invalid observation capture timestamp") from exc
+        frame_id = str(payload.get("frameId") or f"manual-frame-{uuid4().hex}")
+        context = perception_context_for_runtime(
+            active_runtime,
+            user_id=user_id,
+            session_id=session_id,
+            frame_id=frame_id,
+            captured_at=captured_at,
+        )
+        if context is None:
+            raise ValueError("no active task for structured observation")
+        raw_hazards = payload.get("hazards", [])
+        if not isinstance(raw_hazards, list):
+            raise ValueError("observation hazards must be a list")
+        hypothesis = PerceptionHypothesis.model_validate({
+            "checkpoint_id": str(payload.get("step") or payload.get("checkpointId") or "unknown"),
+            "completed": bool(payload.get("completed", False)),
+            "confidence": payload.get("confidence", 0),
+            "summary": str(payload.get("summary", "")),
+            "visible_evidence": list(payload.get("visibleEvidence", [])),
+            "hazards": [
+                {
+                    "kind": str(item.get("kind") or item.get("type") or "task-safety"),
+                    "message": str(item.get("message", "")),
+                    "confidence": item.get("confidence", 0),
+                }
+                for item in raw_hazards if isinstance(item, dict)
+            ],
+            "unrelated": bool(payload.get("unrelated", False)),
+        })
+        current = perception_context_for_runtime(
+            active_runtime,
+            user_id=user_id,
+            session_id=session_id,
+            frame_id=frame_id,
+            captured_at=captured_at,
+        )
+        validation = validate_perception_result(
+            context,
+            current,
+            hypothesis,
+            source=f"manual-external/{str(payload.get('source', 'unspecified'))[:60]}",
+        )
+        if not validation.accepted or validation.observation is None:
+            active_runtime.task.record_perception_rejection(
+                validation.reason,
+                frame_id=frame_id,
+                context_id=context.context_id,
+                detail={"channel": "http-manual-observation"},
+            )
+            raise ValueError(f"observation rejected: {validation.reason}")
+        return validation.observation
+
     async def post_observation(request):
         user_id = request[user_key]["id"]
         observation = await request.json()
@@ -3116,10 +3219,17 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
             async with owner.mutation_lock:
                 if owner.runtime.task is None:
                     raise ValueError("no active task for structured observation")
-                owner.runtime.task.ingest(observation)
+                evidence = validate_external_observation(
+                    owner.runtime,
+                    observation,
+                    user_id=user_id,
+                    session_id=session_id,
+                )
+                owner.runtime.task.ingest(evidence.model_dump(mode="json"))
+                product_database.record_observation(evidence)
                 episode = scoped_episodic_memory(user_id, session_id, policy).remember(
-                    observation.get("summary", ""), kind="observation",
-                    source=str(observation.get("source", "external-observation")),
+                    str(evidence.evidence.get("summary", "")), kind="observation",
+                    source=evidence.source,
                     skill=owner.runtime.skill.name, task=owner.runtime.task.spec.id,
                     session_id=session_id, user_scope=user_id,
                 )
@@ -3136,10 +3246,17 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
         active_runtime = runtime_for_user(user_id)
         if active_runtime.task is None:
             raise ValueError("no active task for structured observation")
-        active_runtime.task.ingest(observation)
+        evidence = validate_external_observation(
+            active_runtime,
+            observation,
+            user_id=user_id,
+            session_id="local-default",
+        )
+        active_runtime.task.ingest(evidence.model_dump(mode="json"))
+        product_database.record_observation(evidence)
         episodic_for_user(user_id).remember(
-            observation.get("summary", ""), kind="observation",
-            source=str(observation.get("source", "external-observation")),
+            str(evidence.evidence.get("summary", "")), kind="observation",
+            source=evidence.source,
             skill=active_runtime.skill.name, task=active_runtime.task.spec.id,
             user_scope=user_id,
         )
@@ -3620,6 +3737,168 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                                 request_timeline_consolidation, owner,
                             )
             return entry
+
+        def session_perception_context(frame_id: str, captured_at: datetime) -> dict[str, Any] | None:
+            value = perception_context_for_runtime(
+                session_runtime,
+                user_id=user_id,
+                session_id=session_id,
+                frame_id=frame_id,
+                captured_at=captured_at,
+            )
+            return value.model_dump(mode="python") if value is not None else None
+
+        async def session_perception_result(
+            captured_value: dict[str, Any], raw_value: dict[str, Any],
+        ) -> dict[str, Any]:
+            try:
+                captured = PerceptionFrameContext.model_validate(captured_value)
+            except ValueError as exc:
+                session_trace("perception.observation.rejected", "perception-policy", {
+                    "reason": "invalid-captured-context", "error": str(exc)[:240],
+                })
+                return {"accepted": False, "reason": "invalid-captured-context"}
+            async with owner.mutation_lock:
+                active_task = session_runtime.task
+                if active_task is None:
+                    session_trace("perception.observation.rejected", "perception-policy", {
+                        "reason": "no-active-task", "frameId": captured.frame_id,
+                        "contextId": captured.context_id,
+                    })
+                    return {"accepted": False, "reason": "no-active-task"}
+                if not raw_value.get("valid"):
+                    active_task.record_perception_rejection(
+                        "malformed-provider-output",
+                        frame_id=captured.frame_id,
+                        context_id=captured.context_id,
+                        detail={"error": str(raw_value.get("error", "invalid output"))[:240]},
+                    )
+                    return {"accepted": False, "reason": "malformed-provider-output"}
+                current = perception_context_for_runtime(
+                    session_runtime,
+                    user_id=user_id,
+                    session_id=session_id,
+                    frame_id=captured.frame_id,
+                    captured_at=captured.frame_captured_at,
+                )
+                if current is None:
+                    active_task.record_perception_rejection(
+                        "no-active-task-context",
+                        frame_id=captured.frame_id,
+                        context_id=captured.context_id,
+                    )
+                    return {"accepted": False, "reason": "no-active-task-context"}
+                try:
+                    hypothesis = PerceptionHypothesis.model_validate({
+                        key: value for key, value in raw_value.items()
+                        if key not in {"valid", "error"}
+                    })
+                    validation = validate_perception_result(
+                        captured,
+                        current,
+                        hypothesis,
+                        source=f"camera/{model}",
+                    )
+                except ValueError as exc:
+                    active_task.record_perception_rejection(
+                        "invalid-provider-schema",
+                        frame_id=captured.frame_id,
+                        context_id=captured.context_id,
+                        detail={"error": str(exc)[:240]},
+                    )
+                    return {"accepted": False, "reason": "invalid-provider-schema"}
+                if not validation.accepted or validation.observation is None:
+                    active_task.record_perception_rejection(
+                        validation.reason,
+                        frame_id=captured.frame_id,
+                        context_id=captured.context_id,
+                        detail={
+                            "capturedCheckpoint": captured.checkpoint_id,
+                            "currentCheckpoint": current.checkpoint_id,
+                            "hypothesisCheckpoint": hypothesis.checkpoint_id,
+                        },
+                    )
+                    journal.append_state_checkpoint(
+                        runtime_checkpoint(session_runtime),
+                        reason="perception-evidence-rejected",
+                    )
+                    state_payload = scoped_state_for_user(user_id, session_id)
+                    if not ws.closed:
+                        await ws.send_json({"type": "state", "state": state_payload})
+                    return {"accepted": False, "reason": validation.reason}
+                evidence = validation.observation
+                active_task.ingest(evidence.model_dump(mode="json"))
+                product_database.record_observation(evidence)
+                journal.append("perception_observation", {
+                    **evidence.model_dump(mode="json"),
+                    "status": "accepted",
+                    "rawMediaPersisted": False,
+                })
+                policy = current_memory_policy()
+                episode = None
+                if policy["components"]["episodic"]["enabled"]:
+                    episode = current_episodic_memory(policy).remember(
+                        str(evidence.evidence.get("summary", "")),
+                        kind="observation",
+                        source=evidence.source,
+                        skill=session_runtime.skill.name if session_runtime.skill else None,
+                        task=evidence.task_id,
+                        session_id=session_id,
+                        user_scope=user_id,
+                    )
+                apply_memory_hint(
+                    session_runtime,
+                    preference_memory=current_preference_memory(policy),
+                    enabled=policy["components"]["preference"]["enabled"],
+                )
+                journal.append_state_checkpoint(
+                    runtime_checkpoint(session_runtime),
+                    reason="task-bound-perception-evidence",
+                )
+                task_snapshot = active_task.snapshot()
+                state_payload = scoped_state_for_user(user_id, session_id)
+                if not ws.closed:
+                    await ws.send_json({"type": "state", "state": state_payload})
+                if episode and episode.get("status") == "active" and episode.get("tier") == "short":
+                    request_timeline_consolidation(owner)
+            observation = task_snapshot.get("observation") or {}
+            speech = None
+            if observation.get("hazards"):
+                speech = {
+                    "reason": "hazard",
+                    "utterance": observation["hazards"][0]["message"],
+                }
+            elif (
+                observation.get("completed")
+                and observation.get("step") == task_snapshot.get("currentCheckpointId")
+                and observation.get("temporalConsistency", {}).get("consistent")
+            ):
+                speech = {
+                    "reason": "confirmation",
+                    "utterance": task_snapshot["decision"]["message"],
+                }
+            elif (
+                observation.get("step") not in {"unknown", task_snapshot.get("currentCheckpointId")}
+                and observation.get("confidence", 0) >= 0.65
+            ):
+                speech = {
+                    "reason": "path-deviation",
+                    "utterance": task_snapshot["decision"]["message"],
+                }
+            return {
+                "accepted": True,
+                "reason": validation.reason,
+                "speech": speech,
+                "origin": {
+                    "taskId": evidence.task_id,
+                    "taskVersion": captured.task_version,
+                    "checkpointId": captured.checkpoint_id,
+                    "checkpointEpoch": captured.checkpoint_epoch,
+                    "contextId": captured.context_id,
+                    "frameId": captured.frame_id,
+                    "observationId": evidence.observation_id,
+                },
+            }
 
         def runtime_event_sink(active_runtime: SkillRuntime):
             def sink(event_type, source, payload, parent_event_ids=None, **metadata):
@@ -4401,6 +4680,11 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                 bridge.set_result_delivery_handler(session_result_delivery)
             if hasattr(bridge, "set_response_lifecycle_handler"):
                 bridge.set_response_lifecycle_handler(session_response_lifecycle)
+            if hasattr(bridge, "set_perception_handlers"):
+                bridge.set_perception_handlers(
+                    session_perception_context,
+                    session_perception_result,
+                )
             (owner.work_ledger or CaseWorkLedger(harness.journal)).recover_delivery_claims()
             if hasattr(bridge, "set_tools"):
                 bridge.set_tools(session_tool_declarations(), session_tool_handler)

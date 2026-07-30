@@ -116,6 +116,21 @@ def test_frontend_exposes_operable_work_center_and_capability_truth():
     assert 'item.id === "timer-delivery"' in script
 
 
+def test_frontend_explains_checkpoint_bound_perception_evidence():
+    html = (CONSOLE_ROOT / "index.html").read_text(encoding="utf-8")
+    script = (CONSOLE_ROOT / "app.js").read_text(encoding="utf-8")
+
+    assert 'id="perceptionEvidence"' in html
+    for field in (
+        "CHECKPOINT / EPOCH", "ALLOWED PATH", "FRAME / AGE",
+        "CONSISTENCY", "LATEST REJECTION",
+    ):
+        assert field in script
+    assert "task.observation.frameAgeMs" in script
+    assert "task.perception?.allowedTransitions" in script
+    assert "不在当前允许路径" in script
+
+
 def test_frontend_renders_task_artifacts_and_consent_gated_human_help():
     html = (CONSOLE_ROOT / "index.html").read_text(encoding="utf-8")
     script = (CONSOLE_ROOT / "app.js").read_text(encoding="utf-8")

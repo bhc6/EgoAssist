@@ -79,6 +79,7 @@ def test_capability_truth_does_not_promote_manifest_labels_to_features():
     assert catalog["background-execution"]["status"] == "unsupported"
     assert catalog["timer-delivery"]["status"] == "unsupported"
     assert catalog["human-help"]["status"] == "demo-only"
+    assert catalog["structured-perception"]["status"] == "available"
     assert all(item["executable"] == (item["status"] == "available") for item in catalog.values())
 
 
