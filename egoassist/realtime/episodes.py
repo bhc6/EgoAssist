@@ -169,6 +169,7 @@ class RealtimeEpisodeMemory:
             kinds=DEFAULT_RETRIEVABLE_KINDS - {"task-preference"},
             clock=clock,
             query_spec=query_spec,
+            min_score=self.min_score,
         )
         candidates = [self._candidate(item) for item in raw["candidates"]]
         selected_ids = {item["cardId"] for item in raw["selected"]}

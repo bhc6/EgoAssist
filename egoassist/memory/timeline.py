@@ -8,10 +8,16 @@ import math
 import re
 import sqlite3
 import threading
+import unicodedata
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping, Sequence
 from uuid import uuid4
+
+import numpy as np
+
+from .temporal import ClockContext, query_time_range
 
 
 class _ClosingConnection:
@@ -30,10 +36,6 @@ class _ClosingConnection:
         finally:
             self._connection.close()
 
-import numpy as np
-
-from .temporal import ClockContext, query_time_range
-
 
 TIMELINE_SCHEMA_VERSION = 2
 MEMORY_KINDS = {
@@ -48,7 +50,7 @@ MEMORY_SCOPES = {"case", "participant"}
 MEMORY_TIERS = {"short", "long"}
 
 _LATIN = re.compile(r"[a-z0-9]+", re.I)
-_CJK = re.compile(r"[\u4e00-\u9fff]")
+_CJK = re.compile(r"[\u4e00-\u9fff\u3400-\u4dbf\u3040-\u309f\u30a0-\u30ff\uac00-\ud7a3]")
 _DIGITS = re.compile(r"\d+")
 _QUESTION_PREFIXES = (
     "who", "what", "where", "when", "why", "how", "which", "can you", "do you",
@@ -63,6 +65,66 @@ _LONG_HINTS = (
     "yesterday", "last week", "usually", "every day", "habit", "routine", "以前", "过去",
     "昨天", "上周", "通常", "每天", "习惯", "一直",
 )
+
+
+@dataclass(frozen=True)
+class LanguageHints:
+    """Language-specific keyword lists for temporal routing and question detection.
+
+    Pass a custom instance to ``TimelineMemory.__init__`` for deployments whose
+    primary language is not Chinese or English.  All defaults replicate the
+    original bilingual (zh-CN + en) behaviour so existing deployments are
+    unaffected.
+    """
+
+    question_prefixes: tuple[str, ...] = field(default=_QUESTION_PREFIXES)
+    question_markers: tuple[str, ...] = field(
+        default=("吗", "么", "什么", "哪儿", "哪里", "怎么", "为何"),
+    )
+    recent_hints: tuple[str, ...] = field(default=_RECENT_HINTS)
+    today_hints: tuple[str, ...] = field(default=_TODAY_HINTS)
+    long_hints: tuple[str, ...] = field(default=_LONG_HINTS)
+
+
+_DEFAULT_HINTS: LanguageHints = LanguageHints()
+
+
+@dataclass(frozen=True)
+class ScoringWeights:
+    """Scoring formula coefficients and bonus terms for ``TimelineMemory.retrieve()``.
+
+    All defaults were tuned on a bilingual zh-CN/en dataset with
+    ``HashingMemoryEncoder`` (weak semantic signal, ``semantic_coeff``
+    contributes near zero in practice).  Adjust when swapping in a production
+    semantic encoder or deploying in a new language.
+    """
+
+    # Primary mixing coefficients
+    semantic_coeff: float = 0.62
+    lexical_coeff: float = 0.26
+
+    # Layer-routing penalties
+    layer_penalty_recent_long: float = 0.2   # recent query, card is in long layer
+    layer_penalty_long_current: float = 0.06  # long-term query, card is current
+
+    # Bonus terms
+    digit_overlap_bonus: float = 0.12
+    kind_bonus_fact: float = 0.08   # fact / state / tool-effect
+    kind_bonus_event: float = 0.04  # event / preference / task-preference
+    structured_full_bonus: float = 0.24   # subject + predicate both match
+    structured_half_bonus: float = 0.14   # only subject or predicate matches
+    today_time_bonus: float = 0.08
+    recency_half_life_days: float = 7.0
+    recency_max_weight: float = 0.08
+
+    # FTS5 score normalisation (bm25 returns negative values; divide to [0, 1])
+    fts_normalization_divisor: float = 10.0
+
+    # Minimum score for a candidate to be included in ``selected``
+    min_score: float = DEFAULT_RETRIEVAL_MIN_SCORE
+
+
+_DEFAULT_WEIGHTS: ScoringWeights = ScoringWeights()
 
 
 def utc_now() -> datetime:
@@ -126,18 +188,26 @@ def memory_key_for(subject: str | None, predicate: str | None) -> str | None:
 
 
 def normalize_text(text: str) -> str:
-    return " ".join(str(text).casefold().split()).strip()
+    # NFC normalization ensures consistent canonical forms for Arabic, Hebrew,
+    # and composed Unicode sequences before case-folding.
+    return " ".join(unicodedata.normalize("NFC", str(text)).casefold().split()).strip()
 
 
-def looks_like_question(text: str) -> bool:
+def looks_like_question(text: str, hints: LanguageHints | None = None) -> bool:
+    """Return True when *text* looks like a question rather than a statement.
+
+    Pass a ``LanguageHints`` instance to add question prefixes/markers for
+    languages beyond the default bilingual (zh-CN + en) set.
+    """
+    _h = hints or _DEFAULT_HINTS
     normalized = normalize_text(text)
     if not normalized:
         return False
     if normalized.endswith(("?", "？")):
         return True
-    if normalized.startswith(_QUESTION_PREFIXES):
+    if normalized.startswith(_h.question_prefixes):
         return True
-    return any(marker in normalized for marker in ("吗", "么", "什么", "哪儿", "哪里", "怎么", "为何"))
+    return any(marker in normalized for marker in _h.question_markers)
 
 
 def memory_terms(text: str) -> set[str]:
@@ -154,20 +224,40 @@ def memory_terms(text: str) -> set[str]:
 class HashingMemoryEncoder:
     """Small deterministic encoder; production adapters may inject a semantic encoder."""
 
-    def __init__(self, dimension: int = 384) -> None:
+    def __init__(
+        self,
+        dimension: int = 384,
+        *,
+        tokenize_fn: Callable[[str], set[str]] | None = None,
+        token_weight_fn: Callable[[str], float] | None = None,
+    ) -> None:
+        """
+        Args:
+            dimension: embedding vector length (≥ 64).
+            tokenize_fn: replace the default ``memory_terms`` tokenizer.  Override
+                for scripts where the CJK/Latin extraction yields no tokens
+                (Arabic, Thai, Devanagari, etc.).
+            token_weight_fn: replace the default length-based weight.  The built-in
+                weights (0.55 for len-1, 1.0 for len-2, 1.2 for len≥3) were tuned
+                for CJK/Latin; deployments where single-char tokens are morphemically
+                meaningful should return a higher weight for ``len(token) == 1``.
+        """
         if dimension < 64:
             raise ValueError("memory embedding dimension must be at least 64")
         self.dimension = int(dimension)
+        self._tokenize: Callable[[str], set[str]] = tokenize_fn or memory_terms
+        self._weight: Callable[[str], float] = token_weight_fn or (
+            lambda token: 1.2 if len(token) >= 3 else 1.0 if len(token) == 2 else 0.55
+        )
 
     def __call__(self, text: str) -> np.ndarray:
         vector = np.zeros(self.dimension, dtype=np.float32)
-        for token in memory_terms(text):
+        for token in self._tokenize(text):
             digest = hashlib.blake2b(token.encode("utf-8"), digest_size=8).digest()
             raw = int.from_bytes(digest, "little", signed=False)
             index = raw % self.dimension
             sign = -1.0 if raw & (1 << 63) else 1.0
-            weight = 1.2 if len(token) >= 3 else 1.0 if len(token) == 2 else 0.55
-            vector[index] += sign * weight
+            vector[index] += sign * self._weight(token)
         norm = float(np.linalg.norm(vector))
         return vector / norm if norm else vector
 
@@ -180,6 +270,9 @@ class TimelineMemory:
         path: str | Path,
         *,
         encoder: Callable[[str], Sequence[float] | np.ndarray] | None = None,
+        language_hints: LanguageHints | None = None,
+        scoring_weights: ScoringWeights | None = None,
+        tokenize_fn: Callable[[str], set[str]] | None = None,
         current_window_seconds: float = 600.0,
         short_term_capacity: int = 40,
         event_sink: Callable[..., Any] | None = None,
@@ -187,6 +280,12 @@ class TimelineMemory:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.encoder = encoder or HashingMemoryEncoder()
+        self._hints: LanguageHints = language_hints or _DEFAULT_HINTS
+        self._weights: ScoringWeights = scoring_weights or _DEFAULT_WEIGHTS
+        # tokenize_fn is used for both query and card-text term extraction in
+        # retrieve().  Defaults to module-level memory_terms (CJK + Latin).
+        # Override for scripts that the default tokenizer cannot handle.
+        self._tokenize: Callable[[str], set[str]] = tokenize_fn or memory_terms
         self.current_window_seconds = float(current_window_seconds)
         self.short_term_capacity = int(short_term_capacity)
         if self.current_window_seconds <= 0 or self.short_term_capacity < 4:
@@ -812,6 +911,7 @@ class TimelineMemory:
         now: datetime | None = None,
         clock: ClockContext | None = None,
         query_spec: Mapping[str, Any] | None = None,
+        min_score: float | None = None,
     ) -> dict[str, Any]:
         if scope not in MEMORY_SCOPES:
             raise ValueError("invalid memory scope")
@@ -821,7 +921,7 @@ class TimelineMemory:
         query_subject = normalize_identity(query_spec.get("subject"))
         query_predicate = normalize_identity(query_spec.get("predicate"))
         query_normalized = normalize_text(query)
-        query_terms = memory_terms(query)
+        query_terms = self._tokenize(query)
         query_vector = np.asarray(self.encoder(query), dtype=np.float32).reshape(-1)
         if np.linalg.norm(query_vector):
             query_vector = query_vector / np.linalg.norm(query_vector)
@@ -840,9 +940,31 @@ class TimelineMemory:
                 "SELECT * FROM memory_cards WHERE " + " AND ".join(clauses), values,
             ).fetchall()
 
-        wants_recent = any(marker in query_normalized for marker in _RECENT_HINTS)
-        wants_today = any(marker in query_normalized for marker in _TODAY_HINTS)
-        wants_long = any(marker in query_normalized for marker in _LONG_HINTS)
+        # Fast-path: direct memory_key lookup whenever both subject and predicate
+        # are provided in the query spec.  memory_key_for() generates a canonical
+        # key for any predicate (phone → contact:{e}:phone, location → location:{e},
+        # else → {rel}:{e}), so the fast-path generalises to all structured facts.
+        pinned_card_ids: set[str] = set()
+        if query_subject and query_predicate:
+            fast_key = memory_key_for(query_subject, query_predicate)
+            if fast_key:
+                with self._lock, self._connect() as fast_conn:
+                    fast_row = fast_conn.execute(
+                        "SELECT * FROM memory_cards "
+                        "WHERE user_id=? AND memory_key=? AND status='active' "
+                        "ORDER BY happened_at DESC LIMIT 1",
+                        [str(user_id), fast_key],
+                    ).fetchone()
+                if fast_row is not None:
+                    fast_card_id = str(fast_row["id"])
+                    pinned_card_ids.add(fast_card_id)
+                    existing_ids = {r["id"] for r in rows}
+                    if fast_card_id not in existing_ids:
+                        rows = [fast_row] + list(rows)
+
+        wants_recent = any(marker in query_normalized for marker in self._hints.recent_hints)
+        wants_today = any(marker in query_normalized for marker in self._hints.today_hints)
+        wants_long = any(marker in query_normalized for marker in self._hints.long_hints)
         today_key = clock.local_now.date().isoformat()
         range_start, range_end = query_time_range(query, clock)
 
@@ -864,7 +986,7 @@ class TimelineMemory:
                     ).fetchall()
                     for fts_row in fts_rows:
                         # bm25() returns negative scores; more negative = better
-                        fts_scores[fts_row[0]] = min(1.0, max(0.0, -float(fts_row[1]) / 10.0))
+                        fts_scores[fts_row[0]] = min(1.0, max(0.0, -float(fts_row[1]) / self._weights.fts_normalization_divisor))
             except Exception:
                 pass  # FTS5 not available or query error; fall back to Jaccard
 
@@ -875,9 +997,9 @@ class TimelineMemory:
             age_seconds = max(0.0, (now.astimezone(timezone.utc) - happened).total_seconds())
             layer = "current" if age_seconds <= self.current_window_seconds else card["tier"]
             if wants_recent and layer == "long":
-                layer_penalty = 0.2
+                layer_penalty = self._weights.layer_penalty_recent_long
             elif wants_long and layer == "current":
-                layer_penalty = 0.06
+                layer_penalty = self._weights.layer_penalty_long_current
             else:
                 layer_penalty = 0.0
             if (wants_today or range_start is not None) and card["dayKey"] != today_key and range_start is None:
@@ -895,7 +1017,7 @@ class TimelineMemory:
                 )
             subject_eligible = not query_subject or normalize_identity(card.get("subject")) == query_subject
             predicate_eligible = not query_predicate or normalize_identity(card.get("predicate")) == query_predicate
-            card_terms = memory_terms(card["text"])
+            card_terms = self._tokenize(card["text"])
             overlap = len(query_terms & card_terms)
             union = max(1, len(query_terms | card_terms))
             lexical = overlap / union if query_terms else 0.0
@@ -911,18 +1033,19 @@ class TimelineMemory:
                 not isinstance(self.encoder, HashingMemoryEncoder)
                 and semantic >= 0.25
             )
-            digit_bonus = 0.12 if set(_DIGITS.findall(query_normalized)) & set(_DIGITS.findall(card["normalizedText"])) else 0.0
-            kind_bonus = 0.08 if card["kind"] in {"fact", "state", "tool-effect"} else 0.04 if card["kind"] in {"event", "preference", "task-preference"} else 0.0
+            _w = self._weights
+            digit_bonus = _w.digit_overlap_bonus if set(_DIGITS.findall(query_normalized)) & set(_DIGITS.findall(card["normalizedText"])) else 0.0
+            kind_bonus = _w.kind_bonus_fact if card["kind"] in {"fact", "state", "tool-effect"} else _w.kind_bonus_event if card["kind"] in {"event", "preference", "task-preference"} else 0.0
             structured_bonus = (
-                0.24 if query_subject and query_predicate and subject_eligible and predicate_eligible
-                else 0.14 if (query_subject and subject_eligible) or (query_predicate and predicate_eligible)
+                _w.structured_full_bonus if query_subject and query_predicate and subject_eligible and predicate_eligible
+                else _w.structured_half_bonus if (query_subject and subject_eligible) or (query_predicate and predicate_eligible)
                 else 0.0
             )
-            time_bonus = 0.08 if wants_today and time_eligible and card["dayKey"] == today_key else 0.0
-            recency = math.exp(-age_seconds / (7 * 86400.0)) * 0.08
+            time_bonus = _w.today_time_bonus if wants_today and time_eligible and card["dayKey"] == today_key else 0.0
+            recency = math.exp(-age_seconds / (_w.recency_half_life_days * 86400.0)) * _w.recency_max_weight
             score = max(
                 0.0,
-                0.62 * semantic + 0.26 * lexical + digit_bonus + kind_bonus
+                _w.semantic_coeff * semantic + _w.lexical_coeff * lexical + digit_bonus + kind_bonus
                 + structured_bonus + time_bonus + recency - layer_penalty,
             )
             structured_match = bool(query_subject or query_predicate) and subject_eligible and predicate_eligible
@@ -932,6 +1055,10 @@ class TimelineMemory:
                 structured_match or overlap > 0 or semantic_evidence
             )
             if fallback_match and time_eligible:
+                eligible = True
+            # Pinned fast-path cards (direct key lookup) always qualify
+            if card["id"] in pinned_card_ids:
+                score = 1.0
                 eligible = True
             reasons = []
             if overlap:
@@ -967,8 +1094,9 @@ class TimelineMemory:
             key=lambda item: (item["score"], item["card"]["happenedAt"]),
             reverse=True,
         )
+        _min_score = min_score if min_score is not None else self._weights.min_score
         selected = [
-            item for item in candidates if item["score"] >= DEFAULT_RETRIEVAL_MIN_SCORE
+            item for item in candidates if item["score"] >= _min_score
         ][:max(1, int(limit))]
         selected_ids = {item["cardId"] for item in selected}
         for item in candidates:
@@ -987,7 +1115,7 @@ class TimelineMemory:
                 "clock": clock.prompt_payload(),
                 "querySpec": {"subject": query_subject, "predicate": query_predicate},
             },
-            "minimumScore": DEFAULT_RETRIEVAL_MIN_SCORE,
+            "minimumScore": _min_score,
             "candidates": candidates[:20],
             "selected": selected,
             "injection": {"status": "not-injected", "cardIds": []},

@@ -5,17 +5,19 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-from collections import OrderedDict
+from collections import OrderedDict, deque
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 import hashlib
 import json
 import logging
 import os
+import threading
+import time
 import webbrowser
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 from uuid import uuid4
 
 from egoassist import BUILTIN_SKILLS_ROOT, CONSOLE_ROOT
@@ -38,6 +40,7 @@ from egoassist.realtime import (
     SkillToolExecutor,
     SessionJournal,
     SemanticTurnRouter,
+    TurnAccumulator,
     explicit_memory_fallback_atoms,
     is_explicit_memory_request,
     memory_draft_candidate,
@@ -54,6 +57,7 @@ from egoassist.realtime import (
     validate_perception_result,
 )
 from egoassist.realtime.media_audit import MediaAuditAccumulator
+from egoassist.realtime.locale_prompts import PROMPTS
 from egoassist.realtime.tools import tool_result_succeeded
 from egoassist.product import (
     HumanHelpRequest,
@@ -146,6 +150,130 @@ class CaseOwnerCapacityError(RuntimeError):
     """Raised when every bounded case owner is still active."""
 
 
+class MemoryEventBus:
+    """Per-session event bus for memory operation observability.
+
+    Phase 1 research instrumentation: captures encode/retrieve/compact/working_memory
+    operations as structured JSONL records and forwards them to the WebSocket frontend
+    for real-time monitoring.
+
+    Designed for memory mechanism research — provides clean hooks for analyzing
+    memory layer behavior without modifying core business logic.
+    """
+
+    _MAX_RECENT = 200
+
+    def __init__(self, session_id: str, trace_path: Path):
+        self.session_id = session_id
+        self._trace_path = trace_path
+        self._recent: deque = deque(maxlen=self._MAX_RECENT)
+        self._lock = threading.Lock()
+        self._ws_emitter: Callable | None = None
+        self._loop: asyncio.AbstractEventLoop | None = None
+
+    def set_ws_emitter(self, emitter: Callable, loop: asyncio.AbstractEventLoop) -> None:
+        """Update the WebSocket send function and event loop.
+
+        Called on each new WebSocket connection. The emitter is used to forward
+        memory events to the frontend console in real time.
+        """
+        with self._lock:
+            self._ws_emitter = emitter
+            self._loop = loop
+
+    def record(self, op: str, **payload) -> dict:
+        """Record a memory operation event synchronously.
+
+        Writes to:
+        1. In-memory ring buffer (for /api/memory/state queries)
+        2. memory_trace.jsonl (persistent research log)
+        3. WebSocket frontend (if connected, non-blocking)
+
+        Returns the recorded event dict.
+        """
+        event = {
+            "op": op,
+            "session_id": self.session_id,
+            "ts": time.time(),
+            **payload,
+        }
+
+        # 1. Ring buffer for /api/memory/state
+        with self._lock:
+            self._recent.append(event)
+            emitter = self._ws_emitter
+            loop = self._loop
+
+        # 2. JSONL file
+        try:
+            with open(self._trace_path, "a", encoding="utf-8") as fh:
+                fh.write(json.dumps(event, ensure_ascii=False, default=str) + "\n")
+        except OSError:
+            pass  # Non-fatal: trace file write failure doesn't block operation
+
+        # 3. WebSocket (non-blocking via run_coroutine_threadsafe)
+        if emitter is not None and loop is not None and loop.is_running():
+            try:
+                asyncio.run_coroutine_threadsafe(
+                    emitter({"type": "memory_trace", **event}),
+                    loop,
+                )
+            except Exception:
+                pass  # WebSocket send failure is non-fatal
+
+        return event
+
+    def emit_event(self, event_type: str, **payload) -> None:
+        """Emit a typed WebSocket event without writing to the memory trace log.
+
+        Used for transient pipeline events (task lifecycle, routing decisions) that
+        are not memory-layer operations and should not appear in the JSONL trace.
+        Thread-safe; safe to call from DashScope SDK threads.
+        """
+        with self._lock:
+            emitter = self._ws_emitter
+            loop = self._loop
+        if emitter is not None and loop is not None and loop.is_running():
+            try:
+                asyncio.run_coroutine_threadsafe(
+                    emitter({
+                        "type": event_type,
+                        "session_id": self.session_id,
+                        "ts": time.time(),
+                        **payload,
+                    }),
+                    loop,
+                )
+            except Exception:
+                pass  # WS send failure is non-fatal
+
+    def recent(self, n: int = 40) -> list[dict]:
+        """Return the n most recent operations (newest last)."""
+        with self._lock:
+            items = list(self._recent)
+        return items[-n:] if items else []
+
+
+@dataclass
+class TaskSlot:
+    """Lightweight execution record for one background intent dispatched in a user turn.
+
+    Tracks lifecycle (pending → running → done / failed / cancelled) and exposes
+    a short text preview for the console task-queue panel.  Slots are per-session
+    and are NOT persisted across server restarts.
+    """
+
+    task_id: str
+    kind: str                        # background-job / persistent-task / …
+    text: str                        # intent text from the compound turn
+    status: str                      # pending / running / done / failed / cancelled
+    created_at: float
+    turn_id: str | None = None
+    completed_at: float | None = None
+    result_preview: str | None = None
+    asyncio_task: Any = field(default=None, repr=False, compare=False)
+
+
 @dataclass
 class CaseRuntimeOwner:
     """Single in-process owner for one durable experiment case."""
@@ -174,6 +302,8 @@ class CaseRuntimeOwner:
     job_scheduler_task: asyncio.Task | None = None
     bridge: Any = None
     intent_runtimes: dict[str, SkillRuntime] = field(default_factory=dict)
+    memory_bus: Any = None  # MemoryEventBus — Phase 1 observability
+    background_tasks: dict[str, "TaskSlot"] = field(default_factory=dict)  # Phase 2A: fanout slots
 
 
 def runtime_root() -> Path:
@@ -497,8 +627,8 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
         if not include_untrusted_evidence or not evidence:
             return base
         lines = [
-            "\n[本轮情景记忆证据]",
-            "以下是从持久化文本摘要中检索出的候选证据，不是隐藏思维。仅在与本轮问题相关时使用；证据不足时明确说不确定。",
+            PROMPTS.evidence_header,
+            PROMPTS.evidence_instruction,
         ]
         for item in evidence:
             lines.append(
@@ -545,11 +675,20 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
             ),
         ]
 
+    # After this many uninterrupted DashScope exchanges in one session, force a
+    # compact+reconnect so DashScope's live context window is reset to the summary
+    # + recent tail. Prevents first_text_delay from growing into the 100ms range.
+    # Override with EGOASSIST_COMPACT_AFTER_EXCHANGES (0 = disabled).
+    _COMPACT_AFTER_EXCHANGES = int(os.getenv("EGOASSIST_COMPACT_AFTER_EXCHANGES", "25"))
+
     def refresh_harness_context(
         bridge,
         harness: ContextHarness,
         target_runtime: SkillRuntime | None = None,
     ) -> dict:
+        exchanges = getattr(bridge, "_dialogue_exchanges", 0)
+        if _COMPACT_AFTER_EXCHANGES > 0 and exchanges >= _COMPACT_AFTER_EXCHANGES:
+            harness.compact(force=True, reason="dialogue-exchange-threshold")
         built = harness.build(harness_layers(target_runtime))
         if hasattr(bridge, "apply_context_projection"):
             bridge.apply_context_projection(built["system"], built["manifest"])
@@ -721,6 +860,23 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
             work_ledger=CaseWorkLedger(journal),
         )
         case_owners[session_id] = owner
+
+        # Phase 1: Memory observability bus
+        trace_dir = Path(journal.path).parent
+        owner.memory_bus = MemoryEventBus(
+            session_id=session_id,
+            trace_path=trace_dir / "memory_trace.jsonl",
+        )
+        # Hook: context compaction
+        owner.harness.on_compact = lambda result: owner.memory_bus.record(
+            "compact",
+            tokens_before=result.get("tokensBefore"),
+            tokens_after=result.get("retainedTailTokens"),
+            reason=result.get("reason"),
+            algorithm=result.get("algorithm"),
+            compacted_count=len(result.get("compactedEntryIds", [])),
+        )
+
         recover_case_reminders(owner)
         ensure_job_scheduler(owner)
         return owner
@@ -1123,23 +1279,23 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
             generic_memory = {
                 "policy": "explicit-confirmation" if preference_settings["enabled"] else "disabled-by-memory-policy",
                 "scope": {"skill": active_runtime.skill.name if active_runtime.skill else None, "task": None, "contextAnchor": None},
-                "evidence": {"status": "waiting", "text": "等待实时对话或感知证据", "source": "realtime-session"},
-                "candidate": {"status": "pending" if candidate else "none", "text": candidate.get("evidence") if candidate else "没有待确认候选"},
-                "confirmation": {"status": "none", "text": "尚无活动任务范围", "count": 0},
+                "evidence": {"status": "waiting", "text": PROMPTS.diag_evidence_waiting, "source": "realtime-session"},
+                "candidate": {"status": "pending" if candidate else "none", "text": candidate.get("evidence") if candidate else PROMPTS.diag_candidate_none},
+                "confirmation": {"status": "none", "text": PROMPTS.diag_confirmation_none, "count": 0},
                 "retrieval": {
                     "status": "no-match" if preference_settings["enabled"] else "disabled",
-                    "text": "确定任务后才执行精确偏好召回" if preference_settings["enabled"] else "本案例已关闭确认偏好记忆",
+                    "text": PROMPTS.diag_retrieval_waiting_scope if preference_settings["enabled"] else PROMPTS.diag_retrieval_disabled,
                     **memory_retrieval(
                         active_runtime, preference_memory=active_memory,
                         enabled=preference_settings["enabled"],
                     ),
                 },
-                "impact": {"status": "none", "text": "不改变当前决策"},
+                "impact": {"status": "none", "text": PROMPTS.diag_impact_none},
                 "lastDecision": memory_state["decision"],
             }
             generic_decision = {
                 "action": "ask" if active_runtime.skill else "silent",
-                "message": "等待确认具体目标" if active_runtime.skill else "通用观察与对话",
+                "message": PROMPTS.diag_decision_waiting if active_runtime.skill else PROMPTS.diag_decision_general,
                 "reason": "skill-loaded-task-unresolved" if active_runtime.skill else "no-domain-intent",
                 "confidence": 1.0 if active_runtime.skill else 0.0,
             }
@@ -1177,10 +1333,10 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                     "source": "core-default",
                 },
                 "memorySystems": [
-                    {"id": "working", "name": "工作记忆", "status": "live" if bridges else "idle", "implementation": "Realtime 会话上下文与最近结构化事件"},
-                    {"id": "preference", "name": "参与者时间线", "status": "waiting-scope" if preference_settings["enabled"] else "disabled", "implementation": "显式长期卡片 + 待确认推断偏好 + 精确任务触发"},
-                    {"id": "episodic", "name": "案例时间线", "status": "connected-summary" if episodic_settings["enabled"] else "disabled", "implementation": "current/short/long 文本卡片；不保存原始媒体"},
-                    {"id": "knowledge", "name": "知识记忆", "status": "unloaded", "implementation": "领域 Skill 尚未加载"},
+                    {"id": "working", "name": PROMPTS.diag_mem_working_name, "status": "live" if bridges else "idle", "implementation": PROMPTS.diag_mem_working_impl},
+                    {"id": "preference", "name": PROMPTS.diag_mem_preference_name, "status": "waiting-scope" if preference_settings["enabled"] else "disabled", "implementation": PROMPTS.diag_mem_preference_impl},
+                    {"id": "episodic", "name": PROMPTS.diag_mem_episodic_name, "status": "connected-summary" if episodic_settings["enabled"] else "disabled", "implementation": PROMPTS.diag_mem_episodic_impl_no_task},
+                    {"id": "knowledge", "name": PROMPTS.diag_mem_knowledge_name, "status": "unloaded", "implementation": PROMPTS.diag_mem_knowledge_impl_no_task},
                 ],
                 "knowledgeMechanism": {
                     "method": "none",
@@ -1224,21 +1380,21 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
             },
             "evidence": {
                 "status": "observed" if observation else "waiting",
-                "text": observation.get("summary") or "等待实时对话或感知证据",
+                "text": observation.get("summary") or PROMPTS.diag_evidence_waiting,
                 "source": observation.get("source") or "realtime-session",
             },
             "candidate": {
                 "status": "pending" if candidate else "none",
-                "text": candidate.get("evidence") if candidate else "没有待确认候选",
+                "text": candidate.get("evidence") if candidate else PROMPTS.diag_candidate_none,
             },
             "confirmation": {
                 "status": "confirmed" if task_records else "none",
-                "text": f"当前任务有 {len(task_records)} 条用户确认记忆",
+                "text": PROMPTS.diag_task_confirmed_count.format(count=len(task_records)),
                 "count": len(task_records),
             },
             "retrieval": {
                 "status": "matched" if hint else "no-match" if preference_settings["enabled"] else "disabled",
-                "text": hint.get("prompt") if hint else "当前情境没有匹配记忆" if preference_settings["enabled"] else "本案例已关闭确认偏好记忆",
+                "text": hint.get("prompt") if hint else PROMPTS.diag_task_no_match if preference_settings["enabled"] else PROMPTS.diag_retrieval_disabled,
                 "memoryId": hint.get("id") if hint else None,
                 "method": retrieval["method"],
                 "query": retrieval["query"],
@@ -1247,11 +1403,11 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
             "impact": {
                 "status": "reused" if hint_was_used else "ready" if hint else "none",
                 "text": (
-                    "已注入本会话，后续避免重复打扰"
+                    PROMPTS.diag_impact_reused
                     if hint_was_used
-                    else "等待实时事件触发语音提醒"
+                    else PROMPTS.diag_impact_ready
                     if hint
-                    else "不改变当前决策"
+                    else PROMPTS.diag_impact_none
                 ),
             },
             "lastDecision": memory_state["decision"],
@@ -1284,16 +1440,16 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                 "source": f"skill:{active_runtime.skill.name}",
             },
             "memorySystems": [
-                {"id": "working", "name": "工作记忆", "status": "live" if bridges else "idle", "implementation": "Realtime 会话上下文与最近结构化观测"},
-                {"id": "preference", "name": "参与者时间线", "status": "connected" if preference_settings["enabled"] else "disabled", "implementation": "显式长期卡片 + 待确认推断偏好 + 精确任务触发"},
-                {"id": "episodic", "name": "案例时间线", "status": "connected-summary" if episodic_settings["enabled"] else "disabled", "implementation": "current/short/long 文本卡片；视觉生产器离线适配"},
-                {"id": "knowledge", "name": "知识记忆", "status": "static-injection", "implementation": "Skill/Task 静态上下文，尚无运行时语义检索"},
+                {"id": "working", "name": PROMPTS.diag_mem_working_name, "status": "live" if bridges else "idle", "implementation": PROMPTS.diag_mem_working_impl},
+                {"id": "preference", "name": PROMPTS.diag_mem_preference_name, "status": "connected" if preference_settings["enabled"] else "disabled", "implementation": PROMPTS.diag_mem_preference_impl},
+                {"id": "episodic", "name": PROMPTS.diag_mem_episodic_name, "status": "connected-summary" if episodic_settings["enabled"] else "disabled", "implementation": PROMPTS.diag_mem_episodic_impl_with_task},
+                {"id": "knowledge", "name": PROMPTS.diag_mem_knowledge_name, "status": "static-injection", "implementation": PROMPTS.diag_mem_knowledge_impl_with_task},
             ],
             "knowledgeMechanism": {
                 "method": "static-skill-task-injection-v1",
                 "selected": {"checkpoint": task.current_step.id, "source": task.current_step.source},
                 "candidates": [{"checkpoint": item.id, "source": item.source, "selected": item.id == task.current_step.id} for item in spec.steps],
-                "claimBoundary": "不是语义知识检索；references/ 当前未被运行时查询",
+                "claimBoundary": PROMPTS.diag_claim_boundary,
             },
             "promptContext": {
                 "hash": (
@@ -1603,38 +1759,28 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
             if active_runtime.skill:
                 return (
                     f"The active Skill is {active_runtime.skill.name}, but the task is unresolved. "
-                    "自然回应并只询问一个确定目标所必需的问题；不要套用默认任务。"
+                    + PROMPTS.skill_unresolved
                 )
             return (
                 "Respond naturally to the current user turn already present in conversation data. "
-                "当前没有领域 Skill；不要虚构任务、步骤或内部决策。"
+                + PROMPTS.no_skill
             )
         decision = active_runtime.task.decision
         if task_control == "repeat":
-            return (
-                "用户请求重复上一条实际说出的指导。结合当前画面和当前任务状态，用更短、更清楚的一句话重述；"
-                "不要退回照读步骤文本，不要假设步骤已完成。"
-            )
+            return PROMPTS.task_repeat
         if task_control == "request-help":
-            return (
-                "用户现在需要帮助。结合当前画面、当前步骤、已确认进度和安全证据，只给一个现在可执行的动作；"
-                "若画面不足以判断，先问一个最关键的澄清问题。"
-            )
+            return PROMPTS.task_request_help
         if task_control == "confirm-step":
-            return (
-                f"用户已明确确认上一步完成。简短确认，然后依据当前画面给当前新步骤的一个可执行动作。"
-                f"结构化控制面当前为：{decision['message']}"
-            )
+            return PROMPTS.task_confirm_step.format(message=decision["message"])
         if task_control == "rollback":
-            return "用户要求回到上一个任务 checkpoint。简短确认，只说当前恢复步骤的一个动作。"
+            return PROMPTS.task_rollback
         if task_control == "pause-task":
-            return "用户要求暂停。只简短确认已暂停，不再给下一步动作。"
+            return PROMPTS.task_pause
         if task_control == "resume-task":
-            return "用户恢复任务。结合当前画面和当前步骤，只给一个现在可执行的动作。"
+            return PROMPTS.task_resume
         return (
             "Respond to the current user control request already present in conversation data. "
-            "结合当前画面与任务状态自然应答；"
-            "不要假设不可见事实，也不要一次给多个动作。"
+            + PROMPTS.task_general
         )
 
     def grounded_user_instructions(
@@ -1657,7 +1803,9 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                 "Use only relevant evidence and do not expose episode IDs, scores, or internal mechanisms."
             )
         elif result.get("episodicRetrieval", {}).get("referential"):
-            instructions += " 这是一个指代既往内容的问题，但没有检索到可靠证据；不要猜测，直接说明不确定。"
+            instructions += PROMPTS.grounding_referential_no_evidence
+        else:
+            instructions += PROMPTS.grounding_no_evidence
         if result.get("memoryRecalled"):
             instructions += " A confirmed preference is available as a separate low-trust data item."
         intent_execution = (result.get("semanticDecision") or {}).get("intentExecution") or {}
@@ -1712,9 +1860,8 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
         if decision.get("action") not in {"guide", "ask", "emergency"}:
             return
         request_priority = priority if priority is not None else (100 if decision["action"] == "emergency" else 70)
-        instructions = (
-            f"结构化感知或控制面刚产生了需要发声的决策：{decision['message']}；依据：{decision['reason']}。"
-            "结合当前画面核对后自然地说出必要内容。风险必须立即明确提示；非风险只给一个动作或一个问题。"
+        instructions = PROMPTS.decision_speech.format(
+            message=decision["message"], reason=decision["reason"]
         )
         for bridge in tuple(live_bridges):
             bridge.update_context(context())
@@ -1736,7 +1883,7 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
             return
         instructions = (
             "A confirmed preference is available in a separate low-trust data item. "
-            "结合当前画面自然地给出一句简短语音提醒；不要提及数据库、记忆编号或内部步骤。"
+            + PROMPTS.memory_speech
         )
         bridges = (target_bridge,) if target_bridge is not None else tuple(live_bridges)
         for bridge in bridges:
@@ -1890,6 +2037,67 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
         return web.json_response({
             "artifacts": artifacts_for_runtime(owner.runtime, user_id),
             "sessionId": session_id,
+        })
+
+    async def get_memory_state(request):
+        """Phase 1: Memory observability — current memory layer state snapshot."""
+        user_id = request[user_key]["id"]
+        session_id = str(request.query.get("session", "")).strip() or None
+        if not session_id:
+            sessions = identity.list_context_sessions(user_id)
+            if not sessions:
+                return web.json_response({"error": "no sessions found"}, status=404)
+            session_id = sessions[0]["id"]
+        identity.get_context_session(user_id, session_id)  # validate ownership
+        owner = case_owner(user_id, session_id)
+        episodic_snap = timeline.snapshot(user_id=user_id, scope="case", case_id=session_id)
+        journal_entries = owner.journal.entries()
+        return web.json_response({
+            "sessionId": session_id,
+            "timestamp": time.time(),
+            "workingMemory": {
+                "entryCount": len(journal_entries),
+                "manifestSnapshot": owner.harness._last_manifest,
+                "recentEntries": journal_entries[-20:],
+            },
+            "episodicMemory": episodic_snap,
+            "recentOps": owner.memory_bus.recent(40) if owner.memory_bus else [],
+        })
+
+    async def get_background_tasks(request):
+        """Phase 2A: Task queue — background intent execution status snapshot."""
+        user_id = request[user_key]["id"]
+        session_id = str(request.query.get("session", "")).strip() or None
+        if not session_id:
+            sessions = identity.list_context_sessions(user_id)
+            if not sessions:
+                return web.json_response({"error": "no sessions found"}, status=404)
+            session_id = sessions[0]["id"]
+        identity.get_context_session(user_id, session_id)
+        owner = case_owner(user_id, session_id)
+        slots = [
+            {
+                "taskId": s.task_id,
+                "kind": s.kind,
+                "textPreview": s.text[:80],
+                "status": s.status,
+                "createdAt": s.created_at,
+                "completedAt": s.completed_at,
+                "resultPreview": s.result_preview,
+                "turnId": s.turn_id,
+                "durationMs": (
+                    round((s.completed_at - s.created_at) * 1000)
+                    if s.completed_at else None
+                ),
+            }
+            for s in owner.background_tasks.values()
+        ]
+        return web.json_response({
+            "sessionId": session_id,
+            "timestamp": time.time(),
+            "tasks": list(reversed(slots)),  # newest first
+            "running": sum(1 for s in owner.background_tasks.values() if s.status == "running"),
+            "pending": sum(1 for s in owner.background_tasks.values() if s.status == "pending"),
         })
 
     async def get_artifact_content(request):
@@ -2228,9 +2436,9 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
             if isinstance(value, str):
                 instruction = value.strip()
                 step = {
-                    "id": f"step-{index + 1}", "title": f"步骤 {index + 1}",
+                    "id": f"step-{index + 1}", "title": PROMPTS.step_title.format(n=index + 1),
                     "instruction": instruction,
-                    "completion": f"用户确认已完成：{instruction}",
+                    "completion": PROMPTS.step_completion.format(instruction=instruction),
                     "risk": "medium", "source": "user-defined",
                 }
             elif isinstance(value, dict):
@@ -2244,8 +2452,8 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                 raise ValueError("activate a domain skill before creating a task")
             return TaskSpec.from_dict({
                 "id": f"custom-{uuid4().hex[:8]}", "title": title, "version": "user-1",
-                "role": f"{active_runtime.skill.name} 实时辅助助手", "steps": steps,
-                "safety_policy": ["遵守当前 Skill 的领域安全边界", "不确定时询问，不根据单帧自动推进"],
+                "role": f"{active_runtime.skill.name} {PROMPTS.role_suffix}", "steps": steps,
+                "safety_policy": [PROMPTS.safety_policy_domain, PROMPTS.safety_policy_uncertainty],
             }, provenance="user-defined")
         if owner:
             async with exclusive_case_transition(owner):
@@ -2285,6 +2493,12 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
         clock_context: ClockContext | None = None,
     ) -> dict:
         nonlocal routing_state, active_episode_injection
+        # Guard: normalize early so every caller is protected, not just the audio path.
+        # journal.append_message raises ValueError deep in the stack when transcript is
+        # empty, which produces a confusing traceback.  Catch it at the boundary instead.
+        transcript = str(transcript).strip()
+        if not transcript:
+            raise ValueError("transcript text cannot be empty")
         active_runtime = target_runtime or runtime
         active_memory = preference_memory or memory
         active_episodic = episodic_memory or episodic
@@ -2319,6 +2533,20 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                 clock=clock_context,
                 query_spec=semantic_decision.get("memoryQuerySpec"),
             )
+            # Phase 1: instrument episodic retrieval for observability
+            if episodic_retrieval is not None and harness is not None:
+                _bus_owner = case_owners.get(harness.session_id)
+                if _bus_owner and _bus_owner.memory_bus:
+                    _cands = episodic_retrieval.get("candidates", [])
+                    _bus_owner.memory_bus.record(
+                        "retrieve",
+                        query_preview=str(episodic_retrieval.get("query", ""))[:120],
+                        candidate_count=len(_cands),
+                        selected_count=sum(1 for c in _cands if c.get("selected")),
+                        top_score=round(_cands[0].get("score", 0), 4) if _cands else None,
+                        method=episodic_retrieval.get("method"),
+                        scope=getattr(active_episodic, "scope", None),
+                    )
         durable_retrieval = None
         if (
             preference_enabled
@@ -2778,6 +3006,18 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                 if episode:
                     written_cards.append(episode)
                     consumed_draft = consumed_draft or compatible_draft
+                    # Phase 1: instrument memory encode
+                    _enc_owner = case_owners.get(memory_case_id)
+                    if _enc_owner and _enc_owner.memory_bus:
+                        _enc_owner.memory_bus.record(
+                            "encode",
+                            tier="long" if requested_scope == "participant" and atom_consent == "explicit" else "short",
+                            kind=atom_kind,
+                            scope=requested_scope,
+                            text_preview=str(atom.get("text") or transcript)[:120],
+                            card_id=episode.get("id"),
+                            consent=atom_consent,
+                        )
                 else:
                     skipped_reasons.append("empty-or-question-like-memory-text")
             if consumed_draft and pending_draft:
@@ -3005,7 +3245,7 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                 "status": "committed",
                 "committedCardIds": committed_card_ids,
                 "message": (
-                    "已保存：" + "；".join(
+                    PROMPTS.memory_saved_prefix + "；".join(
                         str(card.get("text") or card.get("summary") or "")
                         for card in committed_cards
                     )[:600]
@@ -3019,9 +3259,9 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                 "status": "needs-input" if needs_value else "not-committed",
                 "committedCardIds": [],
                 "message": (
-                    "还没有保存，请把要记住的完整内容告诉我。"
+                    PROMPTS.memory_needs_input
                     if needs_value
-                    else "这条内容没有保存成功，请再说一遍。"
+                    else PROMPTS.memory_not_committed
                 ),
             }
         else:
@@ -3518,9 +3758,18 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
             ledger.set_intent_status(intent_id, "foreground", detail={"runtimeCheckpoint": snapshot})
             owner.journal.append_state_checkpoint(snapshot, reason=f"intent-resumed:{intent_id}")
             owner.routing = registry.route("")
-        return web.json_response(scoped_state_for_user(
+        state_payload = scoped_state_for_user(
             user_id, session_id, runtime_override=owner.runtime, routing_override=owner.routing,
-        ))
+        )
+        # Push state update to the active WS connection so the client reflects the
+        # resumed intent immediately without waiting for the next user turn.
+        active_ws = owner.socket
+        if active_ws is not None and not active_ws.closed:
+            try:
+                await active_ws.send_json({"type": "state", "state": state_payload})
+            except Exception:
+                pass  # WS send failure is non-fatal; REST response still returns state
+        return web.json_response(state_payload)
 
     async def post_job_cancel(request):
         user_id = request[user_key]["id"]
@@ -3750,6 +3999,11 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
             session_episode_injection = {"status": "no-evidence", "query": "", "episodeIds": [], "evidence": []}
             session_media_configuration: dict = {"audio": {}, "video": {}}
             semantic_router = SemanticTurnRouter(api_key)
+
+            # Phase 1: Wire memory bus to WebSocket emitter
+            if owner.memory_bus:
+                owner.memory_bus.set_ws_emitter(emit, asyncio.get_event_loop())
+
             initial_context = harness.build(harness_layers(session_runtime))
         except Exception as exc:
             if owner.socket_token is socket_token:
@@ -3757,7 +4011,10 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                 owner.socket = None
                 live_harnesses.pop(session_id, None)
             if not ws.closed:
-                await ws.send_json({"type": "error", "message": str(exc)})
+                try:
+                    await ws.send_json({"type": "error", "message": str(exc)})
+                except Exception:
+                    pass  # WS may close between the guard check and the write; non-fatal
             await ws.close()
             return ws
         except BaseException:
@@ -4210,6 +4467,97 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
             max(1, int(os.getenv("EGOASSIST_CLASSIFICATION_CONCURRENCY", "4"))),
         )
 
+        # ── Phase 2A: background intent execution ─────────────────────────────
+        _BG_TASK_LIMIT = 20  # max retained TaskSlots per session (ring eviction)
+        _BG_KINDS = frozenset({"background-job", "persistent-task"})
+
+        async def _run_background_intent(
+            slot: TaskSlot,
+            candidate_text: str,
+            candidate_kind: str,
+            bg_runtime: SkillRuntime,
+            bg_semantic: dict,
+        ) -> None:
+            """Execute one background intent on an isolated runtime.
+
+            Acquires the session mutation lock for safe journal/timeline writes.
+            Does NOT modify live session runtime state (persist_runtime_checkpoint=False,
+            dedicated bg_runtime).  Lifecycle transitions are pushed to the console
+            as 'task_update' WS messages via MemoryEventBus.emit_event().
+            """
+            slot.status = "running"
+            if owner.memory_bus:
+                owner.memory_bus.emit_event(
+                    "task_update",
+                    task_id=slot.task_id,
+                    kind=slot.kind,
+                    text_preview=slot.text[:80],
+                    status="running",
+                )
+            try:
+                async with owner.mutation_lock:
+                    result = process_transcript(
+                        candidate_text,
+                        harness,
+                        bg_runtime,
+                        persist_runtime_checkpoint=False,
+                        preference_memory=current_preference_memory(),
+                        episodic_memory=current_episodic_memory(),
+                        user_scope=user_id,
+                        semantic_decision=bg_semantic,
+                        memory_policy=current_memory_policy(),
+                        clock_context=clock_for_session(user_id, session_id),
+                    )
+                slot.status = "done"
+                slot.completed_at = time.time()
+                write = result.get("timelineWrite") or {}
+                slot.result_preview = (
+                    str(
+                        (write.get("card") or {}).get("text")
+                        or write.get("id")
+                        or ""
+                    )[:80] or None
+                )
+                if owner.memory_bus:
+                    owner.memory_bus.emit_event(
+                        "task_update",
+                        task_id=slot.task_id,
+                        kind=slot.kind,
+                        text_preview=slot.text[:80],
+                        status="done",
+                        result_preview=slot.result_preview,
+                        duration_ms=round(
+                            (slot.completed_at - slot.created_at) * 1000
+                        ),
+                    )
+            except asyncio.CancelledError:
+                slot.status = "cancelled"
+                slot.completed_at = time.time()
+                if owner.memory_bus:
+                    owner.memory_bus.emit_event(
+                        "task_update",
+                        task_id=slot.task_id,
+                        kind=slot.kind,
+                        text_preview=slot.text[:80],
+                        status="cancelled",
+                    )
+                raise
+            except Exception as exc:
+                slot.status = "failed"
+                slot.completed_at = time.time()
+                LOGGER.warning(
+                    "Background intent %s failed: %s", slot.task_id, exc, exc_info=True
+                )
+                if owner.memory_bus:
+                    owner.memory_bus.emit_event(
+                        "task_update",
+                        task_id=slot.task_id,
+                        kind=slot.kind,
+                        text_preview=slot.text[:80],
+                        status="failed",
+                        error=str(exc)[:120],
+                    )
+
         async def classify_persisted_turn(turn_id: str, text: str) -> dict:
             ledger = owner.work_ledger or CaseWorkLedger(harness.journal)
             ledger.set_turn_status(turn_id, "classifying")
@@ -4246,6 +4594,7 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
             )
             if owner.socket_token is not socket_token or owner.epoch != connection_epoch:
                 raise asyncio.CancelledError
+            _bg_task_queue: list[tuple[TaskSlot, str, str, SkillRuntime, dict]] = []
             async with owner.mutation_lock:
                 if owner.socket_token is not socket_token or owner.epoch != connection_epoch:
                     raise asyncio.CancelledError
@@ -4276,10 +4625,26 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                     "intents": [item.model_dump() for item in intent_candidates],
                     "acceptedIntents": scheduled_intents,
                 }
+                # Phase 2A: rollback signal → cancel any running background tasks
+                if semantic.get("taskControl") == "rollback":
+                    for _slot in list(owner.background_tasks.values()):
+                        if _slot.status == "running" and _slot.asyncio_task is not None:
+                            _slot.asyncio_task.cancel()
+
                 selected_candidate = next((
                     item for item in remaining_candidates
                     if item.kind in {"foreground-dialogue", "waiting-input"}
                 ), remaining_candidates[0] if remaining_candidates else None)
+
+                # Phase 2A: collect background candidates for parallel fanout.
+                # Exclude the selected foreground candidate and already-scheduled reminders.
+                parallel_candidates = [
+                    c for c in remaining_candidates
+                    if c is not selected_candidate
+                    and c.kind in _BG_KINDS
+                    and platform_capability_available("background-execution", capability_overrides)
+                ]
+
                 requested_intent_kind = str(
                     selected_candidate.kind if selected_candidate is not None else "foreground-dialogue"
                 )
@@ -4498,6 +4863,57 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                         detail={"turnId": turn_id, "runtimeCheckpoint": runtime_checkpoint(processing_runtime)},
                     )
                 work_ledger.set_turn_status(turn_id, "completed")
+
+                # Phase 2A: build bg task descriptors while holding the lock so
+                # snapshot values (preference_memory, episodic, policy, clock) are
+                # consistent with the just-processed foreground turn.
+                _bg_task_queue: list[tuple[TaskSlot, str, str, SkillRuntime, dict]] = []
+                for _bg_cand in parallel_candidates:
+                    _bg_skill = str(_bg_cand.parameters.get("skill") or "") or None
+                    _bg_rt = SkillRuntime(registry, _bg_skill, event_sink=None)
+                    _bg_rt.set_event_sink(runtime_event_sink(_bg_rt))
+                    _bg_semantic = {
+                        "method": semantic.get("method", "background-intent-fanout"),
+                        "model": semantic.get("model"),
+                        "status": "classified",
+                        "speechControl": None,
+                        "taskControl": None,
+                        "preferenceIntent": None,
+                        "memoryQuery": None,
+                        "memoryKind": None,
+                        "memoryText": None,
+                        "memoryKey": None,
+                        "memoryScope": None,
+                        "memoryConsent": None,
+                        "memoryAtoms": [],
+                        "memoryDraft": None,
+                        "memoryQuerySpec": None,
+                        "skillControl": None,
+                        "selectedSkill": _bg_skill,
+                        "intentKind": _bg_cand.kind,
+                        "intents": [_bg_cand.model_dump()],
+                        "skillStatus": "matched" if _bg_skill else "no-match",
+                        "latencyMs": 0,
+                        "policyVersion": semantic.get("policyVersion"),
+                        "claimBoundary": (
+                            "Background intent fanout; derived from compound turn classification."
+                        ),
+                    }
+                    _slot = TaskSlot(
+                        task_id=uuid4().hex[:16],
+                        kind=_bg_cand.kind,
+                        text=_bg_cand.text,
+                        status="pending",
+                        created_at=time.time(),
+                        turn_id=turn_id,
+                    )
+                    # Ring eviction: keep at most _BG_TASK_LIMIT slots per session
+                    if len(owner.background_tasks) >= _BG_TASK_LIMIT:
+                        _oldest = next(iter(owner.background_tasks))
+                        del owner.background_tasks[_oldest]
+                    owner.background_tasks[_slot.task_id] = _slot
+                    _bg_task_queue.append((_slot, _bg_cand.text, _bg_cand.kind, _bg_rt, _bg_semantic))
+
                 state_payload = state(
                     session_runtime,
                     routing_override=session_routing,
@@ -4513,6 +4929,23 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
             timeline_cards = (result.get("timelineWrite") or {}).get("cards") or [
                 (result.get("timelineWrite") or {}).get("card") or {}
             ]
+            # Phase 2A: launch collected background intents as parallel asyncio Tasks.
+            # Runs OUTSIDE the mutex so the foreground response is not blocked.
+            for _slot, _cand_text, _cand_kind, _bg_rt, _bg_sem in _bg_task_queue:
+                if owner.memory_bus:
+                    owner.memory_bus.emit_event(
+                        "task_update",
+                        task_id=_slot.task_id,
+                        kind=_slot.kind,
+                        text_preview=_slot.text[:80],
+                        status="pending",
+                        turn_id=turn_id,
+                    )
+                _bg_at = asyncio.create_task(
+                    _run_background_intent(_slot, _cand_text, _cand_kind, _bg_rt, _bg_sem),
+                    name=f"egoassist-bg-intent:{session_id}:{_slot.task_id[:8]}",
+                )
+                _slot.asyncio_task = _bg_at
             if any(card.get("status") == "active" and card.get("tier") == "short" for card in timeline_cards):
                 request_timeline_consolidation(owner)
             if not ws.closed:
@@ -4639,7 +5072,10 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                     if future and not future.done():
                         future.set_exception(exc)
                     elif not ws.closed:
-                        await ws.send_json({"type": "error", "message": str(exc)})
+                        try:
+                            await ws.send_json({"type": "error", "message": str(exc)})
+                        except Exception:
+                            pass  # non-fatal; WS may have closed between the guard check and write
                 finally:
                     owner.queued_turn_ids.discard(str(item["turnId"]))
                     queue.task_done()
@@ -4693,19 +5129,35 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                     break
                 enqueue_persisted_turn(pending)
 
-        def transcript_received(text):
-            normalized = str(text).strip()
-            if not normalized:
-                return
+        def _do_enqueue_transcript(text: str) -> None:
+            """Enqueue one complete (already-accumulated) utterance."""
             owner.turn_sequence += 1
             owner.latest_input_sequence = owner.turn_sequence
             ledger = owner.work_ledger or CaseWorkLedger(harness.journal)
             captured = ledger.capture_turn(
-                normalized,
+                text,
                 source="input-audio-transcript",
                 sequence=owner.turn_sequence,
             )
             enqueue_persisted_turn(captured)
+
+        _turn_accumulator = TurnAccumulator(
+            _do_enqueue_transcript,
+            window_ms=float(os.getenv("EGOASSIST_TURN_ACCUMULATE_MS", "1200")),
+        )
+
+        def transcript_received(text):
+            normalized = str(text).strip()
+            if not normalized:
+                return
+            # Stop commands: cancel immediately — do not wait for the 1200 ms
+            # TurnAccumulator debounce window. drop_queued_below=101 also clears
+            # priority-100 user turns sitting in the response queue, so the AI
+            # cannot resume after the stop command is processed.
+            if SemanticTurnRouter._STOP_RE.match(" ".join(normalized.split())):
+                bridge.cancel_response(drop_queued_below=101, reason="stop-command-early")
+                _turn_accumulator.discard()  # drop any preceding partial fragment
+            _turn_accumulator.push(normalized)
 
         async def handle_media_payload(payload: dict, *, source: str) -> bool:
             kind = payload.get("type")
@@ -4929,8 +5381,14 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                     )})
         except Exception as exc:
             if not ws.closed:
-                await ws.send_json({"type": "error", "message": str(exc)})
+                try:
+                    await ws.send_json({"type": "error", "message": str(exc)})
+                except Exception:
+                    pass  # non-fatal; WS may have closed between the guard check and write
         finally:
+            # Flush any voice fragment that was still accumulating when the
+            # connection dropped so it isn't silently discarded.
+            _turn_accumulator.flush_now()
             owns_reservation = owner.socket_token is socket_token
             try:
                 if livekit_media_task is not None:
@@ -4998,7 +5456,7 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
             request_id = uuid4().hex[:10]
             LOGGER.exception("request %s failed: %s %s", request_id, request.method, request.path)
             return web.json_response(
-                {"error": "internal_error", "message": "请求处理失败，请查看服务端日志。", "requestId": request_id},
+                {"error": "internal_error", "message": PROMPTS.error_internal, "requestId": request_id},
                 status=500,
             )
 
@@ -5126,6 +5584,8 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
         web.post("/api/sessions", post_session),
         web.post("/api/sessions/memory-policy", post_memory_policy),
         web.get("/api/state", get_state),
+        web.get("/api/memory/state", get_memory_state),  # Phase 1: memory observability
+        web.get("/api/background-tasks", get_background_tasks),  # Phase 2A: task queue
         web.get("/api/artifacts", get_artifacts),
         web.get("/api/artifacts/{artifact_id}/content", get_artifact_content),
         web.post("/api/human-help/preview", post_human_help_preview),
@@ -5177,7 +5637,6 @@ def main():
     from aiohttp import web
 
     if args.open:
-        import threading
         threading.Timer(0.8, lambda: webbrowser.open(f"http://{args.host}:{args.port}")).start()
     web.run_app(
         create_app(args.skills, args.active_skill, args.memory_path, args.model, args.voice),

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import re
@@ -202,6 +203,11 @@ class StructuredPerceptionAdapter:
         if self.mode == "openai" and not self.api_key:
             raise ValueError("OPENAI_API_KEY is required for openai perception mode")
 
+    def _http_post(self, request: urllib.request.Request) -> dict[str, Any]:
+        """Synchronous HTTP POST — call via asyncio.to_thread() from async contexts."""
+        with urllib.request.urlopen(request, timeout=30) as response:
+            return json.loads(response.read())
+
     def analyze(self, image_data_url: str, current_checkpoint: str, allowed_checkpoints: list[str] | tuple[str, ...] = ()) -> dict[str, Any]:
         if self.mode != "openai":
             return {
@@ -233,15 +239,22 @@ class StructuredPerceptionAdapter:
                 {"type": "image_url", "image_url": {"url": image_data_url, "detail": "low"}},
             ]}],
         }
-        request = urllib.request.Request(
+        req = urllib.request.Request(
             self.endpoint, data=json.dumps(payload).encode(),
             headers={"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"},
         )
-        with urllib.request.urlopen(request, timeout=30) as response:
-            result = json.loads(response.read())
+        result = self._http_post(req)
         observation = parse_perception_hypothesis(
             json.loads(result["choices"][0]["message"]["content"])
         ).model_dump(mode="json")
         observation["step"] = observation.pop("checkpoint_id")
         observation["source"] = f"camera/{self.model}"
         return observation
+
+    async def analyze_async(self, image_data_url: str, current_checkpoint: str, allowed_checkpoints: list[str] | tuple[str, ...] = ()) -> dict[str, Any]:
+        """Async entry-point — runs the blocking HTTP call off the event loop.
+
+        Use this from any async context (agent loop, LiveKit handler, etc.) to
+        avoid stalling the event loop for up to the 30 s HTTP timeout.
+        """
+        return await asyncio.to_thread(self.analyze, image_data_url, current_checkpoint, allowed_checkpoints)

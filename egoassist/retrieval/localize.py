@@ -46,16 +46,25 @@ def localize(query: str, item: MemoryItem, backend: VLMBackend, cfg: Config) -> 
     ts = np.asarray(item.keyframe_times, dtype=np.float64)
     win = max(cfg.localize_win, (item.t_end - item.t_start) / max(1, len(kfs)))
 
-    # 滑窗打分
+    # 一次批量计算所有关键帧 embedding，替代逐窗口 GPU 调用
+    # O(n_windows) 次 forward pass → 1 次 batch（关键帧数通常 ≤ 8）
+    kf_embeds = backend.embed_frames_each(kfs)  # (K, D)
+
+    # 滑窗打分：纯 numpy，零 GPU 调用
     windows = []
     t = item.t_start
     while t <= max(item.t_start, item.t_end - 1e-6):
         t_hi = min(item.t_end, t + win)
-        sel = [f for f, tt in zip(kfs, ts) if t <= tt <= t_hi]
-        if sel:
-            score = float(np.dot(q, backend.embed_frames(sel)))
-            sel_times = [float(tt) for tt in ts if t <= tt <= t_hi]
-            windows.append((t, t_hi, score, sel, sel_times))
+        mask = (ts >= t) & (ts <= t_hi)
+        if mask.any():
+            win_emb = kf_embeds[mask].mean(axis=0)
+            win_emb = win_emb / (np.linalg.norm(win_emb) + 1e-8)
+            score = float(np.dot(q, win_emb))
+            idxs = np.where(mask)[0]
+            win_entry = (t, t_hi, score,
+                         [kfs[i] for i in idxs],
+                         [float(ts[i]) for i in idxs])
+            windows.append(win_entry)
         t += cfg.localize_stride
     if not windows:
         return Localization(

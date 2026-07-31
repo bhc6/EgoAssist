@@ -23,6 +23,7 @@ class VectorIndex(Protocol):
 
     def add(self, item_id: int, vector: np.ndarray) -> None: ...
     def remove(self, item_id: int) -> None: ...
+    def remove_batch(self, item_ids: list[int]) -> None: ...
     def search(self, query: np.ndarray, k: int) -> list[tuple[int, float]]: ...
     def size(self) -> int: ...
 
@@ -53,6 +54,17 @@ class FlatIndex:
             return
         self._ids.pop(pos)
         self._vecs.pop(pos)
+
+    def remove_batch(self, item_ids: list[int]) -> None:
+        """Remove multiple items in one pass — O(n) instead of O(n·k)."""
+        to_remove = set(item_ids)
+        remaining = [(i, v) for i, v in zip(self._ids, self._vecs) if i not in to_remove]
+        if remaining:
+            ids, vecs = zip(*remaining)
+            self._ids = list(ids)
+            self._vecs = list(vecs)
+        else:
+            self._ids, self._vecs = [], []
 
     def search(self, query: np.ndarray, k: int) -> list[tuple[int, float]]:
         if not self._vecs:
@@ -106,6 +118,19 @@ class FAISSIndex:
         if item_id not in self._id_to_vec:
             return
         del self._id_to_vec[item_id]
+        self._pos_to_id = list(self._id_to_vec.keys())
+        self._index = self._faiss.IndexFlatIP(self.dim)
+        if self._pos_to_id:
+            mat = np.stack([self._id_to_vec[i] for i in self._pos_to_id])
+            self._index.add(mat)
+
+    def remove_batch(self, item_ids: list[int]) -> None:
+        """Remove multiple items with a single index rebuild — O(N) instead of O(N·k)."""
+        removed = {i for i in item_ids if i in self._id_to_vec}
+        if not removed:
+            return
+        for i in removed:
+            del self._id_to_vec[i]
         self._pos_to_id = list(self._id_to_vec.keys())
         self._index = self._faiss.IndexFlatIP(self.dim)
         if self._pos_to_id:

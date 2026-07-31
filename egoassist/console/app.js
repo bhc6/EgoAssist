@@ -20,6 +20,8 @@ const AUDIO_BUFFER_HIGH_WATER = 512 * 1024;
 const VIDEO_BUFFER_HIGH_WATER = 128 * 1024;
 let droppedAudioChunks = 0;
 let droppedVideoFrames = 0;
+const memoryOps = [];  // Phase 1: memory trace events ring buffer
+const MAX_MEMORY_OPS = 60;
 
 async function request(path, options = {}) {
   const response = await fetch(path, options);
@@ -247,6 +249,99 @@ function renderTimeline(events) {
   $$('[data-event]').forEach(node => node.onclick = () => inspect(events.find(event => event.eventId === node.dataset.event)));
   const selected = events.find(event => event.eventId === selectedEventId) || [...events].reverse().find(event => !event.type.startsWith("media."));
   if (selected) inspect(selected);
+}
+
+// Phase 2A: Background task queue functions
+const bgTasks = {};  // task_id → task slot object
+
+function applyTaskUpdate(msg) {
+  const id = msg.task_id;
+  if (!id) return;
+  const prev = bgTasks[id] || {};
+  bgTasks[id] = { ...prev, ...msg };
+  renderTaskQueue();
+}
+
+function renderTaskQueue() {
+  const el = $("#taskQueueLog");
+  if (!el) return;
+  const slots = Object.values(bgTasks).sort((a, b) => (b.ts || 0) - (a.ts || 0));
+  const running = slots.filter(s => s.status === "running").length;
+  const pending = slots.filter(s => s.status === "pending").length;
+  const badge = running ? running + " 运行中" : pending ? pending + " 待执行" : slots.length + " tasks";
+  $("#taskQueueCount").textContent = badge;
+  if (selectedSessionId)
+    $("#taskQueueLink").href = "/api/background-tasks?session=" + encodeURIComponent(selectedSessionId);
+  if (!slots.length) {
+    el.innerHTML = "<span class='trace-empty'>等待后台任务</span>";
+    return;
+  }
+  el.innerHTML = slots.slice(0, 20).map(s => {
+    const t = new Date((s.ts || 0) * 1000).toLocaleTimeString("zh-CN", {hour: "2-digit", minute: "2-digit", second: "2-digit"});
+    const dur = s.duration_ms != null ? " · " + s.duration_ms + "ms" : "";
+    const preview = esc((s.text_preview || s.result_preview || "").slice(0, 60));
+    const err = s.error ? " · " + esc(s.error.slice(0, 50)) : "";
+    return "<div class='task-slot task-slot--" + esc(s.status || "pending") + "'>" +
+      "<b class='task-status-badge'>" + esc(taskStatusLabel(s.status)) + "</b>" +
+      "<span class='task-kind'>" + esc(s.kind || "background-job") + "</span>" +
+      "<span class='task-preview'>" + preview + err + "</span>" +
+      "<time>" + t + dur + "</time></div>";
+  }).join("");
+}
+
+function taskStatusLabel(status) {
+  return { pending: "待执行", running: "执行中", done: "完成", failed: "失败", cancelled: "已取消" }[status] || status || "?";
+}
+
+// Phase 1: Memory observability functions
+function appendMemoryOp(op) {
+  memoryOps.push(op);
+  if (memoryOps.length > MAX_MEMORY_OPS) memoryOps.shift();
+  renderMemoryTraceLog();
+}
+
+function renderMemoryTraceLog() {
+  const el = $("#memoryTraceLog");
+  if (!el) return;
+  $("#memoryOpCount").textContent = memoryOps.length + " ops";
+  if (selectedSessionId) {
+    $("#memoryStateLink").href = "/api/memory/state?session=" + encodeURIComponent(selectedSessionId);
+  }
+  if (!memoryOps.length) {
+    el.innerHTML = "<span class='trace-empty'>等待记忆操作</span>";
+    return;
+  }
+  el.innerHTML = memoryOps.slice().reverse().map(op => {
+    const time = new Date((op.ts || 0) * 1000).toLocaleTimeString("zh-CN", {hour: "2-digit", minute: "2-digit", second: "2-digit"});
+    return "<div class='memory-op memory-op--" + esc(op.op) + "'>" +
+      "<b>" + esc(opLabel(op.op)) + "</b>" +
+      "<span>" + esc(opSummary(op)) + "</span>" +
+      "<time>" + esc(time) + "</time></div>";
+  }).join("");
+}
+
+function opLabel(op) {
+  const labels = {
+    "encode": "记忆写入",
+    "retrieve": "情景检索",
+    "compact": "上下文压缩",
+    "working_memory_push": "工作记忆"
+  };
+  return labels[op] || op;
+}
+
+function opSummary(op) {
+  if (op.op === "encode") {
+    return (op.kind || "?") + " · " + (op.tier || "?") + "层 · " + (op.text_preview || "").slice(0, 60);
+  }
+  if (op.op === "retrieve") {
+    const score = op.top_score != null ? " · 最高分 " + Number(op.top_score).toFixed(2) : "";
+    return "候选 " + (op.candidate_count || 0) + " · 选中 " + (op.selected_count || 0) + score;
+  }
+  if (op.op === "compact") {
+    return (op.tokens_before || "?") + " → " + (op.tokens_after || "?") + " tokens · " + (op.reason || "");
+  }
+  return JSON.stringify(op).slice(0, 80);
 }
 
 const terminalWorkStatus = status => ["completed", "failed", "cancelled", "delivered", "dismissed"].includes(status);
@@ -917,6 +1012,10 @@ async function connectRealtimeSession(generation) {
       $("#duplexState").textContent = message.status === "committed"
         ? "记忆已提交 · 正在听"
         : message.status === "needs-input" ? "等待补充要记住的内容" : "记忆未提交 · 正在听";
+    } else if (message.type === "memory_trace") {
+      appendMemoryOp(message);
+    } else if (message.type === "task_update") {
+      applyTaskUpdate(message);
     } else if (message.type === "tool_confirmation_required") {
       const details = JSON.stringify(message.arguments || {}, null, 2);
       const accepted = window.confirm("Allow tool " + message.tool + "?\n\n" + details);

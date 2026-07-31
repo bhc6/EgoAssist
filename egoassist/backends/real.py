@@ -91,13 +91,26 @@ class _ClipEmbedBackend(VLMBackend):
         idx = np.linspace(0, len(frames) - 1, self.max_frames).round().astype(int)
         return [frames[i] for i in idx]
 
+    def embed_frames_each(self, frames: Sequence[np.ndarray]) -> np.ndarray:
+        """逐帧 L2 嵌入（不平均），shape (N, D)。
+
+        覆盖 VLMBackend 默认实现，利用 ClipEncoder 的批量 forward pass，
+        把 localize() 内原本 O(n_windows) 次 GPU 调用降至一次 GPU batch。
+        注意：此处不做 _few 下采样，关键帧本身已经过精简。
+        """
+        if not frames:
+            return np.empty((0, self.dim), dtype=np.float32)
+        return self.encoder.embed_image_batch(list(frames))
+
 
 # ============================ 本地 Qwen2.5-VL ============================
 class LocalQwenBackend(_ClipEmbedBackend):
-    """本地 Qwen2.5-VL（默认 3B，4-bit）。8G 显存友好；作答走本地，检索走 CLIP。"""
+    """本地 Qwen2.5-VL（默认 3B，bfloat16，不量化）。12G 显存友好；
+    作答走本地，检索走 CLIP。Blackwell(sm_120) 上 INT4 量化会产生乱码输出，
+    故默认改为 bf16 全精度；显存确实不足时可手动传 load_in_4bit=True。"""
 
     def __init__(self, model_id: str = "Qwen/Qwen2.5-VL-3B-Instruct",
-                 load_in_4bit: bool = True, device: str = "cuda",
+                 load_in_4bit: bool = False, device: str = "cuda",
                  encoder: ClipEncoder | None = None, encoder_device: str | None = None,
                  max_frames: int = 4, caption_tokens: int = 48,
                  answer_tokens: int = 128):
@@ -113,11 +126,11 @@ class LocalQwenBackend(_ClipEmbedBackend):
                 from transformers import Qwen2_5_VLForConditionalGeneration as model_class
             except ImportError:
                 from transformers import Qwen2VLForConditionalGeneration as model_class
-        kw = dict(dtype=torch.float16, device_map=device)
+        kw = dict(dtype=torch.bfloat16, device_map=device)
         if load_in_4bit:
             from transformers import BitsAndBytesConfig
             kw["quantization_config"] = BitsAndBytesConfig(
-                load_in_4bit=True, bnb_4bit_compute_dtype=torch.float16,
+                load_in_4bit=True, bnb_4bit_compute_dtype=torch.bfloat16,
                 bnb_4bit_quant_type="nf4", bnb_4bit_use_double_quant=True)
             kw.pop("dtype", None)
         self.torch = torch
@@ -253,7 +266,7 @@ class DashScopeQwenBackend(_ClipEmbedBackend):
     """DashScope Qwen-VL/Omni视觉后端；检索仍使用同一OpenCLIP编码器。"""
 
     def __init__(self, model: str = "qwen3-vl-plus", api_key: str | None = None,
-                 device: str = "cpu", encoder: ClipEncoder | None = None,
+                 device: str = "cuda", encoder: ClipEncoder | None = None,
                  max_frames: int = 4):
         super().__init__(encoder=encoder, device=device, max_frames=max_frames)
         import os

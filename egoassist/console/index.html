@@ -123,6 +123,28 @@
       <div id="timeline" class="timeline"></div>
     </section>
 
+    <section class="memory-trace-panel panel">
+      <div class="panel-head">
+        <div><span>05 / MEMORY LAYER</span><h1>记忆层实时观测</h1></div>
+        <div class="memory-trace-controls">
+          <b id="memoryOpCount">0 ops</b>
+          <a id="memoryStateLink" href="/api/memory/state" target="_blank" title="完整记忆状态快照 JSON">状态快照 ↗</a>
+        </div>
+      </div>
+      <div id="memoryTraceLog" class="memory-trace-log"><span class="trace-empty">等待记忆操作</span></div>
+    </section>
+
+    <section class="task-queue-panel panel">
+      <div class="panel-head">
+        <div><span>06 / TASK QUEUE</span><h1>后台任务队列</h1></div>
+        <div class="memory-trace-controls">
+          <b id="taskQueueCount">0 tasks</b>
+          <a id="taskQueueLink" href="/api/background-tasks" target="_blank" title="任务队列快照 JSON">任务快照 ↗</a>
+        </div>
+      </div>
+      <div id="taskQueueLog" class="task-queue-log"><span class="trace-empty">等待后台任务</span></div>
+    </section>
+
     <section class="analysis-grid">
       <section class="panel"><div class="panel-head"><div><span>MEMORY SUBSYSTEMS</span><h2>记忆边界与召回候选</h2></div><b id="memoryScope"></b></div><div class="memory-controls"><label>实验配置<select id="memoryProfile"></select></label><label class="memory-switch"><input id="preferenceEnabled" type="checkbox"><span>确认偏好</span></label><label>偏好范围<select id="preferenceScope"><option value="case">当前案例</option><option value="participant">当前参与者</option></select></label><label class="memory-switch"><input id="episodicEnabled" type="checkbox"><span>词法情景</span></label><label>情景范围<select id="episodicScope"><option value="case">当前案例</option><option value="participant">当前参与者</option></select></label><span id="memoryPolicyStatus"></span></div><div id="memorySystems" class="system-grid"></div><div id="memoryFlow"></div><div id="retrievalCandidates" class="rank-list"></div><div id="memories" class="archive"></div><div id="episodicRetrieval" class="rank-list"></div><div id="episodicEpisodes" class="archive"></div></section>
       <section class="panel"><div class="panel-head"><div><span>TASK HYPOTHESES</span><h2 id="taskTitle">Checkpoint Ledger</h2></div><b id="mapStatus"></b></div><div id="steps" class="checkpoint-list"></div><div id="perceptionEvidence" class="perception-evidence"></div><div id="knowledge" class="knowledge-box"></div></section>

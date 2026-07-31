@@ -15,7 +15,7 @@ import re
 import socket
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace as _dc_replace
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Callable
 from uuid import uuid4
@@ -393,7 +393,10 @@ class _OmniPerceptionLane:
         self.connected = False
         self._generation += 1
         if self.conversation:
-            await asyncio.to_thread(self.conversation.close)
+            try:
+                await asyncio.to_thread(self.conversation.close)
+            except Exception:
+                pass  # ws=None: DashScope connection was never established or already closed
 
 
 class OmniBrowserBridge:
@@ -423,6 +426,7 @@ class OmniBrowserBridge:
         self.connected = False
         self.closed = False
         self._dialogue_generation = 0
+        self._dialogue_exchanges = 0  # completed response.done events since last reconnect
         self._reconnect_lock = asyncio.Lock()
         self._reconnect_scheduled = False
         self._buffered_audio: deque[str] = deque()
@@ -436,7 +440,7 @@ class OmniBrowserBridge:
         self._cancelled_response_ids: set[str] = set()
         self._speech_started_response_ids: set[str] = set()
         self._active_response_requests: dict[str, _ResponseRequest] = {}
-        self._queued_response: _ResponseRequest | None = None
+        self._queued_requests: deque[_ResponseRequest] = deque()  # FIFO, max 3 slots
         self._inflight_response: _ResponseRequest | None = None
         self._response_sequence = 0
         self._cancel_when_created = False
@@ -637,7 +641,7 @@ class OmniBrowserBridge:
             turn_detection_type="server_vad",
             turn_detection_threshold=0.2,
             turn_detection_silence_duration_ms=650,
-            turn_detection_param={"create_response": False, "interrupt_response": False},
+            turn_detection_param={"create_response": False, "interrupt_response": True},
             tools=getattr(self, "_provider_tools", []),
         )
 
@@ -649,6 +653,7 @@ class OmniBrowserBridge:
         for item in items:
             conversation.create_item(item)
         self._replayed_compaction_id = harness.projection_checkpoint_id
+        self._dialogue_exchanges = 0  # reset after each fresh DashScope session
         self._trace("context.replayed", {
             "sessionId": harness.session_id,
             "itemCount": len(items),
@@ -925,12 +930,24 @@ class OmniBrowserBridge:
             disconnected = not getattr(self, "connected", True)
             busy = disconnected or self._response_pending or bool(self._active_response_ids)
             if busy:
-                queued = self._queued_response
-                if queued is None or (request.priority, request.sequence) >= (queued.priority, queued.sequence):
-                    self._queued_response = request
-                    self._trace("response.queued", {"sequence": request.sequence, "replacedSequence": queued.sequence if queued else None})
-                    if queued is not None:
-                        self._return_result_to_inbox(queued, "queued-response-replaced")
+                queue = self._queued_requests
+                if interrupt:
+                    # interrupt=True → caller intends a correction/redirect: replace
+                    # the entire queue so the new request runs next.
+                    displaced = list(queue)
+                    queue.clear()
+                    queue.append(request)
+                    self._trace("response.queued", {"sequence": request.sequence, "mode": "replace", "displaced": len(displaced)})
+                    for old in displaced:
+                        self._return_result_to_inbox(old, "queued-response-replaced")
+                elif len(queue) < 3:
+                    # interrupt=False → addition: append if there is room (max 3).
+                    queue.append(request)
+                    self._trace("response.queued", {"sequence": request.sequence, "mode": "append", "depth": len(queue)})
+                else:
+                    # Queue full: drop the new request; preserve the existing chain.
+                    self._return_result_to_inbox(request, "queued-response-dropped-full")
+                    self._trace("response.queue.full", {"sequence": request.sequence})
                 if interrupt:
                     if self._active_response_ids:
                         should_cancel = True
@@ -1016,7 +1033,8 @@ class OmniBrowserBridge:
 
     def attribute_input_transcript(self, text: str) -> dict[str, Any]:
         """Mark likely acoustic echo without suppressing possible user repetition."""
-        normalize = lambda value: re.sub(r"[^\w\u4e00-\u9fff]+", "", value.casefold())
+        def normalize(value: str) -> str:
+            return re.sub(r"[^\w\u4e00-\u9fff]+", "", value.casefold())
         incoming = normalize(str(text))
         assistant = normalize(getattr(self, "_last_assistant_utterance", ""))
         utterance_at = getattr(self, "_last_assistant_utterance_at", 0.0)
@@ -1605,6 +1623,7 @@ class OmniBrowserBridge:
         loop = getattr(self, "loop", None)
         if not loop or not loop.is_running():
             return
+
         def install_timer():
             loop.call_later(max_protection_ms / 1000, self._expire_protection, max_protection_ms)
         loop.call_soon_threadsafe(install_timer)
@@ -1624,10 +1643,12 @@ class OmniBrowserBridge:
     ) -> bool:
         should_cancel = False
         with self._response_lock:
-            if drop_queued_below is not None and self._queued_response and self._queued_response.priority < drop_queued_below:
-                self._trace("response.queue.dropped", {"sequence": self._queued_response.sequence, "threshold": drop_queued_below})
-                self._return_result_to_inbox(self._queued_response, "queued-response-cancelled")
-                self._queued_response = None
+            if drop_queued_below is not None:
+                to_drop = [r for r in self._queued_requests if r.priority < drop_queued_below]
+                for r in to_drop:
+                    self._queued_requests.remove(r)
+                    self._trace("response.queue.dropped", {"sequence": r.sequence, "threshold": drop_queued_below})
+                    self._return_result_to_inbox(r, "queued-response-cancelled")
             if not self._response_pending and not self._active_response_ids:
                 return False
             if self._active_response_ids:
@@ -1702,7 +1723,7 @@ class OmniBrowserBridge:
                 )
             else:
                 orphaned = str(identity) in self._active_response_ids
-            queued = self._request_public(self._queued_response)
+            queued = self._request_public(self._queued_requests[0]) if self._queued_requests else None
         if not orphaned:
             return
         self._trace("response.watchdog.timeout", {
@@ -1768,7 +1789,7 @@ class OmniBrowserBridge:
                 if should_cancel and response_id:
                     self._cancelled_response_ids.add(response_id)
                 self._cancel_when_created = False
-                should_dispatch = terminal_arrived_first and self._queued_response is not None
+                should_dispatch = terminal_arrived_first and bool(self._queued_requests)
         if duplicate:
             self._trace("response.created.duplicate", {}, response_id=response_id)
             return
@@ -1852,7 +1873,7 @@ class OmniBrowserBridge:
                     getattr(self, "_response_text", {}).pop(response_id, None)
                     cancelled_ids.discard(response_id)
                     getattr(self, "_speech_started_response_ids", set()).discard(response_id)
-                should_dispatch = not self._response_pending and not self._active_response_ids and self._queued_response is not None
+                should_dispatch = not self._response_pending and not self._active_response_ids and bool(self._queued_requests)
         if disposition:
             self._trace("response.terminal.reconciled", {
                 "disposition": disposition, "status": event_type,
@@ -1911,6 +1932,10 @@ class OmniBrowserBridge:
             },
             response_id=response_id or None,
         )
+        # Track completed exchanges so refresh_harness_context() can trigger
+        # a proactive compact+reconnect when DashScope's live context grows too large.
+        if not interrupted:
+            self._dialogue_exchanges = getattr(self, "_dialogue_exchanges", 0) + 1
         if should_dispatch:
             self._schedule_queued_dispatch()
 
@@ -2001,11 +2026,8 @@ class OmniBrowserBridge:
             self._response_pending = False
             self._inflight_response = None
             self._cancel_when_created = False
-            if inflight and (
-                self._queued_response is None
-                or (inflight.priority, inflight.sequence) >= (self._queued_response.priority, self._queued_response.sequence)
-            ):
-                self._queued_response = inflight
+            if inflight and inflight not in self._queued_requests:
+                self._queued_requests.appendleft(inflight)  # restore to front of queue
             if not self._active_response_ids:
                 self._active_response_ids.add("provider-active")
         self._trace("response.conflict.requeued", {"sequence": inflight.sequence if inflight else None})
@@ -2024,7 +2046,7 @@ class OmniBrowserBridge:
             getattr(self, "_speech_started_response_ids", set()).clear()
             self._cancel_when_created = False
             self._barge_in_pending = False
-            should_dispatch = not self._response_pending and self._queued_response is not None
+            should_dispatch = not self._response_pending and bool(self._queued_requests)
         self._trace("response.cancel.already_finished", {"staleResponseIds": stale_ids})
         if should_dispatch:
             self._schedule_queued_dispatch()
@@ -2038,10 +2060,9 @@ class OmniBrowserBridge:
 
     def _dispatch_queued(self) -> None:
         with self._response_lock:
-            if self._response_pending or self._active_response_ids or self._queued_response is None:
+            if self._response_pending or self._active_response_ids or not self._queued_requests:
                 return
-            request = self._queued_response
-            self._queued_response = None
+            request = self._queued_requests.popleft()
             self._response_pending = True
             self._inflight_response = request
         self._send_response(request)
@@ -2077,7 +2098,7 @@ class OmniBrowserBridge:
             return {
                 "pending": self._response_pending,
                 "activeResponseIds": sorted(self._active_response_ids),
-                "queued": self._request_public(self._queued_response),
+                "queued": [self._request_public(r) for r in self._queued_requests] or None,
                 "inflight": self._request_public(self._inflight_response),
                 "activePolicies": [self._request_public(item) for item in active],
                 "bargeInPending": bool(getattr(self, "_barge_in_pending", False)),
@@ -2099,7 +2120,16 @@ class OmniBrowserBridge:
     def _request_public(request: _ResponseRequest | None) -> dict[str, Any] | None:
         if not request:
             return None
-        return {"sequence": request.sequence, "priority": request.priority, "speechPolicy": request.speech_policy, "reason": request.reason, "maxProtectionMs": request.max_protection_ms, "outputMode": request.output_mode, "purpose": request.purpose, "origin": dict(request.origin or {})}
+        return {
+            "sequence": request.sequence,
+            "priority": request.priority,
+            "speechPolicy": request.speech_policy,
+            "reason": request.reason,
+            "maxProtectionMs": request.max_protection_ms,
+            "outputMode": request.output_mode,
+            "purpose": request.purpose,
+            "origin": dict(request.origin or {}),
+        }
 
     def _trace(self, event_type: str, payload: dict[str, Any], response_id: str | None = None) -> dict[str, Any]:
         sink = getattr(self, "_trace_sink", None)
@@ -2114,7 +2144,10 @@ class OmniBrowserBridge:
         self._dialogue_generation += 1
         await self.perception.close()
         if self.conversation:
-            await asyncio.to_thread(self.conversation.close)
+            try:
+                await asyncio.to_thread(self.conversation.close)
+            except Exception:
+                pass  # ws=None: DashScope connection was never established or already closed
 
     def _schedule(self, payload: dict[str, Any]) -> None:
         asyncio.run_coroutine_threadsafe(self.emit(payload), self.loop)

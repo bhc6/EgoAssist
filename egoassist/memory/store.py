@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import threading
 from dataclasses import dataclass, field
 from typing import List, Optional  # noqa: F401 – Optional kept for subclassers
 
@@ -48,9 +49,12 @@ class HierarchicalMemory:
         # 完整来源注册表；活动检索仍只使用 current/short_term/long_term。
         self._items_by_id: dict[int, MemoryItem] = {}
         self._since_consolidate = 0
+        self._lock = threading.RLock()
+        self._consolidation_thread: threading.Thread | None = None
 
     # ---- 在线写入 ----
     def ingest(self, seg: Segment) -> MemoryItem:
+        # Heavy VLM calls are outside the lock — they are stateless and thread-safe.
         emb = self.backend.embed_frames(seg.frames)
         cap = self.backend.caption(seg.frames)
         if seg.audio:
@@ -63,24 +67,39 @@ class HierarchicalMemory:
             {"source_time_sec": float(t), "text": text}
             for t, text in zip(seg.audio_times, seg.audio)
         ]
-        item = MemoryItem(id=self._new_id(), t_start=seg.t_start, t_end=seg.t_end,
-                          embedding=emb, caption=cap, keyframes=kf,
-                          keyframe_times=kf_times, keyframe_meta=kf_meta,
-                          audio_events=audio_events, level="short")
-        self._items_by_id[item.id] = item
-        self._index.add(item.id, emb)
-        self.short_term.append(item)
-        self._update_current(item)
-        self._since_consolidate += 1
-        if (self._since_consolidate >= self.cfg.consolidate_every
-                or len(self.short_term) > self.cfg.short_term_capacity):
-            self.consolidate()
+        with self._lock:
+            item = MemoryItem(id=self._new_id(), t_start=seg.t_start, t_end=seg.t_end,
+                              embedding=emb, caption=cap, keyframes=kf,
+                              keyframe_times=kf_times, keyframe_meta=kf_meta,
+                              audio_events=audio_events, level="short")
+            self._items_by_id[item.id] = item
+            self._index.add(item.id, emb)
+            self.short_term.append(item)
+            self._update_current(item)
+            self._since_consolidate += 1
+            if (self._since_consolidate >= self.cfg.consolidate_every
+                    or len(self.short_term) > self.cfg.short_term_capacity):
+                self._schedule_consolidation()
         return item
 
     def _update_current(self, item: MemoryItem):
         self.current.append(item)
         cutoff = item.t_end - self.cfg.current_window
         self.current = [m for m in self.current if m.t_end >= cutoff]
+
+    def _schedule_consolidation(self) -> None:
+        """Kick off consolidation in a daemon thread so ingest() is never blocked."""
+        if self._consolidation_thread and self._consolidation_thread.is_alive():
+            return  # previous run still in progress — skip this cycle
+        t = threading.Thread(
+            target=self._consolidate_background, daemon=True, name="ego-consolidate"
+        )
+        self._consolidation_thread = t
+        t.start()
+
+    def _consolidate_background(self) -> None:
+        with self._lock:
+            self.consolidate()
 
     # ---- 异步整理：把最旧的 short-term 合并进 long-term ----
     def consolidate(self):
@@ -123,9 +142,12 @@ class HierarchicalMemory:
             audio_events=[event for m in group for event in m.audio_events],
             level="long",
             child_ids=[m.id for m in group])
-        # Update index: remove old child IDs, add merged item
-        for child in group:
-            self._index.remove(child.id)
+        # Batch-remove children from index (O(N) rebuild once vs O(N·k) per-item loop)
+        # and purge them from the registry to prevent unbounded memory growth.
+        child_ids = [child.id for child in group]
+        for cid in child_ids:
+            self._items_by_id.pop(cid, None)
+        self._index.remove_batch(child_ids)
         self._index.add(merged.id, merged.embedding)
         return merged
 
@@ -134,15 +156,14 @@ class HierarchicalMemory:
 
     def retrieve_by_vector(self, query_vec: np.ndarray, k: int) -> List[MemoryItem]:
         """Retrieve top-k most similar items using the index."""
-        # If index is out of sync (e.g., test directly sets current/short_term), rebuild
-        if self._index.size() == 0 and self.all_items():
-            for item in self.all_items():
-                if item.id not in self._items_by_id:
+        with self._lock:
+            # If index is out of sync (e.g., test directly sets current/short_term), rebuild
+            if self._index.size() == 0 and self.all_items():
+                for item in self.all_items():
                     self._items_by_id[item.id] = item
-                self._index.add(item.id, item.embedding)
-
-        hits = self._index.search(query_vec, k)
-        return [self._items_by_id[item_id] for item_id, _score in hits if item_id in self._items_by_id]
+                    self._index.add(item.id, item.embedding)
+            hits = self._index.search(query_vec, k)
+            return [self._items_by_id[item_id] for item_id, _score in hits if item_id in self._items_by_id]
 
     def _new_id(self) -> int:
         i = self._next_id

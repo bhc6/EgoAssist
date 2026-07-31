@@ -24,6 +24,9 @@ _VALID_SESSION_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
 _MESSAGE_ROLES = {"user", "assistant"}
 _PATH_LOCKS: dict[str, threading.RLock] = {}
 _PATH_LOCKS_GUARD = threading.Lock()
+# WAL-mode SQLite already provides crash-safe durability; fsync on every append
+# is redundant on the hot path.  Set EGOASSIST_JOURNAL_FSYNC=1 to re-enable.
+_JOURNAL_FSYNC: bool = os.getenv("EGOASSIST_JOURNAL_FSYNC", "0").strip() not in {"", "0", "false", "no"}
 
 
 def _path_lock(path: Path) -> threading.RLock:
@@ -239,7 +242,8 @@ class SessionJournal:
         with self.path.open("ab") as handle:
             handle.write(payload)
             handle.flush()
-            os.fsync(handle.fileno())
+            if _JOURNAL_FSYNC:
+                os.fsync(handle.fileno())
         self._loaded_size += len(payload)
 
     def append(
@@ -416,10 +420,12 @@ class ContextHarness:
         settings: ContextSettings | None = None,
         *,
         summarizer: Callable[[list[dict[str, Any]], Mapping[str, Any] | None, int], str] | None = None,
+        on_compact: Callable[[dict[str, Any]], None] | None = None,
     ) -> None:
         self.journal = journal
         self.settings = settings or ContextSettings()
         self.summarizer = summarizer
+        self.on_compact = on_compact
         self._lock = threading.RLock()
         self._last_manifest: dict[str, Any] = {}
 
@@ -683,7 +689,7 @@ class ContextHarness:
                 if item.get("type") == "state_checkpoint"
             ), None)
             summary, algorithm, summary_status, summary_error = self._summary(older, latest_state)
-            return self.journal.append("compaction", {
+            result = self.journal.append("compaction", {
                 "summary": summary,
                 "tokensBefore": total,
                 "retainedTail": tail,
@@ -694,6 +700,12 @@ class ContextHarness:
                 "summaryError": summary_error,
                 "compactedEntryIds": [item.get("entryId") for item in older if item.get("entryId")],
             })
+            if self.on_compact is not None:
+                try:
+                    self.on_compact(result)
+                except Exception:
+                    pass
+            return result
 
     @staticmethod
     def _normalize_layers(layers: Iterable[ContextLayer | Mapping[str, Any]]) -> list[ContextLayer]:

@@ -226,6 +226,19 @@ class CaseWorkLedger:
                 self.set_intent_status(
                     previous_id, "suspended", detail={"reason": "foreground-focus-changed"},
                 )
+                # Fix: also suspend any active jobs for the outgoing intent so the
+                # jobs table stays in sync with the intent state.  Without this,
+                # jobs whose intent was interrupted by a new user turn are left
+                # permanently at "waiting-result" (zombie jobs).
+                for job in self.jobs().values():
+                    if (
+                        str(job.get("intentId", "")) == str(previous_id)
+                        and job.get("status") not in {"completed", "failed", "cancelled", "suspended"}
+                    ):
+                        self.set_job_status(
+                            job["jobId"], "suspended",
+                            detail={"reason": "foreground-focus-changed"},
+                        )
         return self.journal.append("foreground_focus", {
             "intentId": str(intent_id) if intent_id is not None else None,
             "reason": str(reason),

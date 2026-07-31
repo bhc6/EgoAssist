@@ -34,6 +34,16 @@ class VLMBackend(ABC):
     def embed_frames(self, frames: Sequence[np.ndarray]) -> np.ndarray:
         """把若干帧编码成单个 L2 归一化向量（关键帧/事件级表示）。"""
 
+    def embed_frames_each(self, frames: Sequence[np.ndarray]) -> np.ndarray:
+        """逐帧 L2 嵌入（不做多帧平均），shape (N, D)。
+
+        默认实现：逐帧调用 embed_frames()。GPU 后端可覆盖此方法，
+        把所有帧合并成一次 batch forward，供 localize() 减少 GPU 调用次数。
+        """
+        if not frames:
+            return np.empty((0, self.dim), dtype=np.float32)
+        return np.stack([self.embed_frames([f]) for f in frames])
+
     @abstractmethod
     def embed_text(self, text: str) -> np.ndarray:
         """把文本查询编码成同一空间的 L2 归一化向量。"""

@@ -33,6 +33,18 @@ class ClipEncoder:
                  pretrained: str = "laion2b_s34b_b79k", device: str = "cuda"):
         self.device = device
         self._backend = None
+        # 防止意外落 CPU：CUDA 可用时仍传 device='cpu' 会造成 ~10× 性能退化
+        if device == "cpu":
+            try:
+                import torch as _t
+                if _t.cuda.is_available():
+                    import warnings
+                    warnings.warn(
+                        "ClipEncoder: CUDA is available but device='cpu' — "
+                        "retrieval will be ~10× slower. Pass device='cuda'.",
+                        RuntimeWarning, stacklevel=2)
+            except ImportError:
+                pass
         try:
             import open_clip  # type: ignore
             import torch
@@ -86,3 +98,27 @@ class ClipEncoder:
                 x = self._proc(text=[text], return_tensors="pt", padding=True).to(self.device)
                 feats = self._model.get_text_features(**x)[0]
         return self._l2(feats.float().cpu().numpy())
+
+    def _l2_batch(self, v: np.ndarray) -> np.ndarray:
+        """逐行 L2 归一化，返回 (N, D) float32。"""
+        norms = np.linalg.norm(v, axis=1, keepdims=True) + 1e-8
+        return (v / norms).astype(np.float32)
+
+    def embed_image_batch(self, frames: Sequence[np.ndarray]) -> np.ndarray:
+        """一次 GPU forward 返回逐帧 L2 归一化向量，shape (N, D)。
+
+        与 embed_image 不同：不做多帧平均，每帧单独返回，
+        供 localize() 滑窗打分用，避免 O(n_windows) 次重复推理。
+        """
+        if len(frames) == 0:
+            return np.empty((0, self.dim), dtype=np.float32)
+        t = self._torch
+        pil = [_to_pil(f) for f in frames]
+        with t.no_grad():
+            if self._backend == "open_clip":
+                x = t.stack([self._preprocess(p) for p in pil]).to(self.device)
+                feats = self._model.encode_image(x)           # (N, D)
+            else:
+                x = self._proc(images=pil, return_tensors="pt").to(self.device)
+                feats = self._model.get_image_features(**x)   # (N, D)
+        return self._l2_batch(feats.float().cpu().numpy())

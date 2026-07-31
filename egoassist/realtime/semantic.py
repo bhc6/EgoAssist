@@ -35,6 +35,11 @@ _PHONE_DIGITS = str.maketrans({
 })
 _PHONE_VALUE = re.compile(r"[0-9零〇一幺二两三四五六七八九][0-9零〇一幺二两三四五六七八九\s-]{2,}")
 
+# ── Named constants ───────────────────────────────────────────────────────────
+_MAX_MEMORY_ATOMS: int = 3              # max atoms extracted per fallback call
+_MAX_REMINDER_SECONDS: int = 365 * 24 * 3600  # upper bound for reminder delay (1 yr)
+_ROUTER_TEMPERATURE: int = 0            # deterministic output for classification
+
 
 def is_explicit_memory_request(text: str) -> bool:
     """Recognize only direct save/remember commands at the trusted boundary."""
@@ -112,9 +117,39 @@ def _phone_fallback_atoms(text: str) -> list[dict[str, str]]:
             "consent": "explicit",
             "fallback": "explicit-memory-fallback-v1",
         })
-        if len(atoms) == 3:
+        if len(atoms) == _MAX_MEMORY_ATOMS:
             break
     return atoms
+
+
+def _en_explicit_memory_fallback_atoms(
+    text: str,
+    pending: Mapping[str, Any] | None = None,
+    *,
+    allow_verbatim: bool = True,
+) -> list[dict[str, str]]:
+    """English fallback: captures explicit save requests as verbatim facts.
+
+    Structured parsing (phone, location, medication) delegates to the model;
+    this fallback only runs when the model call fails entirely.
+    """
+    normalized = " ".join(str(text).split()).strip()
+    if not is_explicit_memory_request(normalized) and not (
+        pending and not looks_like_question(normalized)
+    ):
+        return []
+    if not allow_verbatim:
+        return []
+    return [{
+        "kind": "fact",
+        "text": normalized,
+        "subject": normalize_identity((pending or {}).get("subject")) or "__user_explicit__",
+        "predicate": normalize_identity((pending or {}).get("predicate")) or "verbatim",
+        "value": normalized,
+        "scope": "participant",
+        "consent": "explicit",
+        "fallback": "explicit-memory-fallback-v1",
+    }]
 
 
 def explicit_memory_fallback_atoms(
@@ -122,8 +157,18 @@ def explicit_memory_fallback_atoms(
     pending: Mapping[str, Any] | None = None,
     *,
     allow_verbatim: bool = True,
+    locale: str | None = None,
 ) -> list[dict[str, str]]:
-    """Persist exact user-provided content when the semantic provider fails."""
+    """Persist exact user-provided content when the semantic provider fails.
+
+    The active locale is resolved from *locale*, then ``EGOASSIST_FALLBACK_LOCALE``
+    env var, defaulting to ``"zh-CN"``.  Non-Chinese deployments should set
+    ``EGOASSIST_FALLBACK_LOCALE=en``; the English fallback preserves verbatim
+    text only — structured phone/location/medication parsing delegates to the model.
+    """
+    _locale = (locale or os.getenv("EGOASSIST_FALLBACK_LOCALE", "zh-CN")).strip()
+    if _locale not in {"zh-CN", "zh"}:
+        return _en_explicit_memory_fallback_atoms(text, pending, allow_verbatim=allow_verbatim)
 
     normalized = " ".join(str(text).split()).strip()
     explicit = is_explicit_memory_request(normalized)
@@ -177,10 +222,10 @@ def explicit_memory_fallback_atoms(
                 "scope": "participant", "consent": "explicit",
                 "fallback": "explicit-memory-fallback-v1",
             })
-        if len(atoms) >= 3:
-            return atoms[:3]
+        if len(atoms) >= _MAX_MEMORY_ATOMS:
+            return atoms[:_MAX_MEMORY_ATOMS]
     if atoms:
-        return atoms[:3]
+        return atoms[:_MAX_MEMORY_ATOMS]
     if not allow_verbatim:
         return []
     return [{
@@ -193,6 +238,105 @@ def explicit_memory_fallback_atoms(
         "consent": "explicit",
         "fallback": "explicit-memory-fallback-v1",
     }]
+
+
+class TurnAccumulator:
+    """Debounce voice fragments into one complete utterance before classification.
+
+    The realtime bridge fires ``transcript_received`` once per recognised chunk.
+    Without accumulation each chunk is classified and enqueued independently,
+    breaking multi-sentence or multi-clause utterances across separate turns.
+
+    A fragment is appended to an internal buffer.  A ``loop.call_later`` timer
+    is (re-)armed on every push.  When the timer fires — or the buffer exceeds
+    *max_chars* — the joined text is forwarded to *flush_callback*.
+
+    Usage (inside an async WebSocket handler)::
+
+        acc = TurnAccumulator(lambda text: do_enqueue(text))
+        # on each speech fragment:
+        acc.push(fragment)
+        # on connection close (finally block):
+        acc.flush_now()
+
+    The env-var ``EGOASSIST_TURN_ACCUMULATE_MS`` overrides the default 1 200 ms
+    window at the call site; this class takes the resolved value directly.
+    """
+
+    def __init__(
+        self,
+        flush_callback: Callable[[str], None],
+        *,
+        window_ms: float = 600.0,
+        max_chars: int = 800,
+    ) -> None:
+        # Env-var override (also honoured when callers pass the old default 1200).
+        try:
+            _env = os.getenv("EGOASSIST_TURN_ACCUMULATE_MS")
+            if _env:
+                window_ms = float(_env)
+        except (TypeError, ValueError):
+            pass
+        if window_ms <= 0:
+            raise ValueError("TurnAccumulator window_ms must be positive")
+        self._flush_callback = flush_callback
+        self.window_ms = window_ms
+        self.max_chars = max_chars
+        self._buffer: list[str] = []
+        self._handle: Any = None  # asyncio.TimerHandle | None
+
+    def push(self, fragment: str) -> None:
+        """Append *fragment* and reset (or arm) the debounce window."""
+        cleaned = fragment.strip()
+        if not cleaned:
+            return
+        self._buffer.append(cleaned)
+        combined_len = sum(len(f) for f in self._buffer) + len(self._buffer) - 1
+        if combined_len >= self.max_chars:
+            # Buffer is full — flush immediately without waiting for the timer
+            self._cancel_handle()
+            self._do_flush()
+        else:
+            # Restart the debounce window
+            self._cancel_handle()
+            import asyncio
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                # No running loop (e.g. unit tests); flush inline
+                self._do_flush()
+                return
+            self._handle = loop.call_later(self.window_ms / 1000.0, self._do_flush)
+
+    def flush_now(self) -> None:
+        """Immediately flush any buffered fragments (call on connection teardown)."""
+        self._cancel_handle()
+        self._do_flush()
+
+    def discard(self) -> None:
+        """Cancel the pending debounce timer and silently drop buffered fragments.
+
+        Used when a stop command is detected early in transcript_received so
+        that any preceding partial utterance does not fire as a stale turn.
+        """
+        self._cancel_handle()
+        self._buffer.clear()
+
+    def _cancel_handle(self) -> None:
+        if self._handle is not None:
+            self._handle.cancel()
+            self._handle = None
+
+    def _do_flush(self) -> None:
+        self._handle = None
+        if not self._buffer:
+            return
+        merged = " ".join(self._buffer)
+        self._buffer.clear()
+        try:
+            self._flush_callback(merged)
+        except Exception:
+            pass  # never let a flush exception break the event loop
 
 
 class SemanticTurnRouter:
@@ -230,8 +374,98 @@ class SemanticTurnRouter:
         self._clock_context = dict(clock_context or {}) or None
         self._memory_draft = dict(memory_draft or {}) or None
 
+    # ── Fast-path heuristics ────────────────────────────────────────────────
+
+    _TRIVIAL_RE = re.compile(
+        r"^(?:"
+        r"[嗯哦啊哈呃唔]{1,4}"
+        r"|好的?|行|是的?|对|可以|行啊|明白|了解|谢谢?|收到"
+        r"|ok|okay|yeah|yep|sure|got\s*it|thanks|thank\s*you|alright|got\s*it"
+        r")$",
+        re.IGNORECASE,
+    )
+    _TASK_KW_RE = re.compile(
+        r"(?:确认|完成|取消|回滚|重复|暂停|恢复|帮助"
+        r"|confirm|complete|cancel|rollback|repeat|pause|resume|help)\b",
+        re.IGNORECASE,
+    )
+    # Stop-speaking commands: must produce control="stop-speaking" immediately,
+    # NOT fall through to the len<=10 trivial-filler path that returns control=null.
+    _STOP_RE = re.compile(
+        r"^(?:停+|别说了?|闭嘴|住口|安静+|噤声|停一下|停下来?|不用说了?|不用了"
+        r"|stop|shut up|be quiet|stop (?:talking|speaking)|quiet(?:ly)?|silence|enough)$",
+        re.IGNORECASE,
+    )
+
+    def _trivial_classify(self, text: str, started: float) -> "dict[str, Any] | None":
+        """Return an immediate no-API classification for clearly conversational short turns.
+
+        Returns None when the turn needs full semantic routing.
+        """
+        normalized = " ".join(text.split()).strip()
+        if not normalized:
+            return None
+        if is_explicit_memory_request(normalized):
+            return None
+        if looks_like_question(normalized):
+            return None
+        if self._TASK_KW_RE.search(normalized):
+            return None
+        # Stop-speaking commands: must cancel immediately, before any filler check.
+        # Without this guard "停" / "安静" fall into len<=10 and get control=null.
+        if self._STOP_RE.match(normalized):
+            return self._stop_result(started)
+        # Explicit trivial filler / acknowledgment
+        if self._TRIVIAL_RE.match(normalized):
+            return self._fast_result(started)
+        # Very short turns with no memory/task/question signal
+        if len(normalized) <= 10:
+            return self._fast_result(started)
+        return None
+
+    def _stop_result(self, started: float) -> "dict[str, Any]":
+        """Fast-path result for explicit stop-speaking commands (no API call)."""
+        result = self._fast_result(started)
+        result["control"] = "stop-speaking"
+        result["claimBoundary"] = "Stop-command fast-path; no API call required."
+        return result
+
+    def _fast_result(self, started: float) -> "dict[str, Any]":
+        return {
+            "method": TURN_ROUTER_POLICY_VERSION,
+            "model": "fast-path",
+            "status": "classified",
+            "speechControl": None,
+            "taskControl": None,
+            "preferenceIntent": None,
+            "memoryQuery": None,
+            "memoryKind": None,
+            "memoryText": None,
+            "memoryKey": None,
+            "memoryScope": None,
+            "memoryConsent": None,
+            "memoryAtoms": [],
+            "memoryDraft": None,
+            "memoryQuerySpec": None,
+            "skillControl": None,
+            "selectedSkill": None,
+            "intentKind": "foreground-dialogue",
+            "intents": [],
+            "skillStatus": "no-match",
+            "rawOutput": None,
+            "latencyMs": round((time.perf_counter() - started) * 1000, 1),
+            "policyVersion": TURN_ROUTER_POLICY_VERSION,
+            "claimBoundary": "Trivial-turn fast-path; no API call required.",
+        }
+
+    # ── Main classifier ─────────────────────────────────────────────────────
+
     async def classify(self, text: str, skill_catalog: list[dict[str, str]]) -> dict[str, Any]:
         started = time.perf_counter()
+        # Skip the API call for short, obviously conversational turns.
+        fast = self._trivial_classify(text, started)
+        if fast is not None:
+            return fast
         try:
             raw = await asyncio.wait_for(
                 asyncio.to_thread(self._classify_sync, str(text), skill_catalog),
