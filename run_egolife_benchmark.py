@@ -20,7 +20,7 @@ from egoassist.capture.stream import VideoFileStream
 from egoassist.config import Config
 from egoassist.eval.real_metrics import exact_match, temporal_iou, token_f1
 from egoassist.memory import TimelineMemory, import_visual_items, load_memory, save_memory
-from egoassist.qa import StreamingMemoryAssistant
+from egoassist.qa import StreamingMemoryAssistant, TimelineAssistant
 
 
 RUN_MANIFEST_VERSION = 1
@@ -198,6 +198,12 @@ def main():
     parser.add_argument("--backend", choices=("local", "dashscope"), default="local")
     parser.add_argument("--api-model", default="qwen3-vl-plus")
     parser.add_argument("--video-id", action="append", default=[])
+    parser.add_argument(
+        "--memory-backend",
+        choices=("hierarchical", "timeline"),
+        default="timeline",
+        help="Memory system used during ingest and retrieval (default: timeline).",
+    )
     args = parser.parse_args()
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
@@ -246,6 +252,7 @@ def main():
             "alpha": args.alpha,
             "calibrationRatio": args.calibration_ratio,
         },
+        "memoryBackend": args.memory_backend,
         "qaSha256": sha256(qa_path),
         "videos": [
             {"id": video.stem, "name": video.name, "sha256": video_hashes[video.stem]}
@@ -297,7 +304,6 @@ def main():
             "pending_questions": len(pending),
         })
         ingest_started = time.perf_counter()
-        assistant = StreamingMemoryAssistant(backend, cfg)
         snapshot_dir = args.output_dir / "memory" / video.stem
         snapshot_provenance = {
             "runFingerprint": run_fingerprint,
@@ -305,36 +311,73 @@ def main():
             "videoSha256": video_hashes[video.stem],
             "sampleFps": args.fps,
         }
-        if (snapshot_dir / "manifest.json").exists():
-            segment_count = load_memory(
-                assistant.memory,
-                snapshot_dir,
-                expected_provenance=snapshot_provenance,
+
+        if args.memory_backend == "timeline":
+            # ── Timeline path (new memory system) ──────────────────────────────
+            # Captions are stored directly into the shared timeline SQLite;
+            # no raw frames are retained after ingest.
+            tl = TimelineMemory(timeline_path)
+            assistant = TimelineAssistant(
+                backend, cfg,
+                timeline=tl,
+                user_id="egolife-benchmark",
+                case_id=video.stem,
             )
-            memory_reused = True
+            manifest_path = snapshot_dir / "manifest.json"
+            cached = assistant.load_if_cached(manifest_path, snapshot_provenance)
+            if cached is not None:
+                segment_count = cached
+                memory_reused = True
+            else:
+                segment_count = assistant.ingest(VideoFileStream(str(video), fps=args.fps))
+                assistant.save_manifest(manifest_path, snapshot_provenance)
+                memory_reused = False
+            ingest_seconds = time.perf_counter() - ingest_started
+            captions = assistant.all_captions()
+            caption = " | ".join(captions)
+            invalid_caption = (
+                "[no visual content]" in caption or "[invalid visual caption]" in caption
+            )
+            append_jsonl(progress_path, {
+                "event": "memory_saved", "time": time.time(), "video": video.name,
+                "manifest": str(manifest_path), "items": segment_count,
+                "memory_backend": "timeline", "reused": memory_reused,
+            })
+
         else:
-            segment_count = assistant.ingest(VideoFileStream(str(video), fps=args.fps))
-            memory_reused = False
-        ingest_seconds = time.perf_counter() - ingest_started
-        memories = assistant.memory.all_items()
-        timeline_cards = import_visual_items(
-            TimelineMemory(timeline_path),
-            memories,
-            user_id="egolife-benchmark",
-            case_id=video.stem,
-            source=f"egolife:{video.stem}:{video_hashes[video.stem]}",
-        )
-        caption = " | ".join(item.caption for item in memories)
-        invalid_caption = "[invalid visual caption]" in caption
-        snapshot_path = save_memory(
-            assistant.memory, snapshot_dir, provenance=snapshot_provenance,
-        )
-        append_jsonl(progress_path, {
-            "event": "memory_saved", "time": time.time(), "video": video.name,
-            "manifest": str(snapshot_path), "items": len(memories),
-            "timeline": str(timeline_path), "timeline_cards": len(timeline_cards),
-            "reused": memory_reused,
-        })
+            # ── Hierarchical path (original memory system) ─────────────────────
+            assistant = StreamingMemoryAssistant(backend, cfg)
+            if (snapshot_dir / "manifest.json").exists():
+                segment_count = load_memory(
+                    assistant.memory,
+                    snapshot_dir,
+                    expected_provenance=snapshot_provenance,
+                )
+                memory_reused = True
+            else:
+                segment_count = assistant.ingest(VideoFileStream(str(video), fps=args.fps))
+                memory_reused = False
+            ingest_seconds = time.perf_counter() - ingest_started
+            memories = assistant.memory.all_items()
+            timeline_cards = import_visual_items(
+                TimelineMemory(timeline_path),
+                memories,
+                user_id="egolife-benchmark",
+                case_id=video.stem,
+                source=f"egolife:{video.stem}:{video_hashes[video.stem]}",
+            )
+            caption = " | ".join(item.caption for item in memories)
+            invalid_caption = "[invalid visual caption]" in caption
+            snapshot_path = save_memory(
+                assistant.memory, snapshot_dir, provenance=snapshot_provenance,
+            )
+            append_jsonl(progress_path, {
+                "event": "memory_saved", "time": time.time(), "video": video.name,
+                "manifest": str(snapshot_path), "items": len(memories),
+                "memory_backend": "hierarchical",
+                "timeline": str(timeline_path), "timeline_cards": len(timeline_cards),
+                "reused": memory_reused,
+            })
         for row in pending:
             query_started = time.perf_counter()
             result = assistant.query(row["question"])
