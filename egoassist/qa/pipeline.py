@@ -21,6 +21,7 @@ from ..config import Config
 from ..memory.store import HierarchicalMemory
 from ..retrieval.localize import Localization, localize
 from ..retrieval.router import route_and_retrieve
+from ..timefmt import format_beijing
 
 
 @dataclass
@@ -66,7 +67,9 @@ class StreamingMemoryAssistant:
             )
         top = cands[0]
         loc: Localization = localize(q, top.item, self.backend, self.cfg)
-        ans = self.backend.answer(q, [c.item.caption for c in cands], loc.frames)
+        event_time = format_beijing(top.item.wall_start)
+        ans = self.backend.answer(q, [c.item.caption for c in cands], loc.frames,
+                                  event_time=event_time)
         score = combine_score(ans.confidence, top.score, loc.confidence)
         return QAResult(
             query=q, answered_text=ans.text, t0=loc.t0, t1=loc.t1, score=score,

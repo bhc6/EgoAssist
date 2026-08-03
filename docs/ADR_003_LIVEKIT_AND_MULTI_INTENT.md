@@ -16,6 +16,12 @@ particular, `TimelineMemory`, `MemoryDraft`, participant/case scope, temporal
 semantics, provenance, conflict handling, retrieval injection, and deletion are
 not represented in or delegated to LiveKit room state.
 
+The realtime session layer (`run_egoassist.py`) accesses memory exclusively
+through `RealtimeEpisodeMemory` — a single unified object that combines BM25
+episodic retrieval with task-preference operations via internal delegation to
+`PreferenceMemory`. Both capabilities share the same `TimelineMemory` database;
+the LiveKit integration layer sees one object, not two.
+
 One classified turn may contain up to four typed intent candidates. A relative
 reminder is accepted only with a validated duration and a live Temporal worker.
 It becomes a durable reminder intent/job before the model acknowledgement. An

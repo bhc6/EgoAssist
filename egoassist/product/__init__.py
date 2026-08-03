@@ -29,14 +29,14 @@ def __getattr__(name: str) -> Any:
 
 
 __all__ = [
-    "ProductDatabase", "Base", "correlation_ids", "current_trace_id", "product_span", "safe_metric_attributes",
-    "ConversationTurn", "CorrelationIds", "IntentCandidate", "IntentEnvelope", "JobRecord", "JobAttempt",
+    "ProductDatabase", "Base", "correlation_ids", "product_span", "safe_metric_attributes",
+    "ConversationTurn", "CorrelationIds", "IntentCandidate", "JobRecord",
     "ResultRecord", "NotificationRequest", "NotificationReceipt", "ArtifactDescriptor",
     "HumanHelpRequest", "HumanHelpReceipt", "PerceptionHazard", "PerceptionFrameContext",
     "PerceptionHypothesis", "ObservationEvidence", "ProviderDisclosure",
     "InteractionTransport", "WorkflowPort", "NotificationPort", "ArtifactPort",
     "HumanHelpPort", "PerceptionPort",
-    "LocalArtifactPort", "WebhookHumanHelpPort",
+    "LocalArtifactAdapter", "WebhookHumanHelpAdapter",
     "PrivacyGovernance", "OutcomeLedger", "OutcomeRecord", "redact_pii", "redact_text",
     "provider_disclosures", "transport_security_summary", "encrypt_json", "decrypt_json",
 ]

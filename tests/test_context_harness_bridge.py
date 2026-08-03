@@ -1,5 +1,6 @@
 import json
 import threading
+from collections import deque
 
 from egoassist.realtime import ContextHarness, ContextSettings, SessionJournal
 from egoassist.realtime.omni import OmniBrowserBridge
@@ -47,8 +48,11 @@ def make_bridge(harness):
     bridge._response_lock = threading.Lock()
     bridge._response_pending = False
     bridge._active_response_ids = set()
+    bridge._cancelled_response_ids = set()
+    bridge._speech_started_response_ids = set()
+    bridge._early_terminal_response_ids = set()
     bridge._active_response_requests = {}
-    bridge._queued_response = None
+    bridge._queued_requests = deque()
     bridge._inflight_response = None
     bridge._response_sequence = 0
     bridge._cancel_when_created = False
@@ -185,7 +189,9 @@ def test_tool_call_keeps_source_turn_intent_and_skill_contract(tmp_path):
     assert origins == [origin]
     tool_call = next(item for item in harness.journal.entries() if item["type"] == "tool_call")
     assert tool_call["metadata"]["origin"] == origin
-    pending = bridge.scheduler_snapshot()["queued"] or bridge.scheduler_snapshot()["inflight"]
+    snapshot = bridge.scheduler_snapshot()
+    queued = snapshot["queued"] or []
+    pending = queued[0] if queued else snapshot["inflight"]
     assert pending["origin"] == origin
 
 
@@ -211,7 +217,7 @@ def test_replaced_queued_result_is_returned_to_inbox(tmp_path):
     bridge.set_result_delivery_handler(lambda result_id, status: requeued.append((result_id, status)))
     bridge.request_response("busy foreground")
     bridge.request_response("background result", priority=40, origin={"resultId": "result-late"})
-    bridge.request_response("new foreground", priority=100)
+    bridge.request_response("new foreground", priority=100, interrupt=True)
     assert requeued == [("result-late", "pending")]
 
 

@@ -5,7 +5,11 @@ import sqlite3
 import numpy as np
 
 from egoassist.memory import ClockContext, MemoryItem, TimelineMemory, import_visual_items, resolve_time_semantics
-from egoassist.memory.timeline import looks_like_question, memory_key_for
+from egoassist.memory.timeline import (
+    DEFAULT_RETRIEVAL_MIN_SCORE,
+    looks_like_question,
+    memory_key_for,
+)
 
 
 def remember(memory, text, **overrides):
@@ -132,7 +136,7 @@ def test_consolidation_moves_old_short_cards_to_long_with_sources(tmp_path):
             subject="用户", predicate="practice.rest", value=str(index),
         )
 
-    result = memory.consolidate(user_id="user-a", case_id="case-a", scope="case")
+    result = memory.promote_to_long(user_id="user-a", case_id="case-a", scope="case")
     long_cards = [
         item for item in memory.cards(user_id="user-a", case_id="case-a", scope="case")
         if item["tier"] == "long"
@@ -231,7 +235,7 @@ def test_default_retrieval_excludes_legacy_and_scene_even_when_text_matches(tmp_
 
     assert [item["cardId"] for item in result["selected"]] == [fact["id"]]
     assert {item["kind"] for item in result["candidates"]} == {"state"}
-    assert result["minimumScore"] == 0.18
+    assert result["minimumScore"] == DEFAULT_RETRIEVAL_MIN_SCORE
 
 
 def test_visual_memory_adapter_preserves_temporal_and_frame_provenance(tmp_path):
@@ -244,7 +248,7 @@ def test_visual_memory_adapter_preserves_temporal_and_frame_provenance(tmp_path)
         caption="用户把蓝色杯子放到书桌右侧",
         keyframe_times=[12.5, 17.5],
         keyframe_meta=[{"source_frame_index": 25}, {"source_frame_index": 35}],
-        level="short",
+        tier="short",
     )]
 
     cards = import_visual_items(
@@ -402,7 +406,7 @@ def test_v1_database_migrates_in_place_without_losing_cards(tmp_path):
         version = connection.execute(
             "SELECT value FROM timeline_meta WHERE key='schema_version'"
         ).fetchone()[0]
-    assert version == "2"
+    assert version == "3"
 
 
 def test_dst_day_ranges_follow_civil_calendar_and_normalize_missing_hour():

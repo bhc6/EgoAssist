@@ -32,6 +32,8 @@ def token_f1(prediction: str, reference: str) -> float:
 
 def temporal_iou(pred_start: float, pred_end: float,
                  ref_start: float, ref_end: float) -> float:
+    if ref_end < ref_start or pred_end < pred_start:
+        return 0.0
     intersection = max(0.0, min(pred_end, ref_end) - max(pred_start, ref_start))
     union = max(pred_end, ref_end) - min(pred_start, ref_start)
     return intersection / union if union > 0 else 0.0

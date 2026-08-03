@@ -37,8 +37,11 @@ def test_frontend_exposes_memory_pipeline_and_treats_steps_as_reference_map():
     assert 'id="assistantCaption"' in html
     assert 'id="memoryScope"' in html
     assert 'id="memoryProfile"' in html
-    assert 'id="preferenceEnabled"' in html
-    assert 'id="episodicEnabled"' in html
+    # Unified TimelineMemory arc: the two split memory toggles
+    # (preferenceEnabled + episodicEnabled) were consolidated into a single
+    # timelineEnabled control, matching the unified memory-policy backend
+    # (test_memory_policy asserts version==2 / single "timeline" component).
+    assert 'id="timelineEnabled"' in html
     assert 'id="mapStatus"' in html
     assert 'id="progress"' not in html
     assert "task.steps.filter" not in script

@@ -55,10 +55,3 @@ def product_span(name: str, correlation: Mapping[str, Any] | None = None) -> Ite
                 span.set_attribute(f"egoassist.{key}", str(value))
         span.set_attribute("egoassist.operation_id", uuid4().hex[:16])
         yield span
-
-
-def current_trace_id() -> str | None:
-    if not _OTEL_AVAILABLE or _otel_trace is None:
-        return None
-    context = _otel_trace.get_current_span().get_span_context()
-    return format(context.trace_id, "032x") if context.is_valid else None

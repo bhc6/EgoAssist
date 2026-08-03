@@ -78,7 +78,7 @@ are reserved for evidence-backed state transitions.
 |---|---|---|
 | Full-duplex audio/video and barge-in | Implemented | Retain and migrate behind the realtime port |
 | Durable completed transcripts | Implemented | Retain; add retention and export controls |
-| Scoped TimelineMemory and MemoryDraft | Implemented research substrate | Retain as an EgoAssist differentiator |
+| Scoped TimelineMemory, MemoryDraft, and unified RealtimeEpisodeMemory (task-preference) | Implemented — review complete | Self-developed memory differentiator; realtime path uses a single `RealtimeEpisodeMemory` object; benchmark path uses `TimelineAssistant` → `TimelineMemory` directly; task-preference propose/confirm cycle exposed via 7 delegated methods |
 | Work Ledger | Infrastructure only | It is a projection, not an executor |
 | Background intent execution | Unsupported | Hide until a durable workflow runs it |
 | Timer/reminder delivery | Unsupported | The deadline calculator is not a timer |
@@ -347,6 +347,7 @@ is marked complete only after its exit gate and regression suite pass.
 | M4 Artifacts and human help | Complete | Skill manifests declare task-scoped PDF artifacts; the resolver enforces path, owner, active Skill/task/checkpoint, checksum, and access receipts; PDF.js 6.2.108 renders pages with navigation and zoom. Human help requires an exact persisted browser preview and explicit consent before a configured webhook receives a stable idempotency key. Connector receipts and Intent/Job/ResultInbox outcomes expose acknowledged, failed, timed-out, and deduplicated paths; unconfigured deployments remain unavailable. |
 | M5 Structured perception | Complete | Each realtime frame carries an immutable typed task/checkpoint/epoch context, allowed path, completion criteria, artifact checksums, provenance, and capture time. Stale, unrelated, changed-context, and forbidden-path outputs fail closed. Accepted evidence is persisted and explainable; repeated frames may request confirmation but only explicit user confirmation advances a checkpoint. Annotated sequence tests cover the exit gate. |
 | M6 Privacy and evaluation | Complete | `PrivacyGovernance` provides account export/deletion, category retention, provider disclosure, TLS/encryption boundary, PII redaction, and counts-only deletion evidence. `OutcomeLedger` persists user acknowledgements, connector receipts, and annotated perception sequences with denominators/provenance. Privacy API and console controls are covered by `tests/test_privacy_governance.py`; mature dependency versions were checked against npm registry on 2026-07-30; full regression and frontend syntax checks pass. |
+| Memory path unification | Complete | `RealtimeEpisodeMemory` absorbs `PreferenceMemory` via lazy internal delegation (`_get_pref()`); all 7 task-preference methods delegated; `run_egoassist.py` operates on a single memory object with zero legacy `PreferenceMemory` / `active_memory` / `preference_memory=` references; `py_compile` clean. |
 
 The current memory remediation is retained as EgoAssist-owned product research,
 not foundation debt. `TimelineMemory`, `MemoryDraft`, participant/case scope,

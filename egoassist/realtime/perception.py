@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
 import os
 import re
@@ -204,7 +203,7 @@ class StructuredPerceptionAdapter:
             raise ValueError("OPENAI_API_KEY is required for openai perception mode")
 
     def _http_post(self, request: urllib.request.Request) -> dict[str, Any]:
-        """Synchronous HTTP POST — call via asyncio.to_thread() from async contexts."""
+        """Synchronous HTTP POST — wrap in a worker thread when calling from async code."""
         with urllib.request.urlopen(request, timeout=30) as response:
             return json.loads(response.read())
 
@@ -250,11 +249,3 @@ class StructuredPerceptionAdapter:
         observation["step"] = observation.pop("checkpoint_id")
         observation["source"] = f"camera/{self.model}"
         return observation
-
-    async def analyze_async(self, image_data_url: str, current_checkpoint: str, allowed_checkpoints: list[str] | tuple[str, ...] = ()) -> dict[str, Any]:
-        """Async entry-point — runs the blocking HTTP call off the event loop.
-
-        Use this from any async context (agent loop, LiveKit handler, etc.) to
-        avoid stalling the event loop for up to the 30 s HTTP timeout.
-        """
-        return await asyncio.to_thread(self.analyze, image_data_url, current_checkpoint, allowed_checkpoints)

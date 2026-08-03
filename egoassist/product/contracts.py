@@ -36,17 +36,6 @@ class ConversationTurn(ProductContract):
     provenance: dict[str, Any] = Field(default_factory=dict)
 
 
-class IntentEnvelope(ProductContract):
-    intent_id: str = Field(min_length=1)
-    turn_id: str = Field(min_length=1)
-    user_id: str = Field(min_length=1)
-    kind: str = Field(min_length=1)
-    status: Literal["pending", "foreground", "running-background", "suspended", "waiting-input", "completed", "failed", "cancelled"] = "pending"
-    payload: dict[str, Any] = Field(default_factory=dict)
-    skill_ref: dict[str, Any] = Field(default_factory=dict)
-    correlation: CorrelationIds = Field(default_factory=CorrelationIds)
-
-
 class IntentCandidate(ProductContract):
     kind: Literal[
         "foreground-dialogue",
@@ -69,20 +58,6 @@ class JobRecord(ProductContract):
     deadline: datetime | None = None
     cancellation_policy: str = "explicit-only"
     payload: dict[str, Any] = Field(default_factory=dict)
-    correlation: CorrelationIds = Field(default_factory=CorrelationIds)
-
-
-class JobAttempt(ProductContract):
-    attempt_id: str = Field(min_length=1)
-    job_id: str = Field(min_length=1)
-    attempt_number: int = Field(ge=1)
-    status: Literal["leased", "running", "succeeded", "failed", "cancelled"] = "leased"
-    connector_request_id: str | None = None
-    error: str | None = None
-    retry_class: str | None = None
-    committed_external_effect: bool = False
-    started_at: datetime | None = None
-    ended_at: datetime | None = None
     correlation: CorrelationIds = Field(default_factory=CorrelationIds)
 
 

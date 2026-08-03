@@ -54,8 +54,14 @@ class VLMBackend(ABC):
 
     @abstractmethod
     def answer(self, query: str, evidence_texts: List[str],
-               evidence_frames: Sequence[np.ndarray]) -> Answer:
-        """基于检索到的证据回答查询，并给出自评置信度。"""
+               evidence_frames: Sequence[np.ndarray], *,
+               event_time: str | None = None) -> Answer:
+        """基于检索到的证据回答查询，并给出自评置信度。
+
+        Args:
+            event_time: 证据事件的真实时间字符串（如"北京时间 2026-08-01 15:30:22"），
+                        注入 prompt 让模型能回答绝对时刻类问题。None 表示时间未知。
+        """
 
     # --- 公用小工具 ---
     @staticmethod

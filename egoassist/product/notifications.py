@@ -10,7 +10,7 @@ import aiohttp
 from .contracts import NotificationReceipt, NotificationRequest
 
 
-class NtfyNotificationPort:
+class NtfyNotificationAdapter:
     """Submit minimal reminder content to a configured ntfy topic."""
 
     def __init__(self, topic: str, *, server: str = "https://ntfy.sh", token: str | None = None) -> None:

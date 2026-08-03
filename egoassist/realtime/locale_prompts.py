@@ -37,8 +37,6 @@ class PromptBundle:
     grounding_no_evidence: str              # general query; no evidence
 
     # ── Skill / task control (control_instructions) ───────────────────────
-    skill_unresolved: str        # skill loaded but task not yet confirmed
-    no_skill: str                # no domain skill active
     task_repeat: str
     task_request_help: str
     task_confirm_step: str       # template: .format(message=…)
@@ -112,8 +110,6 @@ _ZH_CN = PromptBundle(
         " 【硬性约束】禁止凭通用知识推测具体数值（如号码、地址、时间、金额）；"
         "如需引用具体事实，必须有证据支撑；无证据时明确说明不确定。"
     ),
-    skill_unresolved="自然回应并只询问一个确定目标所必需的问题；不要套用默认任务。",
-    no_skill="当前没有领域 Skill；不要虚构任务、步骤或内部决策。",
     task_repeat=(
         "用户请求重复上一条实际说出的指导。结合当前画面和当前任务状态，用更短、更清楚的一句话重述；"
         "不要退回照读步骤文本，不要假设步骤已完成。"
@@ -191,8 +187,6 @@ _EN = PromptBundle(
         " [Hard constraint] Do not infer specific values (numbers, addresses, times, amounts) from general knowledge;"
         " any specific fact cited must be evidence-backed; when no evidence exists, say so explicitly."
     ),
-    skill_unresolved="Respond naturally and ask only the single question needed to confirm the goal; do not assume a default task.",
-    no_skill="No domain Skill is active; do not fabricate tasks, steps, or internal decisions.",
     task_repeat=(
         "The user asked to repeat the last instruction given. Rephrase it in one shorter, clearer sentence"
         " using the current view and task state; do not read back step text verbatim or assume the step is done."

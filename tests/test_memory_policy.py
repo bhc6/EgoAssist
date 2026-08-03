@@ -10,8 +10,12 @@ def test_memory_profiles_are_explicit_and_default_all_online():
 
     assert policy["profile"] == "all-online"
     assert policy["components"] == {
-        "preference": {"enabled": True, "scope": "participant"},
-        "episodic": {"enabled": True, "scope": "case"},
+        "timeline": {
+            "enabled": True,
+            "preference_enabled": True,
+            "episodic_enabled": True,
+            "scope": "case",
+        },
     }
     assert {item["id"] for item in memory_profiles()} == {
         "all-online", "context-only", "confirmed-preference", "lexical-episodic",
@@ -23,21 +27,28 @@ def test_memory_policy_normalizes_custom_ablation_and_rejects_unknown_values():
     custom = normalize_memory_policy({
         "profile": "custom",
         "components": {
-            "preference": {"enabled": False, "scope": "participant"},
-            "episodic": {"enabled": True, "scope": "participant"},
+            "timeline": {
+                "enabled": True,
+                "preference_enabled": False,
+                "episodic_enabled": True,
+                "scope": "participant",
+            },
         },
     })
 
     assert custom["profile"] == "custom"
-    assert custom["components"]["episodic"] == {
-        "enabled": True, "scope": "participant",
+    assert custom["components"]["timeline"] == {
+        "enabled": True,
+        "preference_enabled": False,
+        "episodic_enabled": True,
+        "scope": "participant",
     }
     with pytest.raises(ValueError, match="unknown memory profile"):
         normalize_memory_policy({"profile": "opaque-retriever"})
     with pytest.raises(ValueError, match="must be case or participant"):
         normalize_memory_policy({
             "profile": "custom",
-            "components": {"episodic": {"scope": "global"}},
+            "components": {"timeline": {"scope": "global"}},
         })
 
 
@@ -54,4 +65,4 @@ def test_case_memory_policy_persists_in_sqlite(tmp_path):
     reopened = IdentityStore(path)
     restored = reopened.get_context_session(user["id"], session_id)["memoryPolicy"]
     assert restored == stored
-    assert restored["version"] == 1
+    assert restored["version"] == 2

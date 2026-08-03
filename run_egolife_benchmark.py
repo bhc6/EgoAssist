@@ -292,7 +292,7 @@ def main():
             "dashscope", device=args.encoder_device, model=args.api_model,
         )
         evaluated_model = args.api_model
-    cfg = Config(router_recent_bias=0.0)
+    cfg = Config()
     for video_index, video in enumerate(videos, start=1):
         pending = [row for row in grouped[video.stem] if row["key"] not in completed]
         if not pending:

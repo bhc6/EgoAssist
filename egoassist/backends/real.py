@@ -18,7 +18,7 @@ from typing import List, Sequence
 import numpy as np
 
 from .base import Answer, VLMBackend
-from .encoders import ClipEncoder
+from .encoders import ClipEncoder, _to_pil
 
 _SYS = (
     "You answer questions about a user's egocentric (first-person) day, using ONLY the "
@@ -27,6 +27,14 @@ _SYS = (
     "Always end with a separate line exactly like 'CONFIDENCE: 0.NN' giving your certainty in [0,1]."
 )
 _CAP = "Describe this first-person moment in one short sentence: key objects, people, and action."
+
+
+def _build_prompt(query: str, evidence_texts: list[str],
+                  event_time: str | None) -> str:
+    """把时间上下文、证据 caption、问题拼成最终 prompt。"""
+    ev = "\n".join(f"- {c}" for c in evidence_texts[:5])
+    time_line = (f"[Memory evidence from {event_time}]\n" if event_time else "")
+    return f"{time_line}Memory captions:\n{ev}\n\nQuestion: {query}"
 
 
 def _parse_conf(text: str, default: float = 0.5) -> float:
@@ -53,16 +61,8 @@ def _truncated_generation(text: str) -> bool:
     return bool(re.search(r"\bCONF(?:IDENCE)?\s*:?\s*$", text.strip(), re.I))
 
 
-def _pil(frame: np.ndarray):
-    from PIL import Image
-    arr = frame if frame.dtype == np.uint8 else np.clip(frame, 0, 255).astype(np.uint8)
-    if arr.ndim == 2:
-        arr = np.stack([arr] * 3, axis=-1)
-    return Image.fromarray(arr[:, :, :3])
-
-
 def _data_url(frame: np.ndarray) -> str:
-    img = _pil(frame)
+    img = _to_pil(frame)
     buf = io.BytesIO()
     img.save(buf, format="JPEG", quality=70)
     b64 = base64.b64encode(buf.getvalue()).decode()
@@ -141,12 +141,12 @@ class LocalQwenBackend(_ClipEmbedBackend):
 
     def _run(self, images: List[np.ndarray], prompt: str, system: str | None = None,
              max_new_tokens: int | None = None) -> str:
-        content = [{"type": "image", "image": _pil(im)} for im in images]
+        content = [{"type": "image", "image": _to_pil(im)} for im in images]
         content.append({"type": "text", "text": prompt})
-        messages = ([{"role": "system", "content": system}] if system else []) + \
-                   [{"role": "user", "content": content}]
+        messages = ([{"role": "system", "content": system}] if system else [])
+        messages += [{"role": "user", "content": content}]
         text = self.processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-        pil_images = [_pil(im) for im in images]
+        pil_images = [_to_pil(im) for im in images]
         inputs = self.processor(text=[text], images=pil_images or None,
                                 return_tensors="pt").to(self.model.device)
         with self.torch.no_grad():
@@ -161,9 +161,9 @@ class LocalQwenBackend(_ClipEmbedBackend):
         raw = self._run(self._few(frames), _CAP, max_new_tokens=self.caption_tokens)
         return raw if _valid_generation(raw) else "[invalid visual caption]"
 
-    def answer(self, query, evidence_texts, evidence_frames) -> Answer:
-        ev = "\n".join(f"- {c}" for c in evidence_texts[:5])
-        prompt = f"Memory captions:\n{ev}\n\nQuestion: {query}"
+    def answer(self, query, evidence_texts, evidence_frames, *,
+               event_time: str | None = None) -> Answer:
+        prompt = _build_prompt(query, evidence_texts, event_time)
         raw = self._run(
             self._few(evidence_frames), prompt, system=_SYS,
             max_new_tokens=self.answer_tokens,
@@ -171,9 +171,6 @@ class LocalQwenBackend(_ClipEmbedBackend):
         if not _valid_generation(raw) or _truncated_generation(raw):
             return Answer(text="Evidence is insufficient; the model response was invalid.", confidence=0.0)
         return Answer(text=_strip_conf(raw), confidence=_parse_conf(raw))
-
-
-LocalHFBackend = LocalQwenBackend  # 向后兼容别名
 
 
 # ============================ 云端 Gemini ============================
@@ -193,7 +190,7 @@ class GeminiBackend(_ClipEmbedBackend):
         self.model = genai.GenerativeModel(model)
 
     def _run(self, images: List[np.ndarray], prompt: str) -> str:
-        parts = [_pil(im) for im in images] + [prompt]
+        parts = [_to_pil(im) for im in images] + [prompt]
         r = self.model.generate_content(parts)
         return (r.text or "").strip()
 
@@ -201,9 +198,9 @@ class GeminiBackend(_ClipEmbedBackend):
         raw = self._run(self._few(frames), _CAP)
         return raw if _valid_generation(raw) else "[invalid visual caption]"
 
-    def answer(self, query, evidence_texts, evidence_frames) -> Answer:
-        ev = "\n".join(f"- {c}" for c in evidence_texts[:5])
-        prompt = f"{_SYS}\n\nMemory captions:\n{ev}\n\nQuestion: {query}"
+    def answer(self, query, evidence_texts, evidence_frames, *,
+               event_time: str | None = None) -> Answer:
+        prompt = f"{_SYS}\n\n{_build_prompt(query, evidence_texts, event_time)}"
         raw = self._run(self._few(evidence_frames), prompt)
         if not _valid_generation(raw) or _truncated_generation(raw):
             return Answer(text="Evidence is insufficient; the model response was invalid.", confidence=0.0)
@@ -229,10 +226,10 @@ class OpenAIBackend(_ClipEmbedBackend):
         self.use_logprobs = use_logprobs
 
     def _run(self, images: List[np.ndarray], prompt: str, system: str | None = None):
-        content = [{"type": "text", "text": prompt}] + \
-                  [{"type": "image_url", "image_url": {"url": _data_url(im)}} for im in images]
-        messages = ([{"role": "system", "content": system}] if system else []) + \
-                   [{"role": "user", "content": content}]
+        content = [{"type": "text", "text": prompt}]
+        content += [{"type": "image_url", "image_url": {"url": _data_url(im)}} for im in images]
+        messages = ([{"role": "system", "content": system}] if system else [])
+        messages += [{"role": "user", "content": content}]
         r = self.client.chat.completions.create(
             model=self.model, messages=messages, max_tokens=192,
             logprobs=self.use_logprobs, temperature=0)
@@ -249,9 +246,9 @@ class OpenAIBackend(_ClipEmbedBackend):
         text, _ = self._run(self._few(frames), _CAP)
         return text.strip() if _valid_generation(text) else "[invalid visual caption]"
 
-    def answer(self, query, evidence_texts, evidence_frames) -> Answer:
-        ev = "\n".join(f"- {c}" for c in evidence_texts[:5])
-        prompt = f"Memory captions:\n{ev}\n\nQuestion: {query}"
+    def answer(self, query, evidence_texts, evidence_frames, *,
+               event_time: str | None = None) -> Answer:
+        prompt = _build_prompt(query, evidence_texts, event_time)
         text, lp = self._run(self._few(evidence_frames), prompt, system=_SYS)
         if not _valid_generation(text) or _truncated_generation(text):
             return Answer(text="Evidence is insufficient; the model response was invalid.", confidence=0.0)
@@ -320,9 +317,9 @@ class DashScopeQwenBackend(_ClipEmbedBackend):
         raw = self._run(self._few(frames), _CAP)
         return raw if _valid_generation(raw) else "[invalid visual caption]"
 
-    def answer(self, query, evidence_texts, evidence_frames) -> Answer:
-        evidence = "\n".join(f"- {caption}" for caption in evidence_texts[:5])
-        prompt = f"Memory captions:\n{evidence}\n\nQuestion: {query}"
+    def answer(self, query, evidence_texts, evidence_frames, *,
+               event_time: str | None = None) -> Answer:
+        prompt = _build_prompt(query, evidence_texts, event_time)
         raw = self._run(self._few(evidence_frames), prompt, system=_SYS)
         if not _valid_generation(raw) or _truncated_generation(raw):
             return Answer(

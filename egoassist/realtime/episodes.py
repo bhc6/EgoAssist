@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import threading
 from pathlib import Path
 from typing import Any, Callable
 
@@ -46,6 +47,9 @@ class RealtimeEpisodeMemory:
             raise ValueError("invalid episodic memory scope")
         self._last_retrieval_by_session: dict[str, dict[str, Any]] = {}
         self._last_retrieval: dict[str, Any] = self._empty_retrieval("")
+        # Preference compatibility layer (lazy-initialized on first use)
+        self._pref_lock = threading.RLock()
+        self._pref: "PreferenceMemory | None" = None  # type: ignore[name-defined]
         if timeline is None:
             self.import_legacy(legacy_path)
 
@@ -275,7 +279,7 @@ class RealtimeEpisodeMemory:
             user_scope=user_scope,
             allow_cross_session=allow_cross_session,
         )
-        return self._timeline.consolidate(
+        return self._timeline.promote_to_long(
             user_id=user_id,
             case_id=case_id,
             scope=memory_scope,
@@ -366,6 +370,106 @@ class RealtimeEpisodeMemory:
             "selected": [],
             "injection": {"status": "not-injected", "episodeIds": []},
         }
+
+    # ------------------------------------------------------------------
+    # Preference delegation — unified interface over the same timeline DB
+    # ------------------------------------------------------------------
+
+    def _get_pref(self) -> "PreferenceMemory":  # type: ignore[name-defined]
+        """Lazy-initialize the preference layer sharing the same TimelineMemory.
+
+        Confirmed preferences are *participant*-durable, independent of this
+        episode memory's own ``self.scope``. Before the timeline unification the
+        memory policy carried two independent scopes: every profile that enabled
+        preferences used ``preference.scope == "participant"`` while
+        ``episodic.scope`` was ``"case"``. Unification collapsed both onto a
+        single ``timeline.scope`` (case for most profiles), which silently
+        demoted preferences to case scope — so a preference confirmed on the
+        participant object (e.g. the sessionless /api/voice + /api/candidate
+        write path) became invisible to a case-scoped reader at WS-connect, and
+        ``impact.status`` regressed from ``reused`` to ``none``.
+
+        Pinning the preference sub-store to ``participant`` restores the
+        pre-unification contract and mirrors the participant-durable read in
+        ``state()``'s preference snapshot. ``timeline.scope`` continues to govern
+        the episodic timeline only. ``case_id`` is irrelevant for participant
+        scope (``_records`` filters ``case_id=None`` there), so it is dropped.
+        """
+        with self._pref_lock:
+            if self._pref is None:
+                from egoassist.realtime.engine import PreferenceMemory
+                self._pref = PreferenceMemory(
+                    self._timeline.path,
+                    event_sink=self._event_sink,
+                    timeline=self._timeline,
+                    user_id=self.owner_user_id or "local-default",
+                    scope="participant",
+                )
+            return self._pref
+
+    def propose_preference(
+        self,
+        *,
+        task: str,
+        step: str,
+        prompt: str,
+        evidence: str,
+        preference: str | None = None,
+        source_quote: str | None = None,
+        scope_reason: str = "当前任务与当前 checkpoint 在用户提出偏好时处于活动状态",
+        candidate_scope: str | None = None,
+    ) -> dict[str, Any]:
+        """Propose a task-preference candidate (pending, awaiting confirmation)."""
+        return self._get_pref().propose_preference(
+            task=task,
+            step=step,
+            prompt=prompt,
+            evidence=evidence,
+            preference=preference,
+            source_quote=source_quote,
+            scope_reason=scope_reason,
+            candidate_scope=candidate_scope,
+        )
+
+    def resolve_candidate(
+        self,
+        accepted: bool,
+        *,
+        candidate_scope: str | None = None,
+    ) -> dict[str, Any]:
+        """Accept or reject the pending preference candidate."""
+        return self._get_pref().resolve_candidate(accepted, candidate_scope=candidate_scope)
+
+    def retrieve_preference(
+        self,
+        task: str,
+        step: str,
+        *,
+        emit: bool = True,
+    ) -> dict[str, Any]:
+        """Exact task+step trigger lookup for confirmed task-preference cards."""
+        return self._get_pref().retrieve(task, step, emit=emit)
+
+    def snapshot_preference(
+        self,
+        *,
+        candidate_scope: str | None = None,
+    ) -> dict[str, Any]:
+        """Preference-style snapshot: {session, memoryPath, records, candidate, decision, events}."""
+        return self._get_pref().snapshot(candidate_scope=candidate_scope)
+
+    def delete_preference(
+        self,
+        record_id: str,
+        *,
+        candidate_scope: str | None = None,
+    ) -> dict[str, Any]:
+        """Delete a confirmed or pending preference card by ID."""
+        return self._get_pref().delete_memory(record_id, candidate_scope=candidate_scope)
+
+    def import_preference_legacy(self, legacy_path: str | "Path") -> int:
+        """Migrate old preferences.json records into the shared timeline DB."""
+        return self._get_pref().import_legacy(legacy_path)
 
     def _emit(self, event_type: str, payload: dict[str, Any]) -> None:
         if self._event_sink:

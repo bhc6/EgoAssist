@@ -1,4 +1,5 @@
 import threading
+from collections import deque
 
 from egoassist.realtime import EventLedger, PreferenceMemory, TaskSession, TaskSpec, TurnTakingPolicy
 from egoassist.realtime.omni import OmniBrowserBridge, _ResponseRequest
@@ -58,7 +59,11 @@ def speech_bridge(policy):
     bridge._response_pending = False
     bridge._active_response_ids = {"r1"}
     bridge._active_response_requests = {"r1": _ResponseRequest("text", 50, 1, policy, "test", 0.0)}
-    bridge._queued_response = None
+    bridge._queued_requests = deque()
+    bridge._inflight_response = None
+    bridge._cancelled_response_ids = set()
+    bridge._speech_started_response_ids = set()
+    bridge._early_terminal_response_ids = set()
     bridge._cancel_when_created = False
     bridge._barge_in_pending = False
     bridge._trace_sink = None

@@ -9,7 +9,7 @@ from typing import Any, Mapping
 from .contracts import ArtifactDescriptor
 
 
-class LocalArtifactPort:
+class LocalArtifactAdapter:
     def __init__(self, catalog: list[Mapping[str, Any]]) -> None:
         self._artifacts: dict[str, dict[str, Any]] = {}
         for raw in catalog:

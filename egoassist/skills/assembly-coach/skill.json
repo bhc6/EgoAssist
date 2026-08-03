@@ -11,7 +11,6 @@
     "protected_actions": ["emergency"],
     "max_protection_ms": 1800
   },
-  "memory_policy": {"write": "confirm", "trigger": ["task_id", "step_id"]},
   "artifacts": [
     {
       "id": "flat-pack-stool-reference",
@@ -57,6 +56,5 @@
       "arguments": {"type": "object", "additionalProperties": false, "properties": {}},
       "result": {"status": "demo-only", "message": "No external expert or acknowledgement endpoint is connected."}
     }
-  ],
-  "evaluation": ["intervention_precision", "step_order_accuracy", "recovery_success", "followup_reuse", "barge_in_success"]
+  ]
 }

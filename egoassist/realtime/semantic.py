@@ -37,8 +37,6 @@ _PHONE_VALUE = re.compile(r"[0-9零〇一幺二两三四五六七八九][0-9零�
 
 # ── Named constants ───────────────────────────────────────────────────────────
 _MAX_MEMORY_ATOMS: int = 3              # max atoms extracted per fallback call
-_MAX_REMINDER_SECONDS: int = 365 * 24 * 3600  # upper bound for reminder delay (1 yr)
-_ROUTER_TEMPERATURE: int = 0            # deterministic output for classification
 
 
 def is_explicit_memory_request(text: str) -> bool:
@@ -374,98 +372,22 @@ class SemanticTurnRouter:
         self._clock_context = dict(clock_context or {}) or None
         self._memory_draft = dict(memory_draft or {}) or None
 
-    # ── Fast-path heuristics ────────────────────────────────────────────────
-
-    _TRIVIAL_RE = re.compile(
-        r"^(?:"
-        r"[嗯哦啊哈呃唔]{1,4}"
-        r"|好的?|行|是的?|对|可以|行啊|明白|了解|谢谢?|收到"
-        r"|ok|okay|yeah|yep|sure|got\s*it|thanks|thank\s*you|alright|got\s*it"
-        r")$",
-        re.IGNORECASE,
-    )
-    _TASK_KW_RE = re.compile(
-        r"(?:确认|完成|取消|回滚|重复|暂停|恢复|帮助"
-        r"|confirm|complete|cancel|rollback|repeat|pause|resume|help)\b",
-        re.IGNORECASE,
-    )
-    # Stop-speaking commands: must produce control="stop-speaking" immediately,
-    # NOT fall through to the len<=10 trivial-filler path that returns control=null.
+    # Stop-speaking commands. Used by the input handler (run_egoassist.py) to
+    # cancel an in-progress answer the instant a barge-in stop arrives, bypassing
+    # the TurnAccumulator debounce. This is input-side cancellation only; it does
+    # NOT short-circuit classification — every turn is still routed through the
+    # model so the router keeps no local decision vocabulary (see class docstring
+    # and test_semantic_control_has_no_local_phrase_override).
     _STOP_RE = re.compile(
         r"^(?:停+|别说了?|闭嘴|住口|安静+|噤声|停一下|停下来?|不用说了?|不用了"
         r"|stop|shut up|be quiet|stop (?:talking|speaking)|quiet(?:ly)?|silence|enough)$",
         re.IGNORECASE,
     )
 
-    def _trivial_classify(self, text: str, started: float) -> "dict[str, Any] | None":
-        """Return an immediate no-API classification for clearly conversational short turns.
-
-        Returns None when the turn needs full semantic routing.
-        """
-        normalized = " ".join(text.split()).strip()
-        if not normalized:
-            return None
-        if is_explicit_memory_request(normalized):
-            return None
-        if looks_like_question(normalized):
-            return None
-        if self._TASK_KW_RE.search(normalized):
-            return None
-        # Stop-speaking commands: must cancel immediately, before any filler check.
-        # Without this guard "停" / "安静" fall into len<=10 and get control=null.
-        if self._STOP_RE.match(normalized):
-            return self._stop_result(started)
-        # Explicit trivial filler / acknowledgment
-        if self._TRIVIAL_RE.match(normalized):
-            return self._fast_result(started)
-        # Very short turns with no memory/task/question signal
-        if len(normalized) <= 10:
-            return self._fast_result(started)
-        return None
-
-    def _stop_result(self, started: float) -> "dict[str, Any]":
-        """Fast-path result for explicit stop-speaking commands (no API call)."""
-        result = self._fast_result(started)
-        result["control"] = "stop-speaking"
-        result["claimBoundary"] = "Stop-command fast-path; no API call required."
-        return result
-
-    def _fast_result(self, started: float) -> "dict[str, Any]":
-        return {
-            "method": TURN_ROUTER_POLICY_VERSION,
-            "model": "fast-path",
-            "status": "classified",
-            "speechControl": None,
-            "taskControl": None,
-            "preferenceIntent": None,
-            "memoryQuery": None,
-            "memoryKind": None,
-            "memoryText": None,
-            "memoryKey": None,
-            "memoryScope": None,
-            "memoryConsent": None,
-            "memoryAtoms": [],
-            "memoryDraft": None,
-            "memoryQuerySpec": None,
-            "skillControl": None,
-            "selectedSkill": None,
-            "intentKind": "foreground-dialogue",
-            "intents": [],
-            "skillStatus": "no-match",
-            "rawOutput": None,
-            "latencyMs": round((time.perf_counter() - started) * 1000, 1),
-            "policyVersion": TURN_ROUTER_POLICY_VERSION,
-            "claimBoundary": "Trivial-turn fast-path; no API call required.",
-        }
-
     # ── Main classifier ─────────────────────────────────────────────────────
 
     async def classify(self, text: str, skill_catalog: list[dict[str, str]]) -> dict[str, Any]:
         started = time.perf_counter()
-        # Skip the API call for short, obviously conversational turns.
-        fast = self._trivial_classify(text, started)
-        if fast is not None:
-            return fast
         try:
             raw = await asyncio.wait_for(
                 asyncio.to_thread(self._classify_sync, str(text), skill_catalog),

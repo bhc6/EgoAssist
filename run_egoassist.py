@@ -21,8 +21,10 @@ from typing import Any, Callable
 from uuid import uuid4
 
 from egoassist import BUILTIN_SKILLS_ROOT, CONSOLE_ROOT
+from egoassist.timefmt import format_beijing_iso
 from egoassist._env import load_env
 from egoassist.memory import ClockContext, TimelineMemory, resolve_time_semantics
+from egoassist.memory.timeline import DEFAULT_RETRIEVAL_MIN_SCORE
 from egoassist.realtime import (
     ContextHarness,
     CaseWorkLedger,
@@ -31,7 +33,6 @@ from egoassist.realtime import (
     default_memory_policy,
     memory_profiles,
     normalize_memory_policy,
-    PreferenceMemory,
     RealtimeEpisodeMemory,
     EventLedger,
     IdentityStore,
@@ -61,16 +62,16 @@ from egoassist.realtime.locale_prompts import PROMPTS
 from egoassist.realtime.tools import tool_result_succeeded
 from egoassist.product import (
     HumanHelpRequest,
-    LocalArtifactPort,
+    LocalArtifactAdapter,
     PerceptionFrameContext,
     PerceptionHypothesis,
     ProductDatabase,
     PrivacyGovernance,
     OutcomeLedger,
     OutcomeRecord,
-    WebhookHumanHelpPort,
+    WebhookHumanHelpAdapter,
 )
-from egoassist.product.notifications import NtfyNotificationPort
+from egoassist.product.notifications import NtfyNotificationAdapter
 from egoassist.product.reminders import (
     DEFAULT_TASK_QUEUE,
     ReminderActivities,
@@ -356,10 +357,6 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
         )
     timeline_path = Path(memory_path).with_name("timeline.sqlite3")
     timeline = TimelineMemory(timeline_path, event_sink=trace_event)
-    memory = PreferenceMemory(
-        memory_path, event_sink=trace_event, timeline=timeline,
-        user_id="local-default", scope="participant",
-    )
     episodic = RealtimeEpisodeMemory(
         timeline_path, event_sink=trace_event, timeline=timeline,
         owner_user_id="local-default", scope="participant",
@@ -373,8 +370,8 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
         for package in registry.skills.values()
         for item in package.manifest.get("artifacts", [])
     ]
-    artifact_port = LocalArtifactPort(artifact_catalog)
-    human_help_port = WebhookHumanHelpPort.from_env()
+    artifact_port = LocalArtifactAdapter(artifact_catalog)
+    human_help_port = WebhookHumanHelpAdapter.from_env()
     capability_overrides["reference-display"] = {
         "status": "available" if artifact_catalog else "unconfigured",
         "reason": (
@@ -480,8 +477,6 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
     def runtime_skill_summaries() -> list[dict]:
         return [runtime_skill_summary(package) for package in registry.skills.values()]
     user_memory_root = Path(memory_path).with_name("users")
-    user_memories: dict[str, PreferenceMemory] = {}
-    case_memories: dict[tuple[str, str], PreferenceMemory] = {}
     user_episodics: dict[str, RealtimeEpisodeMemory] = {}
     case_episodics: dict[tuple[str, str], RealtimeEpisodeMemory] = {}
     user_runtimes: dict[str, SkillRuntime] = {}
@@ -494,17 +489,6 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
             experiment_case.get("timezone", "UTC"),
             experiment_case.get("utcOffsetMinutes", 0),
         )
-
-    def memory_for_user(user_id: str) -> PreferenceMemory:
-        if user_id not in user_memories:
-            user_memories[user_id] = PreferenceMemory(
-                timeline_path,
-                event_sink=trace_event,
-                timeline=timeline,
-                user_id=user_id,
-                scope="participant",
-            )
-        return user_memories[user_id]
 
     def episodic_for_user(user_id: str) -> RealtimeEpisodeMemory:
         if user_id not in user_episodics:
@@ -530,35 +514,12 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
             )
         return case_episodics[key]
 
-    def memory_for_case(user_id: str, session_id: str) -> PreferenceMemory:
-        key = (user_id, session_id)
-        if key not in case_memories:
-            case_memories[key] = PreferenceMemory(
-                timeline_path,
-                event_sink=trace_event,
-                timeline=timeline,
-                user_id=user_id,
-                case_id=session_id,
-                scope="case",
-            )
-        return case_memories[key]
-
-    def scoped_preference_memory(
-        user_id: str,
-        session_id: str | None,
-        policy: dict,
-    ) -> PreferenceMemory:
-        scope = policy["components"]["preference"]["scope"]
-        if scope == "case" and session_id:
-            return memory_for_case(user_id, session_id)
-        return memory_for_user(user_id)
-
     def scoped_episodic_memory(
         user_id: str,
         session_id: str | None,
         policy: dict,
     ) -> RealtimeEpisodeMemory:
-        scope = policy["components"]["episodic"]["scope"]
+        scope = policy["components"]["timeline"]["scope"]
         if scope == "case" and session_id:
             return episodic_for_case(user_id, session_id)
         return episodic_for_user(user_id)
@@ -570,7 +531,7 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
             if not user_dir.is_dir():
                 continue
             user_id = user_dir.name
-            memory_for_user(user_id).import_legacy(user_dir / "preferences.json")
+            episodic_for_user(user_id).import_preference_legacy(user_dir / "preferences.json")
             episodic_for_user(user_id).import_legacy(user_dir / "episodes.json")
             cases_root = user_dir / "cases"
             if not cases_root.exists():
@@ -579,7 +540,7 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                 if not case_dir.is_dir():
                     continue
                 session_id = case_dir.name
-                memory_for_case(user_id, session_id).import_legacy(case_dir / "preferences.json")
+                episodic_for_case(user_id, session_id).import_preference_legacy(case_dir / "preferences.json")
                 episodic_for_case(user_id, session_id).import_legacy(case_dir / "episodes.json")
 
     migrate_legacy_memories()
@@ -631,18 +592,21 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
             PROMPTS.evidence_instruction,
         ]
         for item in evidence:
+            bj_time = format_beijing_iso(item.get("timestamp")) or item.get("timestamp", "")
             lines.append(
-                f"- episode={item['episodeId']} time={item['timestamp']} source={item['source']} "
+                f"- episode={item['episodeId']} time={bj_time} "
+                f"kind={item.get('kind', '?')} source={item['source']} "
                 f"score={item['score']}: {item['summary']}"
             )
         return base + "\n" + "\n".join(lines)
 
     def harness_layers(target_runtime: SkillRuntime | None = None) -> list[ContextLayer]:
+        active_runtime = target_runtime or runtime
         catalog = [
             {"name": item["name"], "description": item["description"]}
             for item in registry.summaries()
         ]
-        return [
+        layers = [
             ContextLayer(
                 "core-policy",
                 context(target_runtime),
@@ -660,7 +624,9 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                 required=True,
                 source="context-harness",
             ),
-            ContextLayer(
+        ]
+        if not active_runtime.active:
+            layers.append(ContextLayer(
                 "skill-catalog",
                 "<available_skills>\n"
                 + json.dumps(catalog, ensure_ascii=False, sort_keys=True)
@@ -672,8 +638,18 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                 priority=90,
                 required=True,
                 source="skill-registry",
-            ),
-        ]
+            ))
+        live = active_runtime.live_state_text()
+        if live:
+            layers.append(ContextLayer(
+                "skill-runtime-state",
+                live,
+                trust="system",
+                priority=85,
+                required=False,
+                source="skill-runtime",
+            ))
+        return layers
 
     # After this many uninterrupted DashScope exchanges in one session, force a
     # compact+reconnect so DashScope's live context window is reset to the summary
@@ -908,12 +884,12 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
 
                 def consolidate() -> list[dict]:
                     return [
-                        timeline.consolidate(
+                        timeline.promote_to_long(
                             user_id=owner.user_id,
                             case_id=owner.session_id,
                             scope="case",
                         ),
-                        timeline.consolidate(
+                        timeline.promote_to_long(
                             user_id=owner.user_id,
                             case_id=None,
                             scope="participant",
@@ -1077,11 +1053,11 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
         target_runtime: SkillRuntime | None = None,
         *,
         emit: bool = False,
-        preference_memory: PreferenceMemory | None = None,
+        episodic_memory: RealtimeEpisodeMemory | None = None,
         enabled: bool = True,
     ) -> dict:
         active_runtime = target_runtime or runtime
-        active_memory = preference_memory or memory
+        active_episodic = episodic_memory or episodic
         if not enabled:
             return {
                 "method": "disabled-by-memory-policy",
@@ -1099,8 +1075,8 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
         task = active_runtime.task
         spec = task.spec
         attempts = [
-            active_memory.retrieve(spec.id, task.current_step.id, emit=emit),
-            active_memory.retrieve(spec.title, task.current_step.title, emit=False),
+            active_episodic.retrieve_preference(spec.id, task.current_step.id, emit=emit),
+            active_episodic.retrieve_preference(spec.title, task.current_step.title, emit=False),
         ]
         return next((item for item in attempts if item["selected"]), attempts[0])
 
@@ -1109,26 +1085,26 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
         *,
         emit: bool = False,
         target_runtime: SkillRuntime | None = None,
-        preference_memory: PreferenceMemory | None = None,
+        episodic_memory: RealtimeEpisodeMemory | None = None,
         enabled: bool = True,
     ) -> dict | None:
         del memory_state
         selected = memory_retrieval(
-            target_runtime, emit=emit, preference_memory=preference_memory, enabled=enabled,
+            target_runtime, emit=emit, episodic_memory=episodic_memory, enabled=enabled,
         ).get("selected")
         return selected["record"] if selected else None
 
     def apply_memory_hint(
         target_runtime: SkillRuntime | None = None,
         *,
-        preference_memory: PreferenceMemory | None = None,
+        episodic_memory: RealtimeEpisodeMemory | None = None,
         enabled: bool = True,
     ) -> tuple[dict | None, bool]:
         active_runtime = target_runtime or runtime
         if active_runtime.task is None or not enabled:
             return None, False
         hint = find_memory_hint(
-            emit=True, target_runtime=active_runtime, preference_memory=preference_memory,
+            emit=True, target_runtime=active_runtime, episodic_memory=episodic_memory,
             enabled=enabled,
         )
         already_used = bool(hint and hint["id"] in active_runtime.task.announced_memory_ids)
@@ -1142,7 +1118,6 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
         bridge_override=None,
         harness_override: ContextHarness | None = None,
         tools_override: SkillToolExecutor | None = None,
-        memory_override: PreferenceMemory | None = None,
         episodic_override: RealtimeEpisodeMemory | None = None,
         media_override: dict | None = None,
         user_scope: str = "local-default",
@@ -1152,11 +1127,10 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
         active_runtime = target_runtime or runtime
         active_routing = routing_override or routing_state
         active_tools = tools_override or tools
-        active_memory = memory_override or memory
         active_episodic = episodic_override or episodic
         active_policy = normalize_memory_policy(memory_policy_override or default_memory_policy())
-        preference_settings = active_policy["components"]["preference"]
-        episodic_settings = active_policy["components"]["episodic"]
+        preference_settings = active_policy["components"]["timeline"]
+        episodic_settings = active_policy["components"]["timeline"]
         harness_snapshot = harness_override.snapshot() if harness_override else None
         product_projection = None
         if harness_override is not None:
@@ -1209,7 +1183,20 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                 else ledger.session_id if user_scope == "local-default" else None
             )
         )
-        memory_state = active_memory.snapshot(candidate_scope=visible_session_id)
+        # General preferences are participant-durable: the write path routes
+        # explicit participant-scoped preferences to episodic_for_user() (see the
+        # atom-write block), so the preference snapshot must read from the same
+        # object for authenticated users. The unified `timeline` component carries
+        # one scope (case for most profiles), but that governs the episodic
+        # timeline, not the cross-case durability of confirmed preferences. Reading
+        # participant memory here mirrors the write and restores the pre-unification
+        # behavior where preference.scope was independently "participant".
+        preference_memory = (
+            episodic_for_user(user_scope)
+            if user_scope != "local-default"
+            else active_episodic
+        )
+        memory_state = preference_memory.snapshot_preference(candidate_scope=visible_session_id)
         compiled_context = context(active_runtime)
         bridges = (
             (bridge_override,) if bridge_override is not None
@@ -1241,8 +1228,8 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
         )
         episodic_state = {
             **episodic_state,
-            "caseTimelineEnabled": episodic_settings["enabled"],
-            "participantTimelineEnabled": preference_settings["enabled"],
+            "caseTimelineEnabled": episodic_settings["episodic_enabled"],
+            "participantTimelineEnabled": preference_settings["preference_enabled"],
             "timelineViews": {
                 "case": timeline.snapshot(
                     user_id=user_scope,
@@ -1256,7 +1243,7 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                 ),
             },
         }
-        if not episodic_settings["enabled"] and not preference_settings["enabled"]:
+        if not episodic_settings["episodic_enabled"] and not preference_settings["preference_enabled"]:
             episodic_state = {
                 **episodic_state,
                 "retrieval": {
@@ -1277,17 +1264,17 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
         if active_runtime.task is None:
             candidate = memory_state.get("candidate")
             generic_memory = {
-                "policy": "explicit-confirmation" if preference_settings["enabled"] else "disabled-by-memory-policy",
+                "policy": "explicit-confirmation" if preference_settings["preference_enabled"] else "disabled-by-memory-policy",
                 "scope": {"skill": active_runtime.skill.name if active_runtime.skill else None, "task": None, "contextAnchor": None},
                 "evidence": {"status": "waiting", "text": PROMPTS.diag_evidence_waiting, "source": "realtime-session"},
                 "candidate": {"status": "pending" if candidate else "none", "text": candidate.get("evidence") if candidate else PROMPTS.diag_candidate_none},
                 "confirmation": {"status": "none", "text": PROMPTS.diag_confirmation_none, "count": 0},
                 "retrieval": {
-                    "status": "no-match" if preference_settings["enabled"] else "disabled",
-                    "text": PROMPTS.diag_retrieval_waiting_scope if preference_settings["enabled"] else PROMPTS.diag_retrieval_disabled,
+                    "status": "no-match" if preference_settings["preference_enabled"] else "disabled",
+                    "text": PROMPTS.diag_retrieval_waiting_scope if preference_settings["preference_enabled"] else PROMPTS.diag_retrieval_disabled,
                     **memory_retrieval(
-                        active_runtime, preference_memory=active_memory,
-                        enabled=preference_settings["enabled"],
+                        active_runtime, episodic_memory=active_episodic,
+                        enabled=preference_settings["preference_enabled"],
                     ),
                 },
                 "impact": {"status": "none", "text": PROMPTS.diag_impact_none},
@@ -1360,7 +1347,7 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
         spec = active_runtime.task.spec
         task_state = task.snapshot()
         retrieval = memory_retrieval(
-            active_runtime, preference_memory=active_memory,
+            active_runtime, episodic_memory=active_episodic,
             enabled=preference_settings["enabled"],
         )
         hint = retrieval["selected"]["record"] if retrieval["selected"] else None
@@ -1757,14 +1744,8 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
         active_runtime = target_runtime or runtime
         if active_runtime.task is None:
             if active_runtime.skill:
-                return (
-                    f"The active Skill is {active_runtime.skill.name}, but the task is unresolved. "
-                    + PROMPTS.skill_unresolved
-                )
-            return (
-                "Respond naturally to the current user turn already present in conversation data. "
-                + PROMPTS.no_skill
-            )
+                return f"The active Skill is {active_runtime.skill.name}, but the task is unresolved."
+            return "Respond naturally to the current user turn already present in conversation data."
         decision = active_runtime.task.decision
         if task_control == "repeat":
             return PROMPTS.task_repeat
@@ -2015,7 +1996,6 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
             routing_override=active_routing,
             harness_override=active_harness,
             tools_override=active_tools,
-            memory_override=scoped_preference_memory(user_id, session_id, policy),
             episodic_override=scoped_episodic_memory(user_id, session_id, policy),
             user_scope=user_id,
             memory_policy_override=policy,
@@ -2062,6 +2042,65 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
             },
             "episodicMemory": episodic_snap,
             "recentOps": owner.memory_bus.recent(40) if owner.memory_bus else [],
+        })
+
+    async def get_timeline_memory(request):
+        """Unified TimelineMemory view — all kinds with Beijing time formatting."""
+        from egoassist.memory.timeline import RETRIEVABLE_KINDS
+        user_id = request[user_key]["id"]
+        session_id = str(request.query.get("session", "")).strip() or None
+        scope = str(request.query.get("scope", "case")).strip()
+        limit = min(int(request.query.get("limit", "60")), 200)
+        if not session_id:
+            sessions = identity.list_context_sessions(user_id)
+            if not sessions:
+                return web.json_response({"error": "no sessions found"}, status=404)
+            session_id = sessions[0]["id"]
+        identity.get_context_session(user_id, session_id)
+        raw = timeline.retrieve(
+            "",
+            user_id=user_id,
+            case_id=session_id,
+            scope="case",
+            kinds=RETRIEVABLE_KINDS - {"legacy"},
+            limit=limit,
+        )
+        snap = timeline.snapshot(user_id=user_id, case_id=session_id, scope="case")
+
+        def _card_view(card: dict) -> dict:
+            ts = card.get("happenedAt") or card.get("recordedAt")
+            return {
+                "id": card["id"],
+                "kind": card.get("kind", "?"),
+                "tier": card.get("tier", "short"),
+                "scope": card.get("scope"),
+                "text": card.get("text", ""),
+                "happenedAt": ts,
+                "happenedAtBeijing": format_beijing_iso(ts),
+                "importance": card.get("importance"),
+                "status": card.get("status"),
+                "subject": card.get("subject"),
+                "predicate": card.get("predicate"),
+                "value": card.get("value"),
+                "metadata": card.get("metadata", {}),
+            }
+
+        all_candidates = raw.get("candidates", [])
+        kind_counts: dict[str, int] = {}
+        for c in all_candidates:
+            k = c.get("card", {}).get("kind", "?")
+            kind_counts[k] = kind_counts.get(k, 0) + 1
+
+        recent_cards = [_card_view(c) for c in snap.get("recent", [])]
+        return web.json_response({
+            "sessionId": session_id,
+            "userId": user_id,
+            "timestamp": time.time(),
+            "kindCounts": kind_counts,
+            "totalCards": snap.get("count", 0),
+            "layers": snap.get("layers", {}),
+            "recentCards": recent_cards,
+            "retrievalMethod": raw.get("method"),
         })
 
     async def get_background_tasks(request):
@@ -2485,7 +2524,6 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
         turn_id: str | None = None,
         transcript_entry: dict | None = None,
         persist_runtime_checkpoint: bool = True,
-        preference_memory: PreferenceMemory | None = None,
         user_scope: str = "local-default",
         semantic_decision: dict | None = None,
         memory_policy: dict | None = None,
@@ -2500,11 +2538,10 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
         if not transcript:
             raise ValueError("transcript text cannot be empty")
         active_runtime = target_runtime or runtime
-        active_memory = preference_memory or memory
         active_episodic = episodic_memory or episodic
         active_policy = normalize_memory_policy(memory_policy or default_memory_policy())
-        preference_enabled = active_policy["components"]["preference"]["enabled"]
-        episodic_settings = active_policy["components"]["episodic"]
+        preference_enabled = active_policy["components"]["timeline"]["preference_enabled"]
+        episodic_settings = active_policy["components"]["timeline"]
         clock_context = clock_context or ClockContext.current()
         if harness:
             transcript_entry = transcript_entry or harness.record_user(
@@ -2576,8 +2613,8 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                 reverse=True,
             )
             minimum_score = max(
-                float(episodic_retrieval.get("minimumScore") or 0.18),
-                float(durable_retrieval.get("minimumScore") or 0.18),
+                float(episodic_retrieval.get("minimumScore") or DEFAULT_RETRIEVAL_MIN_SCORE),
+                float(durable_retrieval.get("minimumScore") or DEFAULT_RETRIEVAL_MIN_SCORE),
             )
             merged_selected = [
                 item for item in merged_candidates
@@ -3141,7 +3178,7 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
             )
         ):
             step = active_runtime.task.current_step
-            proposal = active_memory.propose_preference(
+            proposal = active_episodic.propose_preference(
                 task=active_runtime.task.spec.id,
                 step=step.id,
                 prompt=transcript[:160],
@@ -3158,15 +3195,15 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                     "preference-memory",
                     {
                         **dict(proposal["candidate"] or {}),
-                        "storageScope": active_policy["components"]["preference"]["scope"],
+                        "storageScope": active_policy["components"]["timeline"]["scope"],
                     },
                     parent_event_id=transcript_event["eventId"],
                 )
         hint, recalled = apply_memory_hint(
-            active_runtime, preference_memory=active_memory, enabled=preference_enabled,
+            active_runtime, episodic_memory=active_episodic, enabled=preference_enabled,
         ) if harness or live_bridges else (
             find_memory_hint(
-                target_runtime=active_runtime, preference_memory=active_memory,
+                target_runtime=active_runtime, episodic_memory=active_episodic,
                 enabled=preference_enabled,
             ), False,
         )
@@ -3175,7 +3212,7 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
         preference_retrieval = memory_retrieval(
             active_runtime,
             emit=False,
-            preference_memory=active_memory,
+            episodic_memory=active_episodic,
             enabled=preference_enabled,
         )
         if harness:
@@ -3185,7 +3222,7 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                 "preference-memory",
                 {
                     "enabled": preference_enabled,
-                    "storageScope": active_policy["components"]["preference"]["scope"],
+                    "storageScope": active_policy["components"]["timeline"]["scope"],
                     "method": preference_retrieval["method"],
                     "query": preference_retrieval["query"],
                     "candidateCount": len(preference_retrieval["candidates"]),
@@ -3299,14 +3336,12 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
             active_runtime = owner.runtime
             harness = owner.harness
             policy = identity.get_context_session(user_id, session_id)["memoryPolicy"]
-            active_memory = scoped_preference_memory(user_id, session_id, policy)
             active_episodic = scoped_episodic_memory(user_id, session_id, policy)
         else:
             owner = None
             harness = None
             policy = default_memory_policy()
             active_runtime = runtime_for_user(user_id)
-            active_memory = memory_for_user(user_id)
             active_episodic = episodic_for_user(user_id)
         transcript = str(payload.get("transcript", ""))
         labels = {
@@ -3368,7 +3403,6 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                     transcript,
                     harness,
                     active_runtime,
-                    preference_memory=active_memory,
                     episodic_memory=active_episodic,
                     user_scope=user_id,
                     semantic_decision=api_semantic,
@@ -3386,7 +3420,6 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                 transcript,
                 harness,
                 active_runtime,
-                preference_memory=active_memory,
                 episodic_memory=active_episodic,
                 user_scope=user_id,
                 semantic_decision=api_semantic,
@@ -3500,7 +3533,6 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                 )
                 apply_memory_hint(
                     owner.runtime,
-                    preference_memory=scoped_preference_memory(user_id, session_id, policy),
                 )
                 owner.journal.append_state_checkpoint(
                     runtime_checkpoint(owner.runtime), reason="structured-observation",
@@ -3525,7 +3557,7 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
             skill=active_runtime.skill.name, task=active_runtime.task.spec.id,
             user_scope=user_id,
         )
-        apply_memory_hint(active_runtime, preference_memory=memory_for_user(user_id))
+        apply_memory_hint(active_runtime)
         return await get_state(request)
 
     async def post_replay_observation(request):
@@ -3555,7 +3587,6 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                 )
                 apply_memory_hint(
                     owner.runtime,
-                    preference_memory=scoped_preference_memory(user_id, session_id, policy),
                 )
                 owner.journal.append_state_checkpoint(
                     runtime_checkpoint(owner.runtime), reason="replay-observation",
@@ -3580,7 +3611,7 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
             skill=active_runtime.skill.name, task=active_runtime.task.spec.id,
             user_scope=user_id,
         )
-        apply_memory_hint(active_runtime, preference_memory=memory_for_user(user_id))
+        apply_memory_hint(active_runtime)
         return await get_state(request)
 
     async def post_candidate(request):
@@ -3591,12 +3622,12 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
             identity.get_context_session(user_id, session_id)["memoryPolicy"]
             if session_id else default_memory_policy()
         )
-        active_memory = scoped_preference_memory(user_id, session_id, policy)
+        active_episodic = scoped_episodic_memory(user_id, session_id, policy)
         accepted = bool(payload.get("accepted"))
-        if accepted and not policy["components"]["preference"]["enabled"]:
+        if accepted and not policy["components"]["timeline"]["preference_enabled"]:
             raise ValueError("confirmed preference memory is disabled for this experiment case")
-        candidate = active_memory.snapshot(candidate_scope=session_id).get("candidate")
-        active_memory.resolve_candidate(accepted, candidate_scope=session_id)
+        candidate = active_episodic.snapshot_preference(candidate_scope=session_id).get("candidate")
+        active_episodic.resolve_candidate(accepted, candidate_scope=session_id)
         if session_id:
             append_memory_audit(
                 case_journal(user_id, session_id),
@@ -3606,7 +3637,7 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                     "memoryId": candidate["id"] if candidate else None,
                     "trigger": candidate.get("trigger") if candidate else None,
                     "preference": candidate.get("preference") if candidate and accepted else None,
-                    "storageScope": policy["components"]["preference"]["scope"],
+                    "storageScope": policy["components"]["timeline"]["scope"],
                     "accepted": accepted,
                 },
             )
@@ -3620,15 +3651,15 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
             identity.get_context_session(user_id, session_id)["memoryPolicy"]
             if session_id else default_memory_policy()
         )
-        active_memory = scoped_preference_memory(user_id, session_id, policy)
+        active_episodic = scoped_episodic_memory(user_id, session_id, policy)
         record_id = str(payload.get("id", ""))
         record = next(
-            (item for item in active_memory.snapshot(candidate_scope=session_id)["records"] if item["id"] == record_id),
+            (item for item in active_episodic.snapshot_preference(candidate_scope=session_id)["records"] if item["id"] == record_id),
             None,
         )
         deleted_card = None
         if record is not None:
-            active_memory.delete_memory(record_id, candidate_scope=session_id)
+            active_episodic.delete_preference(record_id, candidate_scope=session_id)
         else:
             eligible = timeline.cards(
                 user_id=user_id,
@@ -3657,7 +3688,7 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                     "kind": deleted_card.get("kind") if deleted_card else record.get("kind"),
                     "storageScope": (
                         deleted_card.get("scope") if deleted_card
-                        else policy["components"]["preference"]["scope"]
+                        else policy["components"]["timeline"]["scope"]
                     ),
                 },
             )
@@ -4028,9 +4059,6 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
         def current_memory_policy() -> dict:
             return identity.get_context_session(user_id, session_id)["memoryPolicy"]
 
-        def current_preference_memory(policy: dict | None = None) -> PreferenceMemory:
-            return scoped_preference_memory(user_id, session_id, policy or current_memory_policy())
-
         def current_episodic_memory(policy: dict | None = None) -> RealtimeEpisodeMemory:
             return scoped_episodic_memory(user_id, session_id, policy or current_memory_policy())
 
@@ -4053,8 +4081,8 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
             )
             if event_type == "proactive.gate.decision":
                 policy = current_memory_policy()
-                episodic_settings = policy["components"]["episodic"]
-                if episodic_settings["enabled"]:
+                episodic_settings = policy["components"]["timeline"]
+                if episodic_settings["episodic_enabled"]:
                     active_episodic = current_episodic_memory(policy)
                     visible = active_episodic.snapshot(
                         session_id=session_id,
@@ -4190,7 +4218,7 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                 })
                 policy = current_memory_policy()
                 episode = None
-                if policy["components"]["episodic"]["enabled"]:
+                if policy["components"]["timeline"]["episodic_enabled"]:
                     episode = current_episodic_memory(policy).remember(
                         str(evidence.evidence.get("summary", "")),
                         kind="observation",
@@ -4202,8 +4230,8 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                     )
                 apply_memory_hint(
                     session_runtime,
-                    preference_memory=current_preference_memory(policy),
-                    enabled=policy["components"]["preference"]["enabled"],
+                    episodic_memory=current_episodic_memory(policy),
+                    enabled=policy["components"]["timeline"]["preference_enabled"],
                 )
                 journal.append_state_checkpoint(
                     runtime_checkpoint(session_runtime),
@@ -4270,10 +4298,14 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
         media_audit = MediaAuditAccumulator(session_trace)
 
         def session_tool_declarations() -> list[dict]:
-            return (
+            skill_tools = (
                 executable_tool_declarations(runtime_tool_declarations(session_runtime.skill))
                 if session_runtime.skill else []
             )
+            # Platform tools are always available regardless of skill state.
+            # Currently empty; add entries here when a platform executor is connected.
+            platform_tools: list[dict] = []
+            return skill_tools + platform_tools
 
         def execute_session_tool(
             name: str, arguments: dict, confirmed: bool, origin: dict | None = None,
@@ -4501,7 +4533,6 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                         harness,
                         bg_runtime,
                         persist_runtime_checkpoint=False,
-                        preference_memory=current_preference_memory(),
                         episodic_memory=current_episodic_memory(),
                         user_scope=user_id,
                         semantic_decision=bg_semantic,
@@ -4722,7 +4753,6 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                         turn_id, text, source="input-audio-transcript",
                     ),
                     persist_runtime_checkpoint=not background_intent,
-                    preference_memory=current_preference_memory(),
                     episodic_memory=current_episodic_memory(),
                     user_scope=user_id,
                     semantic_decision=semantic,
@@ -4920,7 +4950,6 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                     bridge_override=bridge,
                     harness_override=harness,
                     tools_override=session_tools,
-                    memory_override=current_preference_memory(),
                     episodic_override=current_episodic_memory(),
                     media_override=session_media_configuration,
                     user_scope=user_id,
@@ -5265,8 +5294,8 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
             refresh_harness_context(bridge, harness, session_runtime)
             initial_hint, initial_recall = apply_memory_hint(
                 session_runtime,
-                preference_memory=current_preference_memory(),
-                enabled=current_memory_policy()["components"]["preference"]["enabled"],
+                episodic_memory=current_episodic_memory(),
+                enabled=current_memory_policy()["components"]["timeline"]["preference_enabled"],
             )
             if initial_recall:
                 journal.append_state_checkpoint(runtime_checkpoint(session_runtime), reason="memory-recall")
@@ -5277,7 +5306,6 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                 bridge_override=bridge,
                 harness_override=harness,
                 tools_override=session_tools,
-                memory_override=current_preference_memory(),
                 episodic_override=current_episodic_memory(),
                 media_override=session_media_configuration,
                 user_scope=user_id,
@@ -5373,7 +5401,6 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                         bridge_override=bridge,
                         harness_override=harness,
                         tools_override=session_tools,
-                        memory_override=current_preference_memory(),
                         episodic_override=current_episodic_memory(),
                         media_override=session_media_configuration,
                         user_scope=user_id,
@@ -5493,7 +5520,7 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
             notification = None
             ntfy_topic = str(os.getenv("EGOASSIST_NTFY_TOPIC", "")).strip()
             if ntfy_topic:
-                notification = NtfyNotificationPort(
+                notification = NtfyNotificationAdapter(
                     ntfy_topic,
                     server=os.getenv("EGOASSIST_NTFY_SERVER", "https://ntfy.sh"),
                     token=os.getenv("EGOASSIST_NTFY_TOKEN"),
@@ -5585,6 +5612,7 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
         web.post("/api/sessions/memory-policy", post_memory_policy),
         web.get("/api/state", get_state),
         web.get("/api/memory/state", get_memory_state),  # Phase 1: memory observability
+        web.get("/api/memory/timeline", get_timeline_memory),  # unified TimelineMemory view
         web.get("/api/background-tasks", get_background_tasks),  # Phase 2A: task queue
         web.get("/api/artifacts", get_artifacts),
         web.get("/api/artifacts/{artifact_id}/content", get_artifact_content),

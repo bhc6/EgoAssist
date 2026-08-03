@@ -12,7 +12,7 @@ import aiohttp
 from .contracts import HumanHelpReceipt, HumanHelpRequest
 
 
-class WebhookHumanHelpPort:
+class WebhookHumanHelpAdapter:
     def __init__(
         self,
         endpoint: str,
@@ -32,7 +32,7 @@ class WebhookHumanHelpPort:
         self._session_factory = session_factory
 
     @classmethod
-    def from_env(cls) -> "WebhookHumanHelpPort | None":
+    def from_env(cls) -> "WebhookHumanHelpAdapter | None":
         endpoint = str(os.getenv("EGOASSIST_HUMAN_HELP_WEBHOOK", "")).strip()
         if not endpoint:
             return None

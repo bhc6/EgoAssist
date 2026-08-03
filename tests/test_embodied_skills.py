@@ -160,3 +160,66 @@ def test_router_activates_domain_without_silently_selecting_default_task():
     exact = registry.route("请指导我做水果沙拉")
     assert exact["selectedSkill"] == "kitchen-coach"
     assert exact["selectedTask"] == "fruit-salad"
+
+
+def test_task_without_skill_is_supported(tmp_path):
+    registry = SkillRegistry(BUILTIN_SKILLS_ROOT)
+    runtime = SkillRuntime(registry, None)
+
+    # create_task must work without any skill loaded
+    runtime.create_task({
+        "id": "free-form-errand", "title": "买菜", "version": "test-1",
+        "role": "生活助手", "safety_policy": ["谨慎跨马路"],
+        "steps": [
+            {
+                "id": "list", "title": "列清单",
+                "instruction": "确认购物清单。", "completion": "清单已确认",
+                "risk": "low", "source": "user",
+            },
+        ],
+    })
+    assert runtime.skill is None
+    assert runtime.task is not None
+    assert runtime.task.spec.title == "买菜"
+    assert runtime.tasks == {"free-form-errand": runtime.task.spec}
+
+    # context() must use the no-skill+task branch
+    ctx = runtime.context([])
+    assert "没有加载领域 Skill" in ctx
+    assert "自定义任务" in ctx
+    # must NOT fall through to the general no-skill/no-task prompt
+    assert "没有预设任务" not in ctx
+
+    # live_state_text still works without a skill
+    assert runtime.live_state_text() != ""
+
+    # activating a skill clears the skill-less custom task (same lifecycle as skill-scoped custom tasks)
+    runtime.activate("kitchen-coach")
+    assert "free-form-errand" not in runtime.tasks
+
+    # create_task with an active skill that explicitly disables custom tasks must raise
+    restricted_root = tmp_path / "restricted-skill"
+    restricted_root.mkdir(parents=True, exist_ok=True)
+    (restricted_root / "SKILL.md").write_text(
+        "---\nname: restricted-skill\ndescription: No custom tasks allowed.\n---\nFixed-scope skill.",
+        encoding="utf-8",
+    )
+    (restricted_root / "skill.json").write_text(
+        '{"allow_custom_tasks": false, "tools": []}',
+        encoding="utf-8",
+    )
+    restricted_registry = SkillRegistry(restricted_root.parent)
+    runtime2 = SkillRuntime(restricted_registry, None)
+    runtime2.activate("restricted-skill")
+    with pytest.raises(ValueError, match="custom tasks are disabled"):
+        runtime2.create_task({
+            "id": "some-task", "title": "Some Task", "version": "1",
+            "role": "Assistant", "safety_policy": [],
+            "steps": [
+                {
+                    "id": "step-one", "title": "Do it",
+                    "instruction": "Do the thing.", "completion": "Done",
+                    "risk": "low", "source": "user",
+                },
+            ],
+        })

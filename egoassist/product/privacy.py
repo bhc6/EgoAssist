@@ -150,9 +150,6 @@ class OutcomeLedger:
                 handle.write(json.dumps(asdict(record), ensure_ascii=False, sort_keys=True) + "\n")
         return record
 
-    def records(self) -> list[dict[str, Any]]:
-        return [asdict(item) for item in self._records]
-
     def records_for_user(self, user_id: str) -> list[dict[str, Any]]:
         return [asdict(item) for item in self._records if item.user_id == str(user_id)]
 
@@ -269,10 +266,10 @@ class PrivacyGovernance:
                 if policy.get("category") == "memory":
                     cutoff = now.timestamp() - int(policy["retention_days"]) * 86400
                     cutoff_time = datetime.fromtimestamp(cutoff, tz=timezone.utc)
-                    result["deleted"]["memory"] = self.result_memory_retention(user_id, cutoff_time)
+                    result["deleted"]["memory"] = self.apply_memory_retention(user_id, cutoff_time)
         return result
 
-    def result_memory_retention(self, user_id: str, cutoff: datetime) -> dict[str, int]:
+    def apply_memory_retention(self, user_id: str, cutoff: datetime) -> dict[str, int]:
         return self.timeline.apply_retention(user_id=user_id, cutoff=cutoff)
 
     def disclosure(self) -> dict[str, Any]:

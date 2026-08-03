@@ -1,14 +1,14 @@
 from .base import Answer, VLMBackend
 from .mock import MockBackend
 from .real import (
-    DashScopeQwenBackend, GeminiBackend, LocalHFBackend, LocalQwenBackend,
+    DashScopeQwenBackend, GeminiBackend, LocalQwenBackend,
     OpenAIBackend,
 )
 
 __all__ = [
     "Answer", "VLMBackend", "MockBackend",
     "OpenAIBackend", "GeminiBackend", "DashScopeQwenBackend",
-    "LocalQwenBackend", "LocalHFBackend",
+    "LocalQwenBackend",
 ]
 
 

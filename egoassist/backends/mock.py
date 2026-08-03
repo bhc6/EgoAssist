@@ -57,7 +57,8 @@ class MockBackend(VLMBackend):
         return "saw " + ", ".join(uniq)
 
     def answer(self, query: str, evidence_texts: List[str],
-               evidence_frames: Sequence[np.ndarray]) -> Answer:
+               evidence_frames: Sequence[np.ndarray], *,
+               event_time: str | None = None) -> Answer:
         # mock 的回答 = 复述最相关证据；置信度 = 查询与证据帧的余弦相似度（+微噪声）
         q = self.embed_text(query)
         if len(evidence_frames) == 0 or not np.any(q):

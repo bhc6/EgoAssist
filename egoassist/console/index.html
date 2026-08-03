@@ -146,7 +146,30 @@
     </section>
 
     <section class="analysis-grid">
-      <section class="panel"><div class="panel-head"><div><span>MEMORY SUBSYSTEMS</span><h2>记忆边界与召回候选</h2></div><b id="memoryScope"></b></div><div class="memory-controls"><label>实验配置<select id="memoryProfile"></select></label><label class="memory-switch"><input id="preferenceEnabled" type="checkbox"><span>确认偏好</span></label><label>偏好范围<select id="preferenceScope"><option value="case">当前案例</option><option value="participant">当前参与者</option></select></label><label class="memory-switch"><input id="episodicEnabled" type="checkbox"><span>词法情景</span></label><label>情景范围<select id="episodicScope"><option value="case">当前案例</option><option value="participant">当前参与者</option></select></label><span id="memoryPolicyStatus"></span></div><div id="memorySystems" class="system-grid"></div><div id="memoryFlow"></div><div id="retrievalCandidates" class="rank-list"></div><div id="memories" class="archive"></div><div id="episodicRetrieval" class="rank-list"></div><div id="episodicEpisodes" class="archive"></div></section>
+      <section class="panel">
+        <div class="panel-head">
+          <div><span>TIMELINE MEMORY SYSTEM</span><h2>TimelineMemory 统一记忆</h2></div>
+          <b id="memoryScope"></b>
+        </div>
+        <div class="memory-controls">
+          <label>记忆配置<select id="memoryProfile"></select></label>
+          <label class="memory-switch"><input id="timelineEnabled" type="checkbox"><span>记忆开关</span></label>
+          <label>范围<select id="timelineScope"><option value="case">案例</option><option value="participant">参与者</option></select></label>
+          <span id="memoryPolicyStatus"></span>
+        </div>
+        <div id="timelineRetrievalSummary" class="timeline-retrieval-summary"></div>
+        <div id="timelineCards" class="timeline-cards"></div>
+        <details class="memory-legacy-detail">
+          <summary>偏好记忆候选与已确认记录</summary>
+          <div id="memorySystems" class="system-grid"></div>
+          <div id="memoryFlow"></div>
+          <div id="retrievalCandidates" class="rank-list"></div>
+          <div id="memories" class="archive"></div>
+          <div id="memoryCandidate_pref"></div>
+        </details>
+        <div id="episodicRetrieval" class="rank-list" hidden></div>
+        <div id="episodicEpisodes" class="archive" hidden></div>
+      </section>
       <section class="panel"><div class="panel-head"><div><span>TASK HYPOTHESES</span><h2 id="taskTitle">Checkpoint Ledger</h2></div><b id="mapStatus"></b></div><div id="steps" class="checkpoint-list"></div><div id="perceptionEvidence" class="perception-evidence"></div><div id="knowledge" class="knowledge-box"></div></section>
       <section class="panel"><div class="panel-head"><div><span>RUNTIME CONTROL</span><h2>路由、归因与调度</h2></div></div><details open><summary>意图候选与激活证据</summary><pre id="intentRouting"></pre></details><details><summary>用户/助手声道归因</summary><pre id="audioAttribution"></pre></details><div id="scheduler" class="scheduler"></div><p class="tools-title">当前 Skill 工具</p><div id="skillTools" class="quick"></div><p id="toolResult"></p><div id="toolAudit" class="archive"></div><div id="trace" hidden></div></section>
     </section>

@@ -232,20 +232,21 @@ class SkillRuntime:
 
     @property
     def tasks(self) -> dict[str, TaskSpec]:
-        return {**self.skill.task_specs, **self.custom_tasks} if self.skill else {}
+        if self.skill is not None:
+            return {**self.skill.task_specs, **self.custom_tasks}
+        return dict(self.custom_tasks)
 
     def select_task(self, task_id: str) -> None:
-        skill = self._require_skill()
         try:
             spec = self.tasks[task_id]
         except KeyError as exc:
-            raise ValueError(f"unknown task for {skill.name}: {task_id}") from exc
+            ctx = self.skill.name if self.skill is not None else "no-skill"
+            raise ValueError(f"unknown task for {ctx}: {task_id}") from exc
         self.task = TaskSession(spec, event_sink=self._event_sink)
 
     def create_task(self, payload: dict[str, Any] | TaskSpec) -> None:
-        skill = self._require_skill()
-        if not skill.manifest.get("allow_custom_tasks", False):
-            raise ValueError(f"custom tasks are disabled for skill: {skill.name}")
+        if self.skill is not None and not self.skill.manifest.get("allow_custom_tasks", False):
+            raise ValueError(f"custom tasks are disabled for skill: {self.skill.name}")
         spec = payload if isinstance(payload, TaskSpec) else TaskSpec.from_dict(payload, provenance="user-defined")
         self.custom_tasks[spec.id] = spec
         self.select_task(spec.id)
@@ -273,6 +274,16 @@ class SkillRuntime:
         tool_declarations: list[dict[str, Any]] | None = None,
     ) -> str:
         if self.skill is None:
+            if self.task is not None:
+                tools = executable_tool_declarations(tool_declarations or [])
+                tool_text = "\n".join(
+                    f"- {tool['name']}: {tool.get('description', '')}; 需要确认={tool.get('requires_confirmation', True)}"
+                    for tool in tools
+                ) or "- 无额外工具"
+                return (
+                    "你是 EgoAssist，一个通用实时多模态助手。当前没有加载领域 Skill，用户已指定自定义任务。\n\n"
+                    f"{self.task.spec.realtime_instructions(memories)}\n可用工具：\n{tool_text}"
+                )
             return (
                 "你是 EgoAssist，一个通用实时多模态助手。当前没有加载领域 Skill，也没有预设任务。"
                 "先理解用户实际目标；自然回答一般问题。只有证据明确匹配可用 Skill 时才加载它，"
@@ -289,21 +300,25 @@ class SkillRuntime:
             )
             return (
                 "你是一个通用实时具身助手。以下领域 Skill 已因用户意图证据被加载，但具体任务尚未确定。\n\n"
-                f"<skill name=\"{self.skill.name}\">\n{self.skill.instructions}\n</skill>\n\n"
+                f"<skill name=\"{self.skill.name}\">{self.skill.description}</skill>\n\n"
                 + task_guidance
             )
-        snapshot = self.task.snapshot()
-        completed = [item["title"] for item in snapshot["steps"] if item["status"] == "done"]
-        observation = snapshot.get("observation") or {}
-        live_state = (
-            f"\n<runtime_state>当前步骤={self.task.current_step.id}:{self.task.current_step.title}; "
-            f"已确认完成={completed or ['无']}; 暂停={snapshot['paused']}; 总任务完成={snapshot['completed']}; "
-            f"最近观测={observation.get('summary', '无结构化观测')}; "
-            f"控制面决策={snapshot['decision']['action']}:{snapshot['decision']['reason']}</runtime_state>"
-        )
         return (
             self.skill.realtime_instructions(self.task.spec, memories, tool_declarations)
             + f"\n当前 Skill 可切换任务：{catalog}。用户明确说出其中一个任务名称时切换；"
               "若用户目标不是当前任务，先澄清或请求创建任务，绝不把默认任务冒充为用户目标。"
-            + live_state
+        )
+
+    def live_state_text(self) -> str:
+        """Current task runtime state for injection as a separate non-cacheable context layer."""
+        if self.task is None:
+            return ""
+        snapshot = self.task.snapshot()
+        completed = [item["title"] for item in snapshot["steps"] if item["status"] == "done"]
+        observation = snapshot.get("observation") or {}
+        return (
+            f"<runtime_state>当前步骤={self.task.current_step.id}:{self.task.current_step.title}; "
+            f"已确认完成={completed or ['无']}; 暂停={snapshot['paused']}; 总任务完成={snapshot['completed']}; "
+            f"最近观测={observation.get('summary', '无结构化观测')}; "
+            f"控制面决策={snapshot['decision']['action']}:{snapshot['decision']['reason']}</runtime_state>"
         )

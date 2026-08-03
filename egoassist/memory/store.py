@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import threading
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import List, Optional  # noqa: F401 – Optional kept for subclassers
 
 import numpy as np
@@ -29,12 +30,10 @@ class MemoryItem:
     keyframe_times: List[float] = field(default_factory=list)  # 视频内真实相对时间（秒）
     keyframe_meta: List[dict] = field(default_factory=list)
     audio_events: List[dict] = field(default_factory=list)
-    level: str = "short"                                       # short / long
+    tier: str = "short"                                        # short / long
     child_ids: List[int] = field(default_factory=list)         # long 聚合的 short id
-
-    @property
-    def t_center(self) -> float:
-        return 0.5 * (self.t_start + self.t_end)
+    wall_start: Optional[datetime] = None  # 事件开始的真实挂钟时间（带时区），None 表示未知
+    wall_end: Optional[datetime] = None    # 事件结束的真实挂钟时间（带时区）
 
 
 class HierarchicalMemory:
@@ -71,7 +70,8 @@ class HierarchicalMemory:
             item = MemoryItem(id=self._new_id(), t_start=seg.t_start, t_end=seg.t_end,
                               embedding=emb, caption=cap, keyframes=kf,
                               keyframe_times=kf_times, keyframe_meta=kf_meta,
-                              audio_events=audio_events, level="short")
+                              audio_events=audio_events, tier="short",
+                              wall_start=seg.wall_start, wall_end=seg.wall_end)
             self._items_by_id[item.id] = item
             self._index.add(item.id, emb)
             self.short_term.append(item)
@@ -135,13 +135,19 @@ class HierarchicalMemory:
             [meta for _, _, meta in timed_frames],
             8,
         )
+        # 合并后保留最早的 wall_start 和最晚的 wall_end
+        wall_starts = [m.wall_start for m in group if m.wall_start is not None]
+        wall_ends = [m.wall_end for m in group if m.wall_end is not None]
         merged = MemoryItem(
             id=self._new_id(), t_start=group[0].t_start, t_end=group[-1].t_end,
             embedding=emb.astype(np.float32), caption="; ".join(caps[:4]),
             keyframes=kf, keyframe_times=kf_times, keyframe_meta=kf_meta,
             audio_events=[event for m in group for event in m.audio_events],
-            level="long",
-            child_ids=[m.id for m in group])
+            tier="long",
+            child_ids=[m.id for m in group],
+            wall_start=min(wall_starts) if wall_starts else None,
+            wall_end=max(wall_ends) if wall_ends else None,
+        )
         # Batch-remove children from index (O(N) rebuild once vs O(N·k) per-item loop)
         # and purge them from the registry to prevent unbounded memory growth.
         child_ids = [child.id for child in group]
@@ -172,13 +178,6 @@ class HierarchicalMemory:
 
 
 # ---- helpers ----
-def _subsample(frames: List[np.ndarray], k: int) -> List[np.ndarray]:
-    if len(frames) <= k:
-        return list(frames)
-    idx = np.linspace(0, len(frames) - 1, k).round().astype(int)
-    return [frames[i] for i in idx]
-
-
 def _subsample_timed(
     frames: List[np.ndarray], times: List[float], metadata: List[dict], k: int
 ) -> tuple[List[np.ndarray], List[float], List[dict]]:

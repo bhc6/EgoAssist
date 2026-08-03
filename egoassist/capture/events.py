@@ -8,7 +8,8 @@ always-on、隐私友好的分段线索，能省电又提升定位）。
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Iterable, Iterator, List
+from datetime import datetime
+from typing import Iterable, Iterator, List, Optional
 
 import numpy as np
 
@@ -28,6 +29,8 @@ class Segment:
     audio_times: List[float] = field(default_factory=list)
     gaze: list = field(default_factory=list)
     gaze_times: List[float] = field(default_factory=list)
+    wall_start: Optional[datetime] = None  # 事件开始的真实挂钟时间（带时区）
+    wall_end: Optional[datetime] = None    # 事件结束的真实挂钟时间（带时区）
 
     @property
     def duration(self) -> float:
@@ -66,12 +69,16 @@ def segment_stream(stream: Iterable[FrameEvent], cfg: Config) -> Iterator[Segmen
         if boundary:
             if cur is not None:
                 yield cur
-            cur = Segment(t_start=ev.t, t_end=ev.t)
+            cur = Segment(t_start=ev.t, t_end=ev.t,
+                          wall_start=ev.wall_time, wall_end=ev.wall_time)
 
         cur.frames.append(ev.frame)
         cur.frame_times.append(ev.t)
         cur.frame_meta.append(dict(ev.meta))
         cur.t_end = ev.t
+        # 始终更新 wall_end（取最后一帧的挂钟时间），wall_start 在切边界时已设定
+        if ev.wall_time is not None:
+            cur.wall_end = ev.wall_time
         if ev.audio:
             cur.audio.append(ev.audio)
             cur.audio_times.append(ev.t)

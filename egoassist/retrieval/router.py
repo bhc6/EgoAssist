@@ -46,14 +46,12 @@ def route_and_retrieve(query: str, mem: HierarchicalMemory, backend: VLMBackend,
         pool = candidates_raw
     pool = list({item.id: item for item in pool}.values())
 
-    # 3) 打分：余弦相似度（已由索引提供）+ 时间近因偏置
+    # 3) 打分：纯余弦相似度（P1 核心机制；recency bias 已移除，由层路由负责时间感知）
     if not pool:
         return []
-    t_max = max(m.t_end for m in pool) + 1e-6
     cands: List[Candidate] = []
     for m in pool:
         sim = float(np.dot(q, m.embedding)) if np.any(q) else 0.0
-        recency = m.t_end / t_max
-        cands.append(Candidate(item=m, score=sim + cfg.router_recent_bias * recency))
+        cands.append(Candidate(item=m, score=sim))
     cands.sort(key=lambda c: c.score, reverse=True)
     return cands[: cfg.retrieve_topk]

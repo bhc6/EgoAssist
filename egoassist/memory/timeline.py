@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import math
 import re
 import sqlite3
 import threading
@@ -12,10 +11,8 @@ import unicodedata
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Callable, Iterable, Mapping, Sequence
+from typing import Any, Callable, Iterable, Mapping
 from uuid import uuid4
-
-import numpy as np
 
 from .temporal import ClockContext, query_time_range
 
@@ -37,34 +34,36 @@ class _ClosingConnection:
             self._connection.close()
 
 
-TIMELINE_SCHEMA_VERSION = 2
+TIMELINE_SCHEMA_VERSION = 3
 MEMORY_KINDS = {
     "fact", "event", "state", "preference", "task-preference",
     "scene", "observation", "tool-effect", "capture", "legacy",
 }
 RETRIEVABLE_KINDS = MEMORY_KINDS - {"capture"}
 DEFAULT_RETRIEVABLE_KINDS = RETRIEVABLE_KINDS - {"legacy", "scene"}
-DEFAULT_RETRIEVAL_MIN_SCORE = 0.18
+# Minimum lexical score for a candidate to be selected. Calibrated for the
+# CLEAN pure-lexical P2 baseline: the score IS the raw lexical similarity
+# (Jaccard ∪ BM25 in [0, 1]), with NO structured/recency bias inflating it.
+# Genuine multi-term entity matches land at ~0.09–0.13 (e.g. a shared name
+# contributes bigram + trigram overlap); true negatives are already zeroed
+# upstream by the kind/time/subject eligibility gates and never reach this
+# floor. 0.05 admits real lexical evidence with margin below the lowest true
+# positive, while rejecting a lone incidental-bigram brush. The old 0.18 was
+# a holdover from the hybrid formula (lexical·0.26 + structured + recency) and
+# sat ABOVE every genuine pure-lexical positive — hence the under-retrieval.
+DEFAULT_RETRIEVAL_MIN_SCORE = 0.05
 MEMORY_STATUSES = {"active", "pending", "consolidated", "superseded", "deleted", "consumed"}
 MEMORY_SCOPES = {"case", "participant"}
 MEMORY_TIERS = {"short", "long"}
 
 _LATIN = re.compile(r"[a-z0-9]+", re.I)
 _CJK = re.compile(r"[\u4e00-\u9fff\u3400-\u4dbf\u3040-\u309f\u30a0-\u30ff\uac00-\ud7a3]")
-_DIGITS = re.compile(r"\d+")
 _QUESTION_PREFIXES = (
     "who", "what", "where", "when", "why", "how", "which", "can you", "do you",
     "谁", "什么", "哪里", "哪儿", "何时", "什么时候", "为什么", "怎么", "如何",
     "有没有", "是否", "请问", "帮我看", "帮我查", "记得吗",
 )
-_RECENT_HINTS = (
-    "just now", "a moment ago", "recently", "刚才", "刚刚", "方才", "最近", "现在",
-)
 _TODAY_HINTS = ("today", "tonight", "今天", "今晚", "今早", "今晨", "今中午")
-_LONG_HINTS = (
-    "yesterday", "last week", "usually", "every day", "habit", "routine", "以前", "过去",
-    "昨天", "上周", "通常", "每天", "习惯", "一直",
-)
 
 
 @dataclass(frozen=True)
@@ -81,9 +80,7 @@ class LanguageHints:
     question_markers: tuple[str, ...] = field(
         default=("吗", "么", "什么", "哪儿", "哪里", "怎么", "为何"),
     )
-    recent_hints: tuple[str, ...] = field(default=_RECENT_HINTS)
     today_hints: tuple[str, ...] = field(default=_TODAY_HINTS)
-    long_hints: tuple[str, ...] = field(default=_LONG_HINTS)
 
 
 _DEFAULT_HINTS: LanguageHints = LanguageHints()
@@ -91,31 +88,20 @@ _DEFAULT_HINTS: LanguageHints = LanguageHints()
 
 @dataclass(frozen=True)
 class ScoringWeights:
-    """Scoring formula coefficients and bonus terms for ``TimelineMemory.retrieve()``.
+    """Scoring parameters for ``TimelineMemory.retrieve()``.
 
-    All defaults were tuned on a bilingual zh-CN/en dataset with
-    ``HashingMemoryEncoder`` (weak semantic signal, ``semantic_coeff``
-    contributes near zero in practice).  Adjust when swapping in a production
-    semantic encoder or deploying in a new language.
+    P2 (TimelineMemory) is the CLEAN pure-lexical leg of the two-pipeline
+    comparison against P1 (HierarchicalMemory, dense vectors). The retrieval
+    score IS the lexical similarity (Jaccard ∪ normalised BM25, both in [0, 1]) —
+    there are deliberately NO score priors: no semantic/embedding signal, no
+    structured-match bonus, no recency decay, no mixing coefficient. Those were
+    inductive biases that muddied the contrast against P1's semantic retrieval.
+
+    Subject/predicate/time relevance is enforced upstream as HARD eligibility
+    filters (query constraints, not score adjustments), so the two knobs that
+    remain here are purely mechanical: how to normalise BM25 into [0, 1], and the
+    minimum lexical evidence a candidate needs to be selected.
     """
-
-    # Primary mixing coefficients
-    semantic_coeff: float = 0.62
-    lexical_coeff: float = 0.26
-
-    # Layer-routing penalties
-    layer_penalty_recent_long: float = 0.2   # recent query, card is in long layer
-    layer_penalty_long_current: float = 0.06  # long-term query, card is current
-
-    # Bonus terms
-    digit_overlap_bonus: float = 0.12
-    kind_bonus_fact: float = 0.08   # fact / state / tool-effect
-    kind_bonus_event: float = 0.04  # event / preference / task-preference
-    structured_full_bonus: float = 0.24   # subject + predicate both match
-    structured_half_bonus: float = 0.14   # only subject or predicate matches
-    today_time_bonus: float = 0.08
-    recency_half_life_days: float = 7.0
-    recency_max_weight: float = 0.08
 
     # FTS5 score normalisation (bm25 returns negative values; divide to [0, 1])
     fts_normalization_divisor: float = 10.0
@@ -221,47 +207,6 @@ def memory_terms(text: str) -> set[str]:
     return {item for item in terms if item}
 
 
-class HashingMemoryEncoder:
-    """Small deterministic encoder; production adapters may inject a semantic encoder."""
-
-    def __init__(
-        self,
-        dimension: int = 384,
-        *,
-        tokenize_fn: Callable[[str], set[str]] | None = None,
-        token_weight_fn: Callable[[str], float] | None = None,
-    ) -> None:
-        """
-        Args:
-            dimension: embedding vector length (≥ 64).
-            tokenize_fn: replace the default ``memory_terms`` tokenizer.  Override
-                for scripts where the CJK/Latin extraction yields no tokens
-                (Arabic, Thai, Devanagari, etc.).
-            token_weight_fn: replace the default length-based weight.  The built-in
-                weights (0.55 for len-1, 1.0 for len-2, 1.2 for len≥3) were tuned
-                for CJK/Latin; deployments where single-char tokens are morphemically
-                meaningful should return a higher weight for ``len(token) == 1``.
-        """
-        if dimension < 64:
-            raise ValueError("memory embedding dimension must be at least 64")
-        self.dimension = int(dimension)
-        self._tokenize: Callable[[str], set[str]] = tokenize_fn or memory_terms
-        self._weight: Callable[[str], float] = token_weight_fn or (
-            lambda token: 1.2 if len(token) >= 3 else 1.0 if len(token) == 2 else 0.55
-        )
-
-    def __call__(self, text: str) -> np.ndarray:
-        vector = np.zeros(self.dimension, dtype=np.float32)
-        for token in self._tokenize(text):
-            digest = hashlib.blake2b(token.encode("utf-8"), digest_size=8).digest()
-            raw = int.from_bytes(digest, "little", signed=False)
-            index = raw % self.dimension
-            sign = -1.0 if raw & (1 << 63) else 1.0
-            vector[index] += sign * self._weight(token)
-        norm = float(np.linalg.norm(vector))
-        return vector / norm if norm else vector
-
-
 class TimelineMemory:
     """One durable timeline with current, short-term, and long-term views."""
 
@@ -269,23 +214,15 @@ class TimelineMemory:
         self,
         path: str | Path,
         *,
-        encoder: Callable[[str], Sequence[float] | np.ndarray] | None = None,
-        language_hints: LanguageHints | None = None,
-        scoring_weights: ScoringWeights | None = None,
-        tokenize_fn: Callable[[str], set[str]] | None = None,
         current_window_seconds: float = 600.0,
         short_term_capacity: int = 40,
         event_sink: Callable[..., Any] | None = None,
     ) -> None:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.encoder = encoder or HashingMemoryEncoder()
-        self._hints: LanguageHints = language_hints or _DEFAULT_HINTS
-        self._weights: ScoringWeights = scoring_weights or _DEFAULT_WEIGHTS
-        # tokenize_fn is used for both query and card-text term extraction in
-        # retrieve().  Defaults to module-level memory_terms (CJK + Latin).
-        # Override for scripts that the default tokenizer cannot handle.
-        self._tokenize: Callable[[str], set[str]] = tokenize_fn or memory_terms
+        self._hints: LanguageHints = _DEFAULT_HINTS
+        self._weights: ScoringWeights = _DEFAULT_WEIGHTS
+        self._tokenize: Callable[[str], set[str]] = memory_terms
         self.current_window_seconds = float(current_window_seconds)
         self.short_term_capacity = int(short_term_capacity)
         if self.current_window_seconds <= 0 or self.short_term_capacity < 4:
@@ -354,8 +291,6 @@ class TimelineMemory:
                     subject TEXT,
                     predicate TEXT,
                     value TEXT,
-                    embedding BLOB NOT NULL,
-                    embedding_dim INTEGER NOT NULL,
                     source_ids TEXT NOT NULL,
                     status TEXT NOT NULL,
                     importance REAL NOT NULL,
@@ -397,12 +332,21 @@ class TimelineMemory:
                 version = conn.execute(
                     "SELECT value FROM timeline_meta WHERE key='schema_version'"
                 ).fetchone()
-                if version and int(version["value"]) not in {1, TIMELINE_SCHEMA_VERSION}:
+                if version and int(version["value"]) not in {1, 2, TIMELINE_SCHEMA_VERSION}:
                     raise ValueError(f"unsupported timeline schema version: {version['value']}")
                 columns = {
                     str(row["name"])
                     for row in conn.execute("PRAGMA table_info(memory_cards)").fetchall()
                 }
+                # v3: drop the write-only embedding columns.  They were persisted on
+                # every insert but never read back (retrieval is FTS5 + Jaccard only),
+                # so removing them is lossless.  SQLite 3.35+ supports DROP COLUMN.
+                for legacy_column in ("embedding", "embedding_dim"):
+                    if legacy_column in columns:
+                        conn.execute(
+                            f"ALTER TABLE memory_cards DROP COLUMN {legacy_column}"
+                        )
+                        columns.discard(legacy_column)
                 migrations = {
                     "recorded_at": "TEXT",
                     "effective_at": "TEXT",
@@ -419,6 +363,11 @@ class TimelineMemory:
                         conn.execute(
                             f"ALTER TABLE memory_cards ADD COLUMN {column} {declaration}"
                         )
+                # v2 → v3: drop the write-only embedding columns.  Retrieval scores
+                # purely via FTS5 + Jaccard; the encoder vector was never read back.
+                for column in ("embedding", "embedding_dim"):
+                    if column in columns:
+                        conn.execute(f"ALTER TABLE memory_cards DROP COLUMN {column}")
                 conn.execute(
                     """UPDATE memory_cards
                        SET recorded_at=COALESCE(recorded_at, created_at),
@@ -530,13 +479,7 @@ class TimelineMemory:
             memory_key = generated_key
         recurrence_json = json.dumps(recurrence, ensure_ascii=False, sort_keys=True) if recurrence else "null"
         normalized = normalize_text(text)
-        vector = np.asarray(self.encoder(text), dtype=np.float32).reshape(-1)
-        if not vector.size or not np.all(np.isfinite(vector)):
-            raise ValueError("memory encoder returned an invalid vector")
-        norm = float(np.linalg.norm(vector))
-        if norm:
-            vector = vector / norm
-        source_values = list(dict.fromkeys(str(value) for value in source_ids if value))
+        source_values = list(dict.fromkeys(str(source_id) for source_id in source_ids if source_id))
         explicit_card_id = card_id is not None
         card_id = str(card_id or uuid4().hex[:16])
         supersedes_id = None
@@ -582,14 +525,14 @@ class TimelineMemory:
             connection.execute(
                 """INSERT INTO memory_cards(
                     id, user_id, case_id, scope, tier, kind, text, normalized_text,
-                    memory_key, happened_at, day_key, embedding, embedding_dim,
+                    memory_key, happened_at, day_key,
                     source_ids, status, importance, supersedes, metadata, created_at, updated_at,
                     recorded_at, effective_at, effective_end, timezone_name, utc_offset_minutes, recurrence,
                     subject, predicate, value
-                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     card_id, user_id, case_id, scope, tier, kind, text, normalized,
-                    memory_key, happened, _day_key(happened, timezone_name, utc_offset_minutes), vector.tobytes(), vector.size,
+                    memory_key, happened, _day_key(happened, timezone_name, utc_offset_minutes),
                     json.dumps(source_values, ensure_ascii=False), status,
                     max(0.0, min(1.0, float(importance))), supersedes_id,
                     json.dumps(dict(metadata or {}), ensure_ascii=False, sort_keys=True), now, now,
@@ -922,9 +865,6 @@ class TimelineMemory:
         query_predicate = normalize_identity(query_spec.get("predicate"))
         query_normalized = normalize_text(query)
         query_terms = self._tokenize(query)
-        query_vector = np.asarray(self.encoder(query), dtype=np.float32).reshape(-1)
-        if np.linalg.norm(query_vector):
-            query_vector = query_vector / np.linalg.norm(query_vector)
         requested_kinds = set(DEFAULT_RETRIEVABLE_KINDS if kinds is None else kinds)
         requested_kinds.discard("capture")
         clauses = ["user_id=?", "scope=?", "status='active'"]
@@ -962,9 +902,7 @@ class TimelineMemory:
                     if fast_card_id not in existing_ids:
                         rows = [fast_row] + list(rows)
 
-        wants_recent = any(marker in query_normalized for marker in self._hints.recent_hints)
         wants_today = any(marker in query_normalized for marker in self._hints.today_hints)
-        wants_long = any(marker in query_normalized for marker in self._hints.long_hints)
         today_key = clock.local_now.date().isoformat()
         range_start, range_end = query_time_range(query, clock)
 
@@ -976,11 +914,13 @@ class TimelineMemory:
                 row_ids = [row["id"] for row in rows]
                 placeholders = ",".join("?" * len(row_ids))
                 with self._lock, self._connect() as fts_conn:
+                    # bm25() must reference the FTS5 table by its real name, not a
+                    # SQL alias — `bm25(mf)` raises "no such column: mf".
                     fts_rows = fts_conn.execute(
-                        f"""SELECT mc.id, bm25(mf) as score
-                            FROM memory_fts mf
-                            JOIN memory_cards mc ON mc.rowid = mf.rowid
-                            WHERE mf MATCH ?
+                        f"""SELECT mc.id, bm25(memory_fts) as score
+                            FROM memory_fts
+                            JOIN memory_cards mc ON mc.rowid = memory_fts.rowid
+                            WHERE memory_fts MATCH ?
                               AND mc.id IN ({placeholders})""",
                         [fts_query_str] + row_ids,
                     ).fetchall()
@@ -992,16 +932,14 @@ class TimelineMemory:
 
         candidates = []
         for row in rows:
-            card = self._row_to_card(row, include_embedding=True)
+            card = self._row_to_card(row)
             happened = _parse_time(card["happenedAt"])
             age_seconds = max(0.0, (now.astimezone(timezone.utc) - happened).total_seconds())
+            # `layer` is a DERIVED retrieval-time axis, not stored state: a recent
+            # card surfaces as "current"; otherwise it falls back to its persisted
+            # `tier` (short/long). The two persisted axes are `tier` (this card's
+            # consolidation level) and `kind` (its semantic type).
             layer = "current" if age_seconds <= self.current_window_seconds else card["tier"]
-            if wants_recent and layer == "long":
-                layer_penalty = self._weights.layer_penalty_recent_long
-            elif wants_long and layer == "current":
-                layer_penalty = self._weights.layer_penalty_long_current
-            else:
-                layer_penalty = 0.0
             if (wants_today or range_start is not None) and card["dayKey"] != today_key and range_start is None:
                 time_eligible = card["kind"] in {"preference", "fact", "state", "task-preference"}
             else:
@@ -1026,55 +964,35 @@ class TimelineMemory:
             fts_score = fts_scores.get(card["id"], 0.0)
             lexical = max(lexical, fts_score)
 
-            vector = card.pop("_embedding")
-            semantic = float(np.dot(query_vector, vector)) if query_vector.size == vector.size else 0.0
-            semantic = max(0.0, semantic)
-            semantic_evidence = (
-                not isinstance(self.encoder, HashingMemoryEncoder)
-                and semantic >= 0.25
-            )
-            _w = self._weights
-            digit_bonus = _w.digit_overlap_bonus if set(_DIGITS.findall(query_normalized)) & set(_DIGITS.findall(card["normalizedText"])) else 0.0
-            kind_bonus = _w.kind_bonus_fact if card["kind"] in {"fact", "state", "tool-effect"} else _w.kind_bonus_event if card["kind"] in {"event", "preference", "task-preference"} else 0.0
-            structured_bonus = (
-                _w.structured_full_bonus if query_subject and query_predicate and subject_eligible and predicate_eligible
-                else _w.structured_half_bonus if (query_subject and subject_eligible) or (query_predicate and predicate_eligible)
-                else 0.0
-            )
-            time_bonus = _w.today_time_bonus if wants_today and time_eligible and card["dayKey"] == today_key else 0.0
-            recency = math.exp(-age_seconds / (_w.recency_half_life_days * 86400.0)) * _w.recency_max_weight
-            score = max(
-                0.0,
-                _w.semantic_coeff * semantic + _w.lexical_coeff * lexical + digit_bonus + kind_bonus
-                + structured_bonus + time_bonus + recency - layer_penalty,
-            )
+            # P2 is a CLEAN pure-lexical baseline: the score IS the lexical
+            # similarity (Jaccard ∪ BM25, already normalised to [0, 1]). No
+            # structured-match bonus, no recency decay, no mixing coefficient —
+            # those were inductive biases that muddied the contrast against P1's
+            # dense-vector retrieval. Subject/predicate/time remain as HARD
+            # eligibility filters below (query constraints, not score priors).
+            score = max(0.0, lexical)
             structured_match = bool(query_subject or query_predicate) and subject_eligible and predicate_eligible
-            fallback_card = card.get("metadata", {}).get("source") == "semantic-memory-fallback"
-            fallback_match = fallback_card and lexical >= 0.18
             eligible = time_eligible and subject_eligible and predicate_eligible and (
-                structured_match or overlap > 0 or semantic_evidence
+                structured_match or overlap > 0
             )
-            if fallback_match and time_eligible:
-                eligible = True
-            # Pinned fast-path cards (direct key lookup) always qualify
-            if card["id"] in pinned_card_ids:
+            # Pinned fast-path cards (direct key lookup) qualify on the strength of
+            # their canonical structured key, bypassing the lexical-overlap floor —
+            # but they must still fall inside any time window the query asked about.
+            # A canonical fact recorded outside the asked-about range is not an
+            # answer to a time-scoped question (e.g. "did I take my meds at 3pm?"
+            # must not surface the 4pm dose just because it shares the same key).
+            if card["id"] in pinned_card_ids and time_eligible:
                 score = 1.0
                 eligible = True
             reasons = []
             if overlap:
                 reasons.append("term-overlap")
-            if semantic_evidence:
-                reasons.append("embedding-similarity")
             if query_subject and subject_eligible:
                 reasons.append("subject-match")
             if query_predicate and predicate_eligible:
                 reasons.append("predicate-match")
             if wants_today:
                 reasons.append("today-filter" if time_eligible else "outside-today")
-            if wants_recent:
-                reasons.append("recent-layer-routing")
-            elif wants_long:
-                reasons.append("long-layer-routing")
             candidates.append({
                 "cardId": card["id"],
                 "score": round(score if eligible else 0.0, 4),
@@ -1108,9 +1026,7 @@ class TimelineMemory:
             "query": str(query),
             "scope": {"user": str(user_id), "case": case_id, "memoryScope": scope},
             "routing": {
-                "recent": wants_recent,
                 "today": wants_today,
-                "longTerm": wants_long,
                 "layers": ["current", "short", "long"],
                 "clock": clock.prompt_payload(),
                 "querySpec": {"subject": query_subject, "predicate": query_predicate},
@@ -1122,7 +1038,13 @@ class TimelineMemory:
             "claimBoundary": "Entity and civil-time constraints are applied before lexical/embedding ranking; retrieval does not infer an answer.",
         }
 
-    def consolidate(self, *, user_id: str, case_id: str | None, scope: str) -> dict[str, Any]:
+    def promote_to_long(self, *, user_id: str, case_id: str | None, scope: str) -> dict[str, Any]:
+        """Losslessly promote the oldest 'short' cards to the 'long' tier.
+
+        Distinct from ``HierarchicalMemory.consolidate`` (P1), which does a lossy
+        merge-clustering of episodes; this P2 path re-``remember``s each source card
+        unchanged at ``tier='long'`` and marks the original ``consolidated``.
+        """
         active_short = self.cards(
             user_id=user_id, case_id=case_id if scope == "case" else None,
             scope=scope, statuses=("active",),
@@ -1259,7 +1181,7 @@ class TimelineMemory:
         return imported_count
 
     @staticmethod
-    def _row_to_card(row: sqlite3.Row, *, include_embedding: bool = False) -> dict[str, Any]:
+    def _row_to_card(row: sqlite3.Row) -> dict[str, Any]:
         card = {
             "id": str(row["id"]),
             "userId": str(row["user_id"]),
@@ -1289,10 +1211,6 @@ class TimelineMemory:
             "createdAt": str(row["created_at"]),
             "updatedAt": str(row["updated_at"]),
         }
-        if include_embedding:
-            card["_embedding"] = np.frombuffer(
-                row["embedding"], dtype=np.float32, count=int(row["embedding_dim"]),
-            ).copy()
         return card
 
     @staticmethod

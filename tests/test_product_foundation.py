@@ -19,8 +19,8 @@ from egoassist.product import (
     product_span,
 )
 from egoassist.product.models import ConversationTurnRow
-from egoassist.product.artifacts import LocalArtifactPort
-from egoassist.product.human_help import WebhookHumanHelpPort
+from egoassist.product.artifacts import LocalArtifactAdapter
+from egoassist.product.human_help import WebhookHumanHelpAdapter
 from egoassist.realtime import CaseWorkLedger, SessionJournal
 
 
@@ -119,7 +119,7 @@ def test_local_artifact_port_scopes_catalog_and_rejects_path_escape(tmp_path):
     root.mkdir()
     reference = root / "reference.pdf"
     reference.write_bytes(b"%PDF-test")
-    port = LocalArtifactPort([{
+    port = LocalArtifactAdapter([{
         "id": "reference-1", "root": root, "path": "reference.pdf",
         "mediaType": "application/pdf", "skill": "assembly-coach",
         "tasks": ["task-1"], "steps": ["step-1"],
@@ -138,7 +138,7 @@ def test_local_artifact_port_scopes_catalog_and_rejects_path_escape(tmp_path):
     outside = tmp_path / "outside.pdf"
     outside.write_bytes(b"%PDF-outside")
     with pytest.raises(ValueError, match="under its Skill"):
-        LocalArtifactPort([{
+        LocalArtifactAdapter([{
             "id": "escaped", "root": root, "path": "../outside.pdf",
             "mediaType": "application/pdf",
         }])
@@ -178,7 +178,7 @@ def test_human_help_connector_preserves_idempotency_and_receipt(monkeypatch):
         connector="webhook", purpose="task assistance", preview={"message": "please help"},
         consent_id="consent-1", idempotency_key="help:help-1",
     )
-    port = WebhookHumanHelpPort(
+    port = WebhookHumanHelpAdapter(
         "https://help.example.test/intake", token="secret", timeout_seconds=3,
         session_factory=Session,
     )

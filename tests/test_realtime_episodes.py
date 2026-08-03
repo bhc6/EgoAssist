@@ -23,7 +23,7 @@ def test_realtime_episode_memory_persists_summaries_without_raw_media(tmp_path):
     result = restored.retrieve("番茄放在哪里")
     assert result["selected"] == []
     assert result["candidates"] == []
-    assert result["minimumScore"] == 0.18
+    assert result["minimumScore"] == 0.05
 
 
 def test_realtime_episode_memory_deduplicates_adjacent_identical_events(tmp_path):

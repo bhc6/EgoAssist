@@ -51,10 +51,6 @@ class PreferenceMemory:
     def _candidate_key(candidate_scope: str | None) -> str:
         return str(candidate_scope or "__default__")
 
-    @property
-    def candidate(self) -> dict[str, Any] | None:
-        return self._candidate(None)
-
     def snapshot(self, *, candidate_scope: str | None = None) -> dict[str, Any]:
         with self._lock:
             candidate_key = self._candidate_key(candidate_scope)

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from contextlib import contextmanager
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
@@ -54,9 +53,6 @@ class ProductDatabase:
 
     def create_schema(self) -> None:
         Base.metadata.create_all(self.engine)
-
-    def drop_schema(self) -> None:
-        Base.metadata.drop_all(self.engine)
 
     def close(self) -> None:
         """Release pooled connections when the runtime root is shut down."""

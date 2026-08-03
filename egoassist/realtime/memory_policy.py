@@ -5,26 +5,46 @@ from __future__ import annotations
 from copy import deepcopy
 from typing import Any, Mapping
 
+from ..memory.timeline import MEMORY_SCOPES
 
-MEMORY_POLICY_VERSION = 1
-MEMORY_SCOPES = {"case", "participant"}
 
+MEMORY_POLICY_VERSION = 2
+
+# Single unified 'timeline' component replaces the former split
+# 'preference' + 'episodic' components.  Both sub-flags are now fields
+# on the same object, matching the unified RealtimeEpisodeMemory API.
 _PROFILES: dict[str, dict[str, Any]] = {
     "all-online": {
-        "preference": {"enabled": True, "scope": "participant"},
-        "episodic": {"enabled": True, "scope": "case"},
+        "timeline": {
+            "enabled": True,
+            "preference_enabled": True,
+            "episodic_enabled": True,
+            "scope": "case",
+        },
     },
     "context-only": {
-        "preference": {"enabled": False, "scope": "case"},
-        "episodic": {"enabled": False, "scope": "case"},
+        "timeline": {
+            "enabled": False,
+            "preference_enabled": False,
+            "episodic_enabled": False,
+            "scope": "case",
+        },
     },
     "confirmed-preference": {
-        "preference": {"enabled": True, "scope": "participant"},
-        "episodic": {"enabled": False, "scope": "case"},
+        "timeline": {
+            "enabled": True,
+            "preference_enabled": True,
+            "episodic_enabled": False,
+            "scope": "participant",
+        },
     },
     "lexical-episodic": {
-        "preference": {"enabled": False, "scope": "case"},
-        "episodic": {"enabled": True, "scope": "case"},
+        "timeline": {
+            "enabled": True,
+            "preference_enabled": False,
+            "episodic_enabled": True,
+            "scope": "case",
+        },
     },
 }
 
@@ -64,27 +84,34 @@ def normalize_memory_policy(value: Mapping[str, Any] | None = None) -> dict[str,
     if not isinstance(raw_components, Mapping):
         raise ValueError("memory components must be an object")
 
-    for name in ("preference", "episodic"):
-        override = raw_components.get(name)
-        if override is None:
-            continue
+    override = raw_components.get("timeline")
+    if override is not None:
         if isinstance(override, bool):
-            components[name]["enabled"] = override
-            continue
-        if not isinstance(override, Mapping):
-            raise ValueError(f"memory component {name} must be a boolean or object")
-        unknown = set(override) - {"enabled", "scope"}
-        if unknown:
-            raise ValueError(f"unknown {name} memory settings: {', '.join(sorted(unknown))}")
-        if "enabled" in override:
-            if not isinstance(override["enabled"], bool):
-                raise ValueError(f"{name}.enabled must be a boolean")
-            components[name]["enabled"] = override["enabled"]
-        if "scope" in override:
-            scope = str(override["scope"])
-            if scope not in MEMORY_SCOPES:
-                raise ValueError(f"{name}.scope must be case or participant")
-            components[name]["scope"] = scope
+            components["timeline"]["enabled"] = override
+        elif not isinstance(override, Mapping):
+            raise ValueError("memory component timeline must be a boolean or object")
+        else:
+            allowed = {"enabled", "preference_enabled", "episodic_enabled", "scope"}
+            unknown = set(override) - allowed
+            if unknown:
+                raise ValueError(
+                    f"unknown timeline memory settings: {', '.join(sorted(unknown))}"
+                )
+            for flag in ("enabled", "preference_enabled", "episodic_enabled"):
+                if flag in override:
+                    if not isinstance(override[flag], bool):
+                        raise ValueError(f"timeline.{flag} must be a boolean")
+                    components["timeline"][flag] = override[flag]
+            if "scope" in override:
+                scope = str(override["scope"])
+                if scope not in MEMORY_SCOPES:
+                    raise ValueError("timeline.scope must be case or participant")
+                components["timeline"]["scope"] = scope
+
+    # Auto-compute top-level 'enabled': True if either sub-flag is True.
+    tl = components["timeline"]
+    if not tl["preference_enabled"] and not tl["episodic_enabled"]:
+        tl["enabled"] = False
 
     matched_profile = next(
         (profile_id for profile_id, candidate in _PROFILES.items() if candidate == components),

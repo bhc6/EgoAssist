@@ -11,7 +11,6 @@
     "protected_actions": ["emergency"],
     "max_protection_ms": 2500
   },
-  "memory_policy": {"write": "confirm", "trigger": ["task_id", "step_id"]},
   "artifacts": [
     {
       "id": "kitchen-coach-reference",
@@ -26,7 +25,6 @@
   "tools": [
     {
       "name": "set_timer",
-      "capability": "timer-delivery",
       "description": "Check a relative cooking deadline; the local adapter will explicitly report that alarm delivery is unsupported",
       "availability": {
         "status": "unsupported",
@@ -56,6 +54,5 @@
       "arguments": {"type": "object", "additionalProperties": false, "properties": {}},
       "result": {"status": "demo-only", "message": "No external helper or acknowledgement endpoint is connected."}
     }
-  ],
-  "evaluation": ["intervention_precision", "unnecessary_interruption_rate", "hazard_recall", "followup_reuse", "barge_in_success"]
+  ]
 }

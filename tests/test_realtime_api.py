@@ -9,7 +9,7 @@ from aiohttp.client_exceptions import WSServerHandshakeError
 
 from egoassist import BUILTIN_SKILLS_ROOT
 from egoassist.memory import TimelineMemory
-from egoassist.realtime import CaseWorkLedger, PreferenceMemory, SessionJournal
+from egoassist.realtime import CaseWorkLedger, SessionJournal
 import run_egoassist
 from run_egoassist import create_app
 
@@ -93,8 +93,47 @@ def semantic_result(text, *, selected_skill=None):
     }
 
 
+async def _recv(ws):
+    """Read the next protocol message, skipping out-of-band memory_trace events.
+
+    memory_trace is an observability event emitted from SDK worker threads via
+    run_coroutine_threadsafe (see MemoryEventBus.record); it interleaves
+    non-deterministically into the WebSocket stream and is dispatched by type on
+    the frontend (app.js), independent of the ordered protocol. These tests
+    assert the ordered protocol contract (user_transcript/state/interrupted/...),
+    so they must skip memory_trace exactly as the client does — filtering it here
+    is not loosening the contract, only ignoring noise the contract never covered.
+    """
+    while True:
+        message = await ws.receive_json()
+        if message.get("type") != "memory_trace":
+            return message
+
+
+async def _recv_wait(ws, *, timeout):
+    """_recv with a per-message timeout, for the response-gate race tests.
+
+    Skips memory_trace like _recv; the timeout applies to each underlying read
+    so a burst of observability events cannot starve the protocol message the
+    caller is waiting for.
+    """
+    while True:
+        message = await asyncio.wait_for(ws.receive_json(), timeout=timeout)
+        if message.get("type") != "memory_trace":
+            return message
+
+
 def install_queue_test_bridge(monkeypatch):
     instances = []
+    # The production TurnAccumulator debounces voice fragments for 1200 ms
+    # (run_egoassist.py call site) before a complete utterance is classified.
+    # These queue tests drive on_transcript() directly and wait timeout=1 for
+    # classification to begin, so the 1200 ms window would always time out.
+    # The window is env-overridable by design; a short window flushes the
+    # single (already-complete) utterance immediately without changing the
+    # turn-scheduling semantics under test. Control-message tests bypass the
+    # accumulator entirely, so this only affects transcript-driven tests.
+    monkeypatch.setenv("EGOASSIST_TURN_ACCUMULATE_MS", "20")
 
     class FakeBridge:
         def __init__(self, api_key, model, voice, instructions, emit, on_transcript):
@@ -104,6 +143,12 @@ def install_queue_test_bridge(monkeypatch):
             self.injections = []
             self.cancellations = []
             self.unresolved_input = False
+            # Set whenever request_response fires. The turn worker enqueues the
+            # response request synchronously *after* `await ws.send_json(state)`,
+            # so reading the state message does not guarantee the request has
+            # landed yet. Tests wait on this to observe the request
+            # deterministically instead of racing the post-send code path.
+            self.request_event = asyncio.Event()
             instances.append(self)
 
         async def connect(self):
@@ -128,6 +173,7 @@ def install_queue_test_bridge(monkeypatch):
 
         def request_response(self, instructions, priority=50, interrupt=False):
             self.requests.append((instructions, priority, interrupt))
+            self.request_event.set()
 
         def append_audio(self, value):
             return False
@@ -197,9 +243,9 @@ def test_grounded_turn_claims_follow_committed_memory_state(tmp_path, monkeypatc
             async def control(text, *, expect_memory_status=False):
                 request_count = len(instances[0].requests)
                 await ws.send_json({"type": "control", "transcript": text})
-                messages = [await ws.receive_json() for _ in range(3)]
+                messages = [await _recv(ws) for _ in range(3)]
                 assert [item["type"] for item in messages] == ["user_transcript", "state", "interrupted"]
-                memory_status = await ws.receive_json() if expect_memory_status else None
+                memory_status = await _recv(ws) if expect_memory_status else None
                 if memory_status:
                     assert memory_status["type"] == "memory_status"
                 instruction = (
@@ -288,7 +334,7 @@ def test_failed_trial_sequence_keeps_draft_advisory_and_falls_back_to_durable_at
             assert (await ws.receive_json())["type"] == "state"
 
             await ws.send_json({"type": "control", "transcript": "你帮我记几个电话吧。"})
-            first = [await ws.receive_json() for _ in range(4)]
+            first = [await _recv(ws) for _ in range(4)]
             assert [item["type"] for item in first] == [
                 "user_transcript", "state", "interrupted", "memory_status",
             ]
@@ -299,7 +345,7 @@ def test_failed_trial_sequence_keeps_draft_advisory_and_falls_back_to_durable_at
             draft_id = timeline.pending_draft(user_id=user["id"], case_id=session_id)["id"]
 
             await ws.send_json({"type": "control", "transcript": "我手上拿的是什么？"})
-            second = [await ws.receive_json() for _ in range(3)]
+            second = [await _recv(ws) for _ in range(3)]
             assert [item["type"] for item in second] == ["user_transcript", "state", "interrupted"]
             assert timeline.pending_draft(user_id=user["id"], case_id=session_id)["id"] == draft_id
 
@@ -308,7 +354,7 @@ def test_failed_trial_sequence_keeps_draft_advisory_and_falls_back_to_durable_at
                 "这里的报警电话是九幺幺，你都要记住。"
             )
             await ws.send_json({"type": "control", "transcript": phone_turn})
-            third = [await ws.receive_json() for _ in range(4)]
+            third = [await _recv(ws) for _ in range(4)]
             assert [item["type"] for item in third] == [
                 "user_transcript", "state", "interrupted", "memory_status",
             ]
@@ -353,7 +399,7 @@ def test_participant_memory_survives_restart_when_case_timeline_is_disabled(tmp_
                 "policy": {"profile": "confirmed-preference"},
             })
             assert configured.status == 200
-            assert (await configured.json())["memoryPolicy"]["components"]["episodic"]["enabled"] is False
+            assert (await configured.json())["memoryPolicy"]["components"]["timeline"]["episodic_enabled"] is False
             await client.post("/api/voice", json={
                 "sessionId": session_id,
                 "transcript": "请记住小李的电话号码",
@@ -502,6 +548,7 @@ def test_typed_memory_draft_only_consumes_compatible_followup_and_writes_atoms(t
     )
     assert conflict["payload"]["ignoredDraft"]["reason"] == "memory-atoms-precedence"
     assert len(conflict["payload"]["committedCardIds"]) == 2
+
 
 def test_explicit_general_preference_is_active_without_second_confirmation(tmp_path):
     async def scenario():
@@ -956,7 +1003,7 @@ def test_quick_control_uses_the_realtime_websocket(tmp_path, monkeypatch):
             ready = await ws.receive_json()
             assert ready["type"] == "ready"
             assert ready["contextSessionId"]
-            initial_state = await ws.receive_json()
+            initial_state = await _recv(ws)
             assert initial_state["type"] == "state"
             assert initial_state["state"]["memoryMechanism"]["impact"]["status"] == "reused"
             assert instances[0].requests[0][1] == 80
@@ -964,7 +1011,7 @@ def test_quick_control_uses_the_realtime_websocket(tmp_path, monkeypatch):
             assert "开始前提醒我把动作说慢一点" not in instances[0].requests[0][0]
             instances[0].requests.clear()
             await ws.send_json({"type": "control", "transcript": "再说一遍"})
-            messages = [await ws.receive_json() for _ in range(3)]
+            messages = [await _recv(ws) for _ in range(3)]
             assert [item["type"] for item in messages] == ["user_transcript", "state", "interrupted"]
             assert messages[1]["state"]["memory"]["candidate"] is None
             assert instances[0].requests[0][1:] == (100, True)
@@ -972,7 +1019,7 @@ def test_quick_control_uses_the_realtime_websocket(tmp_path, monkeypatch):
 
             instances[0].requests.clear()
             await ws.send_json({"type": "control", "transcript": "请停止当前语音输出"})
-            explicit_stop = [await ws.receive_json() for _ in range(3)]
+            explicit_stop = [await _recv(ws) for _ in range(3)]
             assert [item["type"] for item in explicit_stop] == ["user_transcript", "state", "interrupted"]
             assert explicit_stop[1]["state"]["task"]["paused"] is False
             assert explicit_stop[1]["state"]["intentRouting"]["method"] == "semantic-turn-router-v3"
@@ -982,7 +1029,7 @@ def test_quick_control_uses_the_realtime_websocket(tmp_path, monkeypatch):
 
             instances[0].requests.clear()
             instances[0].on_transcript("您别说了。")
-            stopped = await ws.receive_json()
+            stopped = await _recv(ws)
             assert stopped["type"] == "state"
             assert instances[0].requests == []
             assert instances[0].cancellations[-1] == {
@@ -993,7 +1040,7 @@ def test_quick_control_uses_the_realtime_websocket(tmp_path, monkeypatch):
 
             resumed = await client.ws_connect(f"/ws/realtime?session={ready['contextSessionId']}")
             assert (await resumed.receive_json())["type"] == "ready"
-            resumed_state = await resumed.receive_json()
+            resumed_state = await _recv(resumed)
             assert resumed_state["state"]["memoryMechanism"]["impact"]["status"] == "reused"
             assert not any(request[1] == 80 for request in instances[1].requests)
             await resumed.close()
@@ -1091,14 +1138,14 @@ def test_case_memory_policy_is_audited_and_gates_realtime_plugins(tmp_path, monk
             assert configured["memoryPolicy"]["profile"] == "context-only"
 
             ws = await client.ws_connect(f"/ws/realtime?session={session_id}")
-            assert (await ws.receive_json())["type"] == "ready"
-            initial = (await ws.receive_json())["state"]
+            assert (await _recv(ws))["type"] == "ready"
+            initial = (await _recv(ws))["state"]
             assert initial["memoryPolicy"]["profile"] == "context-only"
             assert Path(initial["episodicMemory"]["path"]).name == "timeline.sqlite3"
             assert initial["episodicMemory"]["retrieval"]["injection"]["status"] == "disabled"
 
             await ws.send_json({"type": "control", "transcript": "以后每次提醒我慢一点"})
-            disabled_turn = [await ws.receive_json() for _ in range(3)]
+            disabled_turn = [await _recv(ws) for _ in range(3)]
             disabled_state = next(item["state"] for item in disabled_turn if item["type"] == "state")
             assert disabled_state["memory"]["candidate"] is None
             assert disabled_state["episodicMemory"]["count"] == 0
@@ -1109,7 +1156,7 @@ def test_case_memory_policy_is_audited_and_gates_realtime_plugins(tmp_path, monk
             )).json()
             assert enabled["memoryPolicy"]["profile"] == "lexical-episodic"
             await ws.send_json({"type": "refresh"})
-            assert (await ws.receive_json())["state"]["memoryPolicy"]["profile"] == "lexical-episodic"
+            assert (await _recv(ws))["state"]["memoryPolicy"]["profile"] == "lexical-episodic"
 
             instances[0].trace_sink(
                 "proactive.gate.decision",
@@ -1118,11 +1165,11 @@ def test_case_memory_policy_is_audited_and_gates_realtime_plugins(tmp_path, monk
                 [],
             )
             await ws.send_json({"type": "refresh"})
-            scene_state = (await ws.receive_json())["state"]
+            scene_state = (await _recv(ws))["state"]
             assert any(item["kind"] == "scene" for item in scene_state["episodicMemory"]["recent"])
 
             await ws.send_json({"type": "control", "transcript": "普通实验话语"})
-            enabled_turn = [await ws.receive_json() for _ in range(3)]
+            enabled_turn = [await _recv(ws) for _ in range(3)]
             enabled_state = next(item["state"] for item in enabled_turn if item["type"] == "state")
             assert enabled_state["episodicMemory"]["count"] == 2
 
@@ -1132,10 +1179,10 @@ def test_case_memory_policy_is_audited_and_gates_realtime_plugins(tmp_path, monk
             )).json()
             assert preference_enabled["memoryPolicy"]["profile"] == "confirmed-preference"
             await ws.send_json({"type": "refresh"})
-            assert (await ws.receive_json())["state"]["memoryPolicy"]["profile"] == "confirmed-preference"
+            assert (await _recv(ws))["state"]["memoryPolicy"]["profile"] == "confirmed-preference"
 
             await ws.send_json({"type": "control", "transcript": "以后每次提醒我慢一点"})
-            preference_turn = [await ws.receive_json() for _ in range(3)]
+            preference_turn = [await _recv(ws) for _ in range(3)]
             preference_state = next(item["state"] for item in preference_turn if item["type"] == "state")
             assert preference_state["memory"]["candidate"]["status"] == "pending"
             confirmed = await client.post(
@@ -1217,14 +1264,14 @@ def test_websocket_sessions_isolate_runtime_memory_and_resume_from_journal(tmp_p
     patch_semantic_router(monkeypatch)
 
     async def initial_messages(ws):
-        ready = await ws.receive_json()
-        state = await ws.receive_json()
+        ready = await _recv(ws)
+        state = await _recv(ws)
         assert ready["contextSessionId"]
         return ready, state["state"]
 
     async def control(ws, transcript):
         await ws.send_json({"type": "control", "transcript": transcript})
-        messages = [await ws.receive_json() for _ in range(3)]
+        messages = [await _recv(ws) for _ in range(3)]
         assert [item["type"] for item in messages] == ["user_transcript", "state", "interrupted"]
         return messages[1]["state"]
 
@@ -1265,7 +1312,7 @@ def test_websocket_sessions_isolate_runtime_memory_and_resume_from_journal(tmp_p
             assert second_state["task"]["task"]["id"] == "flat-pack-stool"
 
             await first.send_json({"type": "refresh"})
-            refreshed = (await first.receive_json())["state"]
+            refreshed = (await _recv(first))["state"]
             assert refreshed["task"]["task"]["id"] == "fruit-salad"
             recent = json.dumps(refreshed["episodicMemory"]["recent"], ensure_ascii=False)
             assert recent == "[]"
@@ -1348,9 +1395,14 @@ def test_realtime_transcripts_are_classified_and_committed_in_fifo_order(tmp_pat
             assert set(classifier_calls) == {"first turn", "second turn"}
 
             release_first.set()
-            assert (await asyncio.wait_for(ws.receive_json(), timeout=1))["type"] == "state"
-            assert (await asyncio.wait_for(ws.receive_json(), timeout=1))["type"] == "state"
+            assert (await _recv_wait(ws, timeout=1))["type"] == "state"
+            assert (await _recv_wait(ws, timeout=1))["type"] == "state"
             assert classifier_calls == ["first turn", "second turn"]
+            # The surviving (second) turn enqueues its response request
+            # synchronously after its state send; wait for it to land rather
+            # than racing the post-send path. len == 1 still catches a stale
+            # first-turn request firing erroneously.
+            await asyncio.wait_for(instances[0].request_event.wait(), timeout=1)
             assert len(instances[0].requests) == 1
             assert "second turn" in instances[0].requests[0][0]
             assert [item[0] for item in instances[0].injections[-2:]] == [
@@ -1439,7 +1491,7 @@ def test_unsupported_background_intent_is_honestly_handled_as_foreground(tmp_pat
             await ws.receive_json()
 
             instances[0].on_transcript("cook oatmeal")
-            background_state = (await asyncio.wait_for(ws.receive_json(), timeout=1))["state"]
+            background_state = (await _recv_wait(ws, timeout=1))["state"]
             downgraded = background_state["workLedger"]["intents"][-1]
             assert downgraded["status"] == "foreground"
             assert downgraded["kind"] == "foreground-dialogue"
@@ -1451,7 +1503,7 @@ def test_unsupported_background_intent_is_honestly_handled_as_foreground(tmp_pat
             assert semantic["intentExecution"]["capability"] == "background-execution"
 
             instances[0].on_transcript("assemble flat pack stool")
-            switched = (await asyncio.wait_for(ws.receive_json(), timeout=1))["state"]
+            switched = (await _recv_wait(ws, timeout=1))["state"]
             assert switched["activeSkill"]["name"] == "assembly-coach"
             assert switched["workLedger"]["foregroundIntentId"] != downgraded["intentId"]
 
@@ -1574,6 +1626,7 @@ def test_reset_cancels_pending_semantic_turn_before_durable_deactivation(tmp_pat
 
             instances[0].on_transcript("slow old turn")
             await asyncio.wait_for(classification_started.wait(), timeout=1)
+
             async def reset_case():
                 return await (await client.post(
                     "/api/task/reset", json={"sessionId": session_id},

@@ -18,7 +18,6 @@ class Config:
 
     # ---- 检索 ----
     retrieve_topk: int = 5                 # 候选事件数
-    router_recent_bias: float = 0.1        # 时间近因偏置（越大越偏好近期）
 
     # ---- 精确时间定位 ----
     localize_stride: float = 0.5           # 候选窗内滑窗步长（秒）

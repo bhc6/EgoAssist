@@ -58,7 +58,7 @@ def save_memory(
             "t_start": item.t_start,
             "t_end": item.t_end,
             "caption": item.caption,
-            "level": item.level,
+            "tier": item.tier,
             "child_ids": list(item.child_ids),
             "audio_events": list(item.audio_events),
             "embedding_key": key,
@@ -168,7 +168,7 @@ def load_memory(
                 keyframe_times=frame_times,
                 keyframe_meta=frame_meta,
                 audio_events=list(record.get("audio_events", [])),
-                level=str(record["level"]),
+                tier=str(record.get("tier", record.get("level", "short"))),
                 child_ids=[int(value) for value in record["child_ids"]],
             )
     memory.current = _resolve_ids(by_id, manifest["current_ids"], "current")

@@ -24,7 +24,9 @@ from ..capture.events import segment_stream
 from ..capture.stream import FrameStream
 from ..config import Config
 from ..memory.timeline import TimelineMemory
+from ..timefmt import format_beijing_iso
 from .pipeline import QAResult  # reuse the shared result dataclass
+
 
 # scene + event are the kinds stored during ingest; exclude them from default
 # retrieval elsewhere but include them here.
@@ -118,7 +120,8 @@ class TimelineAssistant:
         captions = [c["card"]["text"] for c in selected]
         candidate_ids = [c["cardId"] for c in selected]
         retrieval_sim = float(top.get("score", 0.0))
-        ans = self.backend.answer(q, captions, [])
+        event_time = format_beijing_iso(top_card.get("happenedAt"))
+        ans = self.backend.answer(q, captions, [], event_time=event_time)
         # Timeline scores are in [0, 1]; map to [-1, 1] for combine_score's
         # cosine normalisation step (sim01 = 0.5 * (sim + 1)).
         sim_as_cosine = 2.0 * retrieval_sim - 1.0

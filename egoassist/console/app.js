@@ -93,28 +93,28 @@ function renderMemoryPolicy(policy, profiles = []) {
     "<option value='" + esc(item.id) + "'>" + esc(item.label) + "</option>"
   ).join("");
   $("#memoryProfile").value = policy.profile;
-  const preference = policy.components.preference;
-  const episodic = policy.components.episodic;
-  $("#preferenceEnabled").checked = preference.enabled;
-  $("#preferenceScope").value = preference.scope;
-  $("#preferenceScope").disabled = !preference.enabled || memoryPolicySaving;
-  $("#episodicEnabled").checked = episodic.enabled;
-  $("#episodicScope").value = episodic.scope;
-  $("#episodicScope").disabled = !episodic.enabled || memoryPolicySaving;
+  const timeline = policy.components.timeline;
+  $("#timelineEnabled").checked = timeline.enabled;
+  $("#timelineScope").value = timeline.scope;
+  $("#timelineScope").disabled = !timeline.enabled || memoryPolicySaving;
   $("#memoryProfile").disabled = memoryPolicySaving;
-  $("#preferenceEnabled").disabled = memoryPolicySaving;
-  $("#episodicEnabled").disabled = memoryPolicySaving;
+  $("#timelineEnabled").disabled = memoryPolicySaving;
   $("#memoryPolicyStatus").textContent = memoryPolicySaving
     ? "正在保存实验配置…"
     : "policy v" + policy.version + " · context journal 始终用于恢复与审计 · 变更从后续轮次生效";
 }
 
 function customMemoryPolicy() {
+  const enabled = $("#timelineEnabled").checked;
   return {
     profile: "custom",
     components: {
-      preference: {enabled: $("#preferenceEnabled").checked, scope: $("#preferenceScope").value},
-      episodic: {enabled: $("#episodicEnabled").checked, scope: $("#episodicScope").value},
+      timeline: {
+        enabled,
+        preference_enabled: enabled,
+        episodic_enabled: enabled,
+        scope: $("#timelineScope").value,
+      },
     },
   };
 }
@@ -234,7 +234,7 @@ function renderPipeline(task, mechanism, step) {
     {stage: "perception", title: "结构化感知", status: task?.observation ? "live" : lanes.perception?.connected ? "warning" : "idle", summary: task?.observation ? task.observation.step + " · age " + task.observation.frameAgeMs + " ms" : lanes.perception?.connected ? "等待任务绑定的新鲜帧" : "感知通道未连接", claim: "每帧绑定 task/version/checkpoint/epoch 与允许路径；模型只产出证据，用户确认才推进 checkpoint"},
     {stage: "task", title: "Skill / 任务假设", status: task ? "live" : state.activeSkill ? "warning" : "idle", summary: taskSummary, claim: task ? "Checkpoint ledger，不规定唯一执行路径" : "无证据时不加载领域工作流"},
     {stage: "knowledge", title: "知识增强", status: state.knowledgeMechanism.method === "none" ? "idle" : "warning", summary: state.knowledgeMechanism.method, claim: state.knowledgeMechanism.claimBoundary},
-    {stage: "memory", title: "记忆检索", status: retrieval.status === "matched" || state.episodicMemory?.count ? "live" : "idle", summary: "preference " + (retrieval.candidates || []).length + " · episodes " + (state.episodicMemory?.count || 0), claim: "偏好与情景记忆分开；显示查询、候选、拒绝原因和实际注入结果"},
+    {stage: "memory", title: "TimelineMemory 检索", status: retrieval.status === "matched" || state.episodicMemory?.count ? "live" : "idle", summary: "timeline " + (state.episodicMemory?.count || 0) + " cards · 注入 " + (state.episodicMemory?.retrieval?.injection?.evidence?.length || 0) + " · " + (state.episodicMemory?.retrieval?.method || "hybrid"), claim: "scene/event/fact/state/observation 全类型统一检索；BM25 + 语义双路；北京时间标注注入证据"},
     {stage: "policy", title: "主动干预策略", status: "live", summary: actionName(decision.action) + " · " + Math.round((decision.confidence || 0) * 100) + "%", claim: decision.reason},
     {stage: "scheduler", title: "响应调度与打断", status: scheduler.pending || scheduler.activeResponseIds?.length ? "live" : "idle", summary: (lanes.dialogue?.turnDetection || "unknown") + " · " + (scheduler.activePolicies?.[0]?.speechPolicy || state.turnTakingPolicy.currentSelection.policy), claim: "转写后先检索与更新上下文，再显式创建唯一回答；Skill 可配置：" + state.turnTakingPolicy.currentSelection.basis},
     {stage: "output", title: "语音与字幕输出", status: scheduler.activeResponseIds?.length ? "live" : "idle", summary: scheduler.activeResponseIds?.join(", ") || "等待输出", claim: "只展示可验证输出和结构化中间产物，不声称访问隐藏思维链"}
@@ -525,6 +525,106 @@ function renderWorkCenter() {
   $$('[data-open-artifact]').forEach(button => button.onclick = () => openArtifact(button.dataset.openArtifact));
 }
 
+// ── TimelineMemory helpers ───────────────────────────────────────────────────
+
+const KIND_LABELS = {
+  "scene": "场景", "event": "事件", "fact": "事实", "state": "状态",
+  "preference": "偏好", "task-preference": "任务偏好", "observation": "观测",
+  "tool-effect": "工具效果", "legacy": "旧格式",
+};
+const KIND_CLASS = {
+  "scene": "kind-scene", "event": "kind-event", "fact": "kind-fact",
+  "state": "kind-state", "preference": "kind-pref", "observation": "kind-obs",
+  "tool-effect": "kind-tool",
+};
+const kindLabel = kind => KIND_LABELS[kind] || kind || "?";
+const kindClass = kind => KIND_CLASS[kind] || "kind-other";
+
+function fmtBeijing(isoStr) {
+  if (!isoStr) return "";
+  try {
+    const d = new Date(isoStr);
+    return d.toLocaleString("zh-CN", {
+      timeZone: "Asia/Shanghai", hour12: false,
+      year: "numeric", month: "2-digit", day: "2-digit",
+      hour: "2-digit", minute: "2-digit", second: "2-digit",
+    }).replace(/\//g, "-") + " 北京";
+  } catch (_) { return isoStr; }
+}
+
+function renderTimelineCards(episodic) {
+  const timelineViews = episodic.timelineViews || {};
+  const allCards = [
+    ...(timelineViews.participant?.recent || []),
+    ...(timelineViews.case?.recent || []),
+    ...(episodic.recent || []),
+  ].filter((c, i, arr) => arr.findIndex(x => x.id === c.id) === i)
+   .sort((a, b) => ((b.happenedAt || b.recordedAt || "") > (a.happenedAt || a.recordedAt || "") ? 1 : -1));
+
+  const candidates = episodic.retrieval?.candidates || [];
+  const injection = episodic.retrieval?.injection || {status: "not-injected", episodeIds: []};
+  const selectedIds = new Set((injection.evidence || []).map(ev => ev.episodeId || ev.cardId));
+
+  // Retrieval summary panel
+  const summaryEl = $("#timelineRetrievalSummary");
+  if (summaryEl) {
+    const method = episodic.retrieval?.method || "none";
+    const scope = episodic.retrieval?.scope || {};
+    const injEvidence = injection.evidence || [];
+    summaryEl.innerHTML =
+      "<header class='tl-retrieval-header'><b>当前轮次 TimelineMemory 检索</b>" +
+      " <code>" + esc(method) + "</code>" +
+      " · 范围 <b>" + esc(scope.memoryScope || scope.session || "—") + "</b></header>" +
+      "<div class='tl-retrieval-stats'>" +
+        "<span>候选 <b>" + candidates.length + "</b></span>" +
+        "<span>注入 <b>" + injEvidence.length + "</b></span>" +
+        // current-turn injection: retrieval feeds THIS turn's context only; prior
+        // turns are never re-generated (context injection, not regeneration).
+        "<span class='tl-inject-status tl-status-" + esc(injection.status.replace(/[^a-z-]/g, "")) + "' title='current-turn injection'>" + esc(injection.status) + "</span>" +
+      "</div>" +
+      (injEvidence.length ? "<ul class='tl-evidence-list'>" + injEvidence.map(ev =>
+        "<li><span class='kind-badge " + kindClass(ev.kind) + "'>" + esc(kindLabel(ev.kind)) + "</span>" +
+        "<time class='tl-time'>" + esc(fmtBeijing(ev.timestamp)) + "</time>" +
+        "<span class='tl-ev-text'>" + esc((ev.summary || "").slice(0, 100)) + "</span>" +
+        "<small class='tl-ev-meta'>score " + Number(ev.score || 0).toFixed(2) + " · " + esc(ev.source || "") + "</small></li>"
+      ).join("") + "</ul>" : "<p class='tl-no-evidence'>本轮无注入证据</p>") +
+      (candidates.length > 0 ? "<details class='tl-candidates-detail'><summary>全部候选 (" + candidates.length + ")</summary><ul class='tl-candidates'>" +
+        candidates.slice(0, 12).map(c =>
+          "<li class='" + (c.selected ? "tl-selected" : "") + "'>" +
+          "<span class='kind-badge " + kindClass(c.record?.kind) + "'>" + esc(kindLabel(c.record?.kind)) + "</span>" +
+          "<span class='tl-cand-text'>" + esc((c.record?.summary || "").slice(0, 80)) + "</span>" +
+          "<small>score " + Number(c.score || 0).toFixed(2) +
+            (c.selected ? " · 已注入" : " · " + esc((c.rejectionReasons || []).join("/"))) + "</small></li>"
+        ).join("") + "</ul></details>" : "");
+  }
+
+  // Cards panel
+  const cardsEl = $("#timelineCards");
+  if (!cardsEl) return;
+  if (!allCards.length) {
+    cardsEl.innerHTML = "<p class='empty-state'>TimelineMemory 暂无活动卡片</p>";
+    return;
+  }
+  cardsEl.innerHTML =
+    "<div class='tl-cards-header'><b>RECENT CARDS</b><span class='tl-card-count'>" + allCards.length + " 条</span></div>" +
+    allCards.slice(0, 24).map(card => {
+      const isInjected = selectedIds.has(card.id);
+      const ts = card.happenedAt || card.recordedAt || card.timestamp;
+      return "<article class='tl-card" + (isInjected ? " tl-card--injected" : "") + "'>" +
+        "<div class='tl-card-top'>" +
+          "<span class='kind-badge " + kindClass(card.kind) + "'>" + esc(kindLabel(card.kind)) + "</span>" +
+          (ts ? "<time class='tl-card-time'>" + esc(fmtBeijing(ts)) + "</time>" : "") +
+          (isInjected ? "<span class='tl-injected-badge'>已注入</span>" : "") +
+        "</div>" +
+        "<p class='tl-card-text'>" + esc((card.text || card.summary || "").slice(0, 140)) + "</p>" +
+        "<div class='tl-card-meta'>" +
+          "<small>" + esc(card.scope || "case") + " · " + esc(card.tier || "short") + "</small>" +
+          "<button data-delete-card='" + esc(card.id) + "' class='tl-delete'>删除</button>" +
+        "</div>" +
+        "</article>";
+    }).join("");
+}
+
 function render(next) {
   state = next;
   const task = state.task, memory = state.memory, mechanism = state.memoryMechanism;
@@ -574,15 +674,8 @@ function render(next) {
   $("#retrievalCandidates").innerHTML = "<b>RETRIEVAL CANDIDATES</b>" + (candidates.length ? candidates.map(item => "<div class='rank-row " + (item.selected ? "selected" : "") + "'><b>" + esc(item.memoryId) + "</b><span>score " + item.score.toFixed(2) + " · " + esc(item.selected ? "selected" : item.rejectionReasons.join(", ")) + "</span><small>task=" + item.match.task + " checkpoint=" + item.match.checkpoint + "</small></div>").join("") : "<p>无候选记录</p>");
   $("#memories").innerHTML = memory.records.length ? memory.records.map(item => "<article><b>" + esc(item.preference) + "</b><small>trigger " + esc(item.trigger.task) + " / " + esc(item.trigger.step) + "</small><button data-delete='" + esc(item.id) + "'>删除</button></article>").join("") : "<span>暂无已确认偏好</span>";
   const episodic = state.episodicMemory || {recent: [], retrieval: {candidates: []}};
-  const timelineViews = episodic.timelineViews || {};
-  const visibleCards = [
-    ...(timelineViews.participant?.recent || []),
-    ...(timelineViews.case?.recent || []),
-  ].filter((item, index, values) => values.findIndex(other => other.id === item.id) === index);
-  const episodeCandidates = episodic.retrieval?.candidates || [];
-  const episodeInjection = episodic.retrieval?.injection || {status: "not-injected", episodeIds: []};
-  $("#episodicRetrieval").innerHTML = "<b>TIMELINE RETRIEVAL · " + esc(episodic.retrieval?.method || "none") + "</b><p>current-turn injection: " + esc(episodeInjection.status) + " · " + esc((episodeInjection.episodeIds || []).join(", ") || "none") + "</p>" + (episodeCandidates.length ? episodeCandidates.slice(0, 6).map(item => "<div class='rank-row " + (item.selected ? "selected" : "") + "'><b>" + esc(item.episodeId) + "</b><span>score " + Number(item.score || 0).toFixed(2) + " · " + esc(item.selected ? (item.retrievalReasons || ["selected"]).join(", ") : (item.rejectionReasons || []).join(", ")) + "</span><small>" + esc(item.record.kind + " / " + item.record.source) + "</small></div>").join("") : "<p>无时间线召回候选</p>");
-  $("#episodicEpisodes").innerHTML = "<b>RECENT CARDS · raw media retained: " + esc(episodic.retainsRawMedia) + "</b>" + (visibleCards.length ? visibleCards.map(item => "<article><b>" + esc(item.text) + "</b><small>" + esc(item.kind + " · " + item.scope + " · " + item.tier) + "</small><button data-delete-card='" + esc(item.id) + "'>删除</button></article>").join("") : "<p>暂无活动时间线卡片</p>");
+  renderTimelineCards(episodic);
+  // Legacy episodic divs are now hidden; kept for backwardcompat event-wiring below.
   $("#toolAudit").innerHTML = state.toolAudit.length ? state.toolAudit.map(item => "<article><b>" + esc(item.tool || item.action || "tool") + "</b><p>" + esc(JSON.stringify(item.arguments || item.result || {})) + "</p><small>" + esc(item.time || item.timestamp || "") + "</small></article>").join("") : "<span class='muted'>暂无工具调用</span>";
   $$("[data-delete]").forEach(button => button.onclick = () => runMemoryMutation(button, post("/api/memory/delete", {id: button.dataset.delete, sessionId: selectedSessionId})));
   $$("[data-delete-card]").forEach(button => button.onclick = () => runMemoryMutation(button, post("/api/memory/delete", {id: button.dataset.deleteCard, sessionId: selectedSessionId})));
@@ -1115,10 +1208,8 @@ $("#taskSelect").onchange = event => { if (event.currentTarget.value) switchRunt
 $("#memoryProfile").onchange = event => {
   if (event.currentTarget.value !== "custom") saveMemoryPolicy({profile: event.currentTarget.value});
 };
-$("#preferenceEnabled").onchange = () => saveMemoryPolicy(customMemoryPolicy());
-$("#preferenceScope").onchange = () => saveMemoryPolicy(customMemoryPolicy());
-$("#episodicEnabled").onchange = () => saveMemoryPolicy(customMemoryPolicy());
-$("#episodicScope").onchange = () => saveMemoryPolicy(customMemoryPolicy());
+$("#timelineEnabled").onchange = () => saveMemoryPolicy(customMemoryPolicy());
+$("#timelineScope").onchange = () => saveMemoryPolicy(customMemoryPolicy());
 $("#privacyExport").onclick = async () => { try { await downloadPrivacyExport(); } catch (error) { alert(error.message); } };
 $("#privacyDelete").onclick = async () => {
   if (!confirm("删除账户数据后不可恢复。继续？")) return;

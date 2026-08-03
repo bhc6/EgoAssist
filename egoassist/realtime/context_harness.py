@@ -539,10 +539,7 @@ class ContextHarness:
 
     def _context_messages(self) -> tuple[list[dict[str, Any]], str | None]:
         entries = self.journal.entries()
-        latest_compaction_index = next(
-            (index for index in range(len(entries) - 1, -1, -1) if entries[index].get("type") == "compaction"),
-            None,
-        )
+        latest_compaction_index = self._latest_compaction_index(entries)
         messages: list[dict[str, Any]] = []
         compaction_id = None
         start = 0

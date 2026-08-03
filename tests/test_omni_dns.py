@@ -1,6 +1,7 @@
 import asyncio
 import socket
 import threading
+from collections import deque
 
 import pytest
 
@@ -44,7 +45,7 @@ def scheduler_bridge():
     bridge._active_response_ids = set()
     bridge._cancelled_response_ids = set()
     bridge._speech_started_response_ids = set()
-    bridge._queued_response = None
+    bridge._queued_requests = deque()
     bridge._inflight_response = None
     bridge._response_sequence = 0
     bridge._cancel_when_created = False
@@ -179,7 +180,7 @@ def test_dialogue_vad_detects_turns_but_application_owns_response_creation():
     assert bridge.conversation.session["turn_detection_type"] == "server_vad"
     assert bridge.conversation.session["turn_detection_param"] == {
         "create_response": False,
-        "interrupt_response": False,
+        "interrupt_response": True,
     }
 
 
@@ -336,7 +337,7 @@ def test_silent_or_malformed_gate_never_schedules_user_visible_response():
         bridge = scheduler_bridge()
         bridge._trace = lambda *args, **kwargs: None
         bridge._handle_proactive_decision(OmniBrowserBridge.parse_proactive_gate(gate_text))
-        assert bridge._queued_response is None
+        assert not bridge._queued_requests
         assert bridge._inflight_response is None
         assert bridge._last_assistant_utterance == ""
 
@@ -403,7 +404,7 @@ def test_high_priority_control_replaces_queued_proactive_check():
     bridge._active_response_ids = {"response-active"}
     bridge.request_response("low visual check", priority=10)
     bridge.request_response("repeat the actual guidance", priority=100, interrupt=True)
-    assert bridge._queued_response.instructions == "repeat the actual guidance"
+    assert bridge._queued_requests[0].instructions == "repeat the actual guidance"
     assert bridge.conversation.cancelled == 1
 
     bridge._response_finished({"response": {"id": "response-active"}})
@@ -417,7 +418,7 @@ def test_conflict_requeues_inflight_until_provider_is_idle():
     assert len(bridge.conversation.created) == 1
 
     bridge._response_conflict()
-    assert bridge._queued_response.instructions == "help now"
+    assert bridge._queued_requests[0].instructions == "help now"
     assert bridge._active_response_ids == {"provider-active"}
 
     bridge._response_finished({"response": {"id": "provider-active"}})
@@ -453,7 +454,7 @@ def test_user_barge_in_drops_stale_proactive_request():
     bridge._active_response_ids = {"response-active"}
     bridge.request_response("stale visual check", priority=10)
     assert bridge.cancel_response(drop_queued_below=100)
-    assert bridge._queued_response is None
+    assert not bridge._queued_requests
     assert bridge.conversation.cancelled == 1
 
 
@@ -562,7 +563,7 @@ def test_create_watchdog_recovers_queue_without_replaying_orphan():
     bridge._response_watchdog_fired("create", 1, 0)
 
     assert reconnects == ["response-create-timeout"]
-    assert bridge._queued_response.instructions == "new user turn"
+    assert bridge._queued_requests[0].instructions == "new user turn"
     assert any(event == "response.watchdog.timeout" for event, _ in traced)
     bridge._reset_scheduler_after_reconnect()
     assert [item["instructions"] for item in bridge.conversation.created] == [
@@ -641,7 +642,7 @@ def test_long_ordered_scheduler_replay_never_leaves_orphan_state():
 
     assert not bridge._response_pending
     assert bridge._active_response_ids == set()
-    assert bridge._queued_response is None
+    assert not bridge._queued_requests
 
 
 def test_video_waits_for_audio_and_coalesces_pending_frames():

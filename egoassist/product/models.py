@@ -2,6 +2,19 @@
 
 These tables are projections of typed product contracts. Legacy JSONL journals
 and the EgoAssist TimelineMemory database remain readable during migration.
+
+Two categories of table live here:
+
+* **Populated** by the ORM write path in ``database.py``: ``users``,
+  ``conversation_turns``, ``intents``, ``jobs``, ``results``, ``observations``,
+  ``retention_policies``.
+* **Reserved schema** — declared and migrated, and enumerated by the privacy
+  export/erasure sweeps so the deletion-completeness contract stays total, but
+  not yet written by any runtime path. Each is tagged ``# reserved``
+  below. They are intentionally retained (not deleted) so the migration and the
+  GDPR sweep keep covering them the moment a writer is added. Note
+  ``MemoryCardRow``/``MemoryDraftRow`` mirror the separate TimelineMemory sqlite
+  schema; the product DB itself never populates them.
 """
 
 from __future__ import annotations
@@ -30,7 +43,7 @@ class UserRow(Base):
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
-class DeviceRow(Base):
+class DeviceRow(Base):  # reserved (schema-only): read by privacy sweeps, no ORM writer yet
     __tablename__ = "devices"
     device_id: Mapped[str] = mapped_column(String(128), primary_key=True)
     user_id: Mapped[str] = mapped_column(ForeignKey("users.user_id"), nullable=False, index=True)
@@ -40,7 +53,7 @@ class DeviceRow(Base):
     last_acknowledged_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
-class ConsentGrantRow(Base):
+class ConsentGrantRow(Base):  # reserved (schema-only): read by privacy sweeps, no ORM writer yet
     __tablename__ = "consent_grants"
     consent_id: Mapped[str] = mapped_column(String(128), primary_key=True)
     user_id: Mapped[str] = mapped_column(ForeignKey("users.user_id"), nullable=False, index=True)
@@ -92,7 +105,7 @@ class IntentRow(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
 
 
-class IntentRelationRow(Base):
+class IntentRelationRow(Base):  # reserved (schema-only): read by privacy sweeps, no ORM writer yet
     __tablename__ = "intent_relations"
     relation_id: Mapped[str] = mapped_column(String(128), primary_key=True)
     source_intent_id: Mapped[str] = mapped_column(ForeignKey("intents.intent_id"), nullable=False)
@@ -101,7 +114,7 @@ class IntentRelationRow(Base):
     evidence: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
 
 
-class TaskPlanRow(Base):
+class TaskPlanRow(Base):  # reserved (schema-only): read by privacy sweeps, no ORM writer yet
     __tablename__ = "task_plans"
     plan_id: Mapped[str] = mapped_column(String(128), primary_key=True)
     intent_id: Mapped[str] = mapped_column(ForeignKey("intents.intent_id"), nullable=False, index=True)
@@ -125,7 +138,7 @@ class JobRow(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
 
 
-class JobAttemptRow(Base):
+class JobAttemptRow(Base):  # reserved (schema-only): read by privacy sweeps, no ORM writer yet
     __tablename__ = "job_attempts"
     attempt_id: Mapped[str] = mapped_column(String(128), primary_key=True)
     job_id: Mapped[str] = mapped_column(ForeignKey("jobs.job_id"), nullable=False, index=True)
@@ -140,7 +153,7 @@ class JobAttemptRow(Base):
     correlation: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
 
 
-class ArtifactRow(Base):
+class ArtifactRow(Base):  # reserved (schema-only): read by privacy sweeps, no ORM writer yet
     __tablename__ = "artifacts"
     artifact_id: Mapped[str] = mapped_column(String(128), primary_key=True)
     owner_id: Mapped[str] = mapped_column(ForeignKey("users.user_id"), nullable=False, index=True)
@@ -166,7 +179,7 @@ class ResultRow(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
 
 
-class DeliveryAttemptRow(Base):
+class DeliveryAttemptRow(Base):  # reserved (schema-only): read by privacy sweeps, no ORM writer yet
     __tablename__ = "delivery_attempts"
     delivery_id: Mapped[str] = mapped_column(String(128), primary_key=True)
     result_id: Mapped[str] = mapped_column(ForeignKey("results.result_id"), nullable=False, index=True)
@@ -177,7 +190,7 @@ class DeliveryAttemptRow(Base):
     error: Mapped[str | None] = mapped_column(Text)
 
 
-class MemoryCardRow(Base):
+class MemoryCardRow(Base):  # reserved: mirrors TimelineMemory's own sqlite schema; product DB never writes it
     __tablename__ = "memory_cards"
     memory_id: Mapped[str] = mapped_column(String(128), primary_key=True)
     user_id: Mapped[str] = mapped_column(ForeignKey("users.user_id"), nullable=False, index=True)
@@ -188,7 +201,7 @@ class MemoryCardRow(Base):
     payload: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
 
 
-class MemoryDraftRow(Base):
+class MemoryDraftRow(Base):  # reserved: mirrors TimelineMemory's own sqlite schema; product DB never writes it
     __tablename__ = "memory_drafts"
     draft_id: Mapped[str] = mapped_column(String(128), primary_key=True)
     user_id: Mapped[str] = mapped_column(ForeignKey("users.user_id"), nullable=False, index=True)
@@ -210,12 +223,12 @@ class ObservationRow(Base):
     frame_age_ms: Mapped[int] = mapped_column(Integer, nullable=False)
     allowed_transitions: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
     confidence: Mapped[float] = mapped_column(Float, nullable=False)
-    hazards: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    hazards: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list, nullable=False)
     source: Mapped[str] = mapped_column(String(80), nullable=False)
     evidence: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
 
 
-class AuditEventRow(Base):
+class AuditEventRow(Base):  # reserved (schema-only): audit trail persists to JSONL journals, not this table
     __tablename__ = "audit_events"
     event_id: Mapped[str] = mapped_column(String(128), primary_key=True)
     user_id: Mapped[str | None] = mapped_column(ForeignKey("users.user_id"), index=True)

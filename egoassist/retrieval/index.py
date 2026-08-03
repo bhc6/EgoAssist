@@ -22,7 +22,6 @@ class VectorIndex(Protocol):
     """Minimal interface that every index implementation must satisfy."""
 
     def add(self, item_id: int, vector: np.ndarray) -> None: ...
-    def remove(self, item_id: int) -> None: ...
     def remove_batch(self, item_ids: list[int]) -> None: ...
     def search(self, query: np.ndarray, k: int) -> list[tuple[int, float]]: ...
     def size(self) -> int: ...
@@ -46,14 +45,6 @@ class FlatIndex:
             raise ValueError(f"FlatIndex: expected dim={self.dim}, got {v.shape[0]}")
         self._ids.append(item_id)
         self._vecs.append(v)
-
-    def remove(self, item_id: int) -> None:
-        try:
-            pos = self._ids.index(item_id)
-        except ValueError:
-            return
-        self._ids.pop(pos)
-        self._vecs.pop(pos)
 
     def remove_batch(self, item_ids: list[int]) -> None:
         """Remove multiple items in one pass — O(n) instead of O(n·k)."""
@@ -113,16 +104,6 @@ class FAISSIndex:
         self._index.add(v[np.newaxis, :])
         if len(self._pos_to_id) == self._IVF_THRESHOLD:
             self._rebuild_ivf()
-
-    def remove(self, item_id: int) -> None:
-        if item_id not in self._id_to_vec:
-            return
-        del self._id_to_vec[item_id]
-        self._pos_to_id = list(self._id_to_vec.keys())
-        self._index = self._faiss.IndexFlatIP(self.dim)
-        if self._pos_to_id:
-            mat = np.stack([self._id_to_vec[i] for i in self._pos_to_id])
-            self._index.add(mat)
 
     def remove_batch(self, item_ids: list[int]) -> None:
         """Remove multiple items with a single index rebuild — O(N) instead of O(N·k)."""
