@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextvars import ContextVar
 import json
 import os
 import re
@@ -360,17 +361,22 @@ class SemanticTurnRouter:
         )
         if self.timeout_seconds <= 0:
             raise ValueError("turn router timeout must be positive")
-        self._clock_context: dict[str, Any] | None = None
-        self._memory_draft: dict[str, Any] | None = None
+        self._turn_context: ContextVar[dict[str, Any]] = ContextVar(
+            f"semantic-turn-context-{id(self)}", default={}
+        )
 
     def set_turn_context(
         self,
         *,
         clock_context: dict[str, Any] | None,
         memory_draft: dict[str, Any] | None,
+        previous_turn: dict[str, Any] | None = None,
     ) -> None:
-        self._clock_context = dict(clock_context or {}) or None
-        self._memory_draft = dict(memory_draft or {}) or None
+        self._turn_context.set({
+            "clock": dict(clock_context or {}) or None,
+            "memoryDraft": dict(memory_draft or {}) or None,
+            "previousTurn": dict(previous_turn or {}) or None,
+        })
 
     # Stop-speaking commands. Used by the input handler (run_egoassist.py) to
     # cancel an in-progress answer the instant a barge-in stop arrives, bypassing
@@ -401,7 +407,7 @@ class SemanticTurnRouter:
                 "memoryQuery", "memoryKind", "memoryText", "memoryKey",
                 "memoryScope", "memoryConsent", "skillControl", "skill",
             }
-            structured_fields = {"memoryDraft", "memoryAtoms", "memoryQuerySpec", "intents"}
+            structured_fields = {"memoryDraft", "memoryAtoms", "memoryQuerySpec", "intents", "revision"}
             lifecycle_fields = {"intentKind"}
             if not legacy_fields.issubset(parsed) or set(parsed) - (
                 legacy_fields | structured_fields | lifecycle_fields
@@ -481,6 +487,7 @@ class SemanticTurnRouter:
             }:
                 raise ValueError("invalid intent lifecycle label")
             intents = self._normalize_intents(parsed.get("intents"), str(text))
+            revision = self._normalize_revision(parsed.get("revision"))
             return {
                 "method": TURN_ROUTER_POLICY_VERSION,
                 "model": self.model,
@@ -501,6 +508,7 @@ class SemanticTurnRouter:
                 "selectedSkill": skill if skill in allowed_skills else None,
                 "intentKind": intent_kind,
                 "intents": intents,
+                "revision": revision,
                 "skillStatus": (
                     "matched" if skill in allowed_skills
                     else "ambiguous" if skill == "ambiguous"
@@ -535,6 +543,7 @@ class SemanticTurnRouter:
                 "selectedSkill": None,
                 "intentKind": "foreground-dialogue",
                 "intents": [],
+                "revision": None,
                 "skillStatus": "unavailable",
                 "latencyMs": round((time.perf_counter() - started) * 1000, 1),
                 "policyVersion": TURN_ROUTER_POLICY_VERSION,
@@ -552,11 +561,13 @@ class SemanticTurnRouter:
             for item in skill_catalog
         ]
         turn_payload: Any = text
-        if self._clock_context or self._memory_draft:
+        context = self._turn_context.get()
+        if any(context.values()):
             turn_payload = {
                 "transcript": text,
-                "clock": self._clock_context,
-                "pendingMemoryDraft": self._memory_draft,
+                "clock": context.get("clock"),
+                "pendingMemoryDraft": context.get("memoryDraft"),
+                "previousTurn": context.get("previousTurn"),
             }
         response = generation_call(
             model=self.model,
@@ -565,9 +576,9 @@ class SemanticTurnRouter:
                     "role": "system",
                     "content": (
                         "Classify one user turn using only its semantic meaning. Return one JSON object with exactly "
-                        "fifteen fields: speechControl, taskControl, preferenceIntent, memoryQuery, memoryKind, "
+                        "seventeen fields: speechControl, taskControl, preferenceIntent, memoryQuery, memoryKind, "
                         "memoryText, memoryKey, memoryScope, memoryConsent, skillControl, skill, memoryDraft, "
-                        "memoryAtoms, memoryQuerySpec, intentKind, and intents. The first eleven fields and intentKind are strings. memoryDraft and "
+                        "memoryAtoms, memoryQuerySpec, intentKind, intents, and revision. The first eleven fields and intentKind are strings. memoryDraft, revision, and "
                         "memoryQuerySpec are objects or null; memoryAtoms and intents are arrays. "
                         "Set speechControl to stop-speaking only when the user is "
                         "directly instructing the assistant to stop or pause its current spoken output and wants no "
@@ -597,6 +608,9 @@ class SemanticTurnRouter:
                         "For a relative reminder, parameters has exactly delaySeconds as a positive integer and label as the requested action. "
                         "Do not invent a duration. If timing is absent or ambiguous, use waiting-input instead of background-reminder. "
                         "A stop-speaking-only control may use an empty intents array. Topic changes never imply cancellation of another intent. "
+                        "Set revision to null unless the current transcript explicitly corrects or replaces the supplied previousTurn. "
+                        "For an explicit correction, revision is an object with exactly type and supersedesTurnId; type must be correction "
+                        "and supersedesTurnId must exactly match previousTurn.turnId. Never infer revision from an ordinary topic change. "
                         "Independently produce zero to three atomic behavioral memoryAtoms from the user's own current-turn "
                         "claim. Questions, requests for an answer, greetings, filler, and assistant claims are memoryKind "
                         "none with memoryText, memoryKey, memoryScope, and memoryConsent all none. An explicit request to "
@@ -652,6 +666,18 @@ class SemanticTurnRouter:
                     raise ValueError("invalid reminder label")
             result.append(candidate.model_dump())
         return result
+
+    def _normalize_revision(self, value: Any) -> dict[str, str] | None:
+        if value is None:
+            return None
+        if not isinstance(value, dict) or set(value) != {"type", "supersedesTurnId"}:
+            raise ValueError("invalid revision fields")
+        if value.get("type") != "correction":
+            raise ValueError("invalid revision type")
+        previous_id = str((self._turn_context.get().get("previousTurn") or {}).get("turnId", ""))
+        if not previous_id or str(value.get("supersedesTurnId")) != previous_id:
+            raise ValueError("revision must target the supplied previous turn")
+        return {"type": "correction", "supersedesTurnId": previous_id}
 
     @staticmethod
     def _normalize_atoms(value: Any) -> list[dict[str, str]]:

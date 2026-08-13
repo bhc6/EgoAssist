@@ -99,6 +99,18 @@ class CaseWorkLedger:
             metadata={"trust": "untrusted-user-data", "turnId": str(turn_id)},
         )
 
+    def turn_message(self, turn_id: str) -> dict[str, Any] | None:
+        """Return the durable user message associated with a captured turn."""
+        target = str(turn_id)
+        return next((
+            dict(entry) for entry in reversed(self.journal.entries())
+            if entry.get("type") == "message"
+            and (entry.get("message") or {}).get("role") == "user"
+            and str(
+                (((entry.get("message") or {}).get("metadata") or entry.get("metadata") or {}).get("turnId", ""))
+            ) == target
+        ), None)
+
     def set_turn_status(
         self,
         turn_id: str,
@@ -118,9 +130,48 @@ class CaseWorkLedger:
         })
 
     def turns(self) -> dict[str, dict[str, Any]]:
-        return _latest_by_id(
+        values = _latest_by_id(
             self.journal.entries(), "turn_inbox", "turn_inbox_state", "turnId",
         )
+        for entry in self.journal.entries():
+            if entry.get("type") != "turn_revision":
+                continue
+            old_id = str(entry.get("supersedesTurnId", ""))
+            if old_id in values:
+                values[old_id]["supersededBy"] = str(entry.get("turnId", ""))
+                values[old_id]["revisionType"] = str(entry.get("revisionType", "correction"))
+        return values
+
+    def revise_turn(
+        self,
+        turn_id: str,
+        supersedes_turn_id: str,
+        *,
+        revision_type: str = "correction",
+    ) -> dict[str, Any]:
+        turns = self.turns()
+        if str(turn_id) not in turns or str(supersedes_turn_id) not in turns:
+            raise ValueError("revision turns must exist")
+        if str(turn_id) == str(supersedes_turn_id):
+            raise ValueError("turn cannot supersede itself")
+        entry = self.journal.append(
+            "turn_revision",
+            {
+                "turnId": str(turn_id),
+                "supersedesTurnId": str(supersedes_turn_id),
+                "revisionType": str(revision_type),
+            },
+            idempotency_key=f"turn-revision:{turn_id}:{supersedes_turn_id}",
+        )
+        for intent_id, intent in self.intents().items():
+            if str(intent.get("turnId")) != str(supersedes_turn_id):
+                continue
+            if intent.get("status") not in {"completed", "failed", "cancelled"}:
+                self.set_intent_status(intent_id, "cancelled", detail={"reason": "turn-superseded", "supersededBy": str(turn_id)})
+            for job_id, job in self.jobs().items():
+                if str(job.get("intentId")) == str(intent_id) and job.get("status") not in {"completed", "failed", "cancelled"}:
+                    self.set_job_status(job_id, "cancelled", detail={"reason": "turn-superseded", "supersededBy": str(turn_id)})
+        return entry
 
     def recoverable_turns(self) -> list[dict[str, Any]]:
         turns = [item for item in self.turns().values() if item.get("status") in TURN_OPEN_STATUSES]
@@ -244,6 +295,33 @@ class CaseWorkLedger:
             "reason": str(reason),
         })
 
+    def suspend_before_sequence(self, sequence: int, *, reason: str = "newer-turn") -> dict[str, int]:
+        """Suspend work owned by older turns before a newer turn commits.
+
+        Results remain durable for explicit inspection, but are no longer eligible
+        for unsolicited speech delivery.
+        """
+        suspended_intents = 0
+        suspended_jobs = 0
+        for intent_id, intent in self.intents().items():
+            turn_ids = intent.get("turnIds") or [intent.get("turnId")]
+            sequences = [
+                int(self.turns().get(str(turn_id), {}).get("sequence") or 0)
+                for turn_id in turn_ids if turn_id
+            ]
+            if not sequences or max(sequences) >= int(sequence):
+                continue
+            if intent.get("status") in {"foreground", "pending"}:
+                self.set_intent_status(intent_id, "suspended", detail={"reason": reason, "supersededBySequence": int(sequence)})
+                suspended_intents += 1
+                for job_id, job in self.jobs().items():
+                    if str(job.get("intentId")) != str(intent_id):
+                        continue
+                    if job.get("status") not in {"completed", "failed", "cancelled", "suspended"}:
+                        self.set_job_status(job_id, "suspended", detail={"reason": reason, "supersededBySequence": int(sequence)})
+                        suspended_jobs += 1
+        return {"intents": suspended_intents, "jobs": suspended_jobs}
+
     def foreground_intent_id(self) -> str | None:
         return next((
             str(entry["intentId"]) if entry.get("intentId") is not None else None
@@ -355,6 +433,7 @@ class CaseWorkLedger:
         job_id: str | None = None,
         priority: int = 50,
         delivery: str = "speech-or-display",
+        allow_stale: bool = False,
         result_id: str | None = None,
     ) -> dict[str, Any]:
         if str(intent_id) not in self.intents():
@@ -381,6 +460,7 @@ class CaseWorkLedger:
             "content": content,
             "priority": int(priority),
             "delivery": str(delivery),
+            "allowStale": bool(allow_stale),
             "status": "pending",
             "correlation": correlation,
         }, idempotency_key=f"result:{stable_id}")
@@ -411,11 +491,24 @@ class CaseWorkLedger:
             key=lambda item: (-int(item.get("priority", 0)), item.get("timestamp", "")),
         )
 
-    def claim_next_result(self, *, delivery: str = "speech-or-display") -> dict[str, Any] | None:
+    def claim_next_result(
+        self,
+        *,
+        delivery: str = "speech-or-display",
+        latest_sequence: int | None = None,
+        allow_stale: bool = False,
+    ) -> dict[str, Any] | None:
         """Claim one result for the single output arbiter without losing others."""
         for item in self.pending_results():
             if delivery and str(item.get("delivery")) != delivery:
                 continue
+            intent = self.intents().get(str(item.get("intentId")), {})
+            if intent.get("status") in {"suspended", "cancelled", "failed"}:
+                continue
+            if latest_sequence is not None and not allow_stale and not item.get("allowStale", False):
+                turn = self.turns().get(str(item.get("turnId")), {})
+                if int(turn.get("sequence") or 0) < int(latest_sequence):
+                    continue
             self.set_result_status(item["resultId"], "speaking", detail={"arbiter": "single-writer"})
             return self.results().get(item["resultId"])
         return None

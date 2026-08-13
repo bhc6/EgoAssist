@@ -1,7 +1,7 @@
 """Vector index layer.
 
 FlatIndex   — pure numpy, zero extra deps, always available.
-FAISSIndex  — FAISS-backed inner-product index; requires faiss-cpu (egoassist[gpu]).
+FAISSIndex  — CPU FAISS-backed inner-product index; requires faiss-cpu.
 build_index — factory that auto-selects the best available backend.
 
 Both classes satisfy the VectorIndex Protocol.  Vectors are assumed to be
@@ -73,11 +73,11 @@ class FlatIndex:
 
 
 # ---------------------------------------------------------------------------
-# FAISSIndex: FAISS inner-product index, optional (egoassist[gpu] extra)
+# FAISSIndex: CPU FAISS inner-product index, optional
 # ---------------------------------------------------------------------------
 
 class FAISSIndex:
-    """FAISS-backed cosine index.
+    """CPU FAISS-backed cosine index.
 
     Keeps a parallel ``_id_to_vec`` dict so vectors can be reconstructed
     cheaply on ``remove`` without relying on FAISS's limited remove support.
@@ -157,7 +157,7 @@ def build_index(dim: int, *, force_flat: bool = False) -> VectorIndex:
     Args:
         dim: Embedding dimension.  Must match the vectors you intend to add.
         force_flat: Always use FlatIndex regardless of faiss availability.
-                    Useful in unit tests that do not install the GPU extras.
+                    Useful in unit tests that do not install optional FAISS.
     """
     if not force_flat:
         try:
@@ -165,6 +165,6 @@ def build_index(dim: int, *, force_flat: bool = False) -> VectorIndex:
         except ImportError:
             LOGGER.warning(
                 "faiss-cpu not found; falling back to FlatIndex (O(n) linear scan). "
-                "Install egoassist[gpu] for FAISS acceleration."
+                "Install faiss-cpu for optimized CPU vector search."
             )
     return FlatIndex(dim)

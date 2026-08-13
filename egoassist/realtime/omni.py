@@ -463,7 +463,6 @@ class OmniBrowserBridge:
         self._response_lifecycle_handler: Callable[[dict[str, Any], str], Any] | None = None
         self._pending_tool_calls: dict[str, dict[str, Any]] = {}
         self._tool_call_signatures: dict[str, tuple[str, str]] = {}
-        self._assistant_transcript_buffer = ""
         self._assistant_transcript_buffers: dict[str, str] = {}
         self._last_assistant_utterance = ""
         self._last_assistant_utterance_at = 0.0
@@ -1008,21 +1007,16 @@ class OmniBrowserBridge:
         purpose: str = "conversation",
     ) -> None:
         key = response_id or "__unattributed__"
-        buffers = getattr(self, "_assistant_transcript_buffers", None)
-        if buffers is None:
-            self._assistant_transcript_buffers = {}
-            buffers = self._assistant_transcript_buffers
+        buffers = self._assistant_transcript_buffers
         if done:
             buffered = buffers.get(key, "")
-            completed = text or buffered or getattr(self, "_assistant_transcript_buffer", "")
+            completed = text or buffered
             self._last_assistant_utterance = completed
             self._last_assistant_utterance_at = time.monotonic()
             if completed:
                 buffers[key] = completed
-                self._assistant_transcript_buffer = completed
         else:
             buffers[key] = buffers.get(key, "") + text
-            self._assistant_transcript_buffer = buffers[key]
         with self._response_lock:
             should_cancel = bool(getattr(self, "_barge_in_pending", False) and (done or any(mark in text for mark in "。！？.!?；;")))
             if should_cancel:
@@ -1941,14 +1935,7 @@ class OmniBrowserBridge:
 
     def _pop_assistant_transcript(self, response_id: str | None) -> str:
         key = response_id or "__unattributed__"
-        buffers = getattr(self, "_assistant_transcript_buffers", {})
-        fragment = str(buffers.pop(key, ""))
-        legacy = str(getattr(self, "_assistant_transcript_buffer", ""))
-        if not fragment and (response_id is None or len(buffers) == 0):
-            fragment = legacy
-        if fragment == legacy or not buffers:
-            self._assistant_transcript_buffer = ""
-        return fragment
+        return str(self._assistant_transcript_buffers.pop(key, ""))
 
     @staticmethod
     def _response_usage(payload: dict[str, Any]) -> dict[str, Any] | None:
@@ -2154,7 +2141,3 @@ class OmniBrowserBridge:
 
     def _schedule_callback(self, callback, *args) -> None:
         self.loop.call_soon_threadsafe(callback, *args)
-
-
-def pcm16_bytes_to_base64(data: bytes) -> str:
-    return base64.b64encode(data).decode("ascii")

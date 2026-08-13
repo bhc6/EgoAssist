@@ -270,6 +270,9 @@ class TaskSlot:
     status: str                      # pending / running / done / failed / cancelled
     created_at: float
     turn_id: str | None = None
+    intent_id: str | None = None
+    job_id: str | None = None
+    delivery: str = "display"
     completed_at: float | None = None
     result_preview: str | None = None
     asyncio_task: Any = field(default=None, repr=False, compare=False)
@@ -1321,8 +1324,8 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                 },
                 "memorySystems": [
                     {"id": "working", "name": PROMPTS.diag_mem_working_name, "status": "live" if bridges else "idle", "implementation": PROMPTS.diag_mem_working_impl},
-                    {"id": "preference", "name": PROMPTS.diag_mem_preference_name, "status": "waiting-scope" if preference_settings["enabled"] else "disabled", "implementation": PROMPTS.diag_mem_preference_impl},
-                    {"id": "episodic", "name": PROMPTS.diag_mem_episodic_name, "status": "connected-summary" if episodic_settings["enabled"] else "disabled", "implementation": PROMPTS.diag_mem_episodic_impl_no_task},
+                    {"id": "preference", "name": PROMPTS.diag_mem_preference_name, "status": "waiting-scope" if preference_settings["preference_enabled"] else "disabled", "implementation": PROMPTS.diag_mem_preference_impl},
+                    {"id": "episodic", "name": PROMPTS.diag_mem_episodic_name, "status": "connected-summary" if episodic_settings["episodic_enabled"] else "disabled", "implementation": PROMPTS.diag_mem_episodic_impl_no_task},
                     {"id": "knowledge", "name": PROMPTS.diag_mem_knowledge_name, "status": "unloaded", "implementation": PROMPTS.diag_mem_knowledge_impl_no_task},
                 ],
                 "knowledgeMechanism": {
@@ -1348,7 +1351,7 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
         task_state = task.snapshot()
         retrieval = memory_retrieval(
             active_runtime, episodic_memory=active_episodic,
-            enabled=preference_settings["enabled"],
+            enabled=preference_settings["preference_enabled"],
         )
         hint = retrieval["selected"]["record"] if retrieval["selected"] else None
         hint_was_used = bool(hint and hint["id"] in task.announced_memory_ids)
@@ -1359,7 +1362,7 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
         observation = task_state.get("observation") or {}
         candidate = memory_state.get("candidate")
         memory_mechanism = {
-            "policy": "explicit-confirmation" if preference_settings["enabled"] else "disabled-by-memory-policy",
+            "policy": "explicit-confirmation" if preference_settings["preference_enabled"] else "disabled-by-memory-policy",
             "scope": {
                 "skill": active_runtime.skill.name,
                 "task": spec.id,
@@ -1380,8 +1383,8 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                 "count": len(task_records),
             },
             "retrieval": {
-                "status": "matched" if hint else "no-match" if preference_settings["enabled"] else "disabled",
-                "text": hint.get("prompt") if hint else PROMPTS.diag_task_no_match if preference_settings["enabled"] else PROMPTS.diag_retrieval_disabled,
+                "status": "matched" if hint else "no-match" if preference_settings["preference_enabled"] else "disabled",
+                "text": hint.get("prompt") if hint else PROMPTS.diag_task_no_match if preference_settings["preference_enabled"] else PROMPTS.diag_retrieval_disabled,
                 "memoryId": hint.get("id") if hint else None,
                 "method": retrieval["method"],
                 "query": retrieval["query"],
@@ -1428,8 +1431,8 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
             },
             "memorySystems": [
                 {"id": "working", "name": PROMPTS.diag_mem_working_name, "status": "live" if bridges else "idle", "implementation": PROMPTS.diag_mem_working_impl},
-                {"id": "preference", "name": PROMPTS.diag_mem_preference_name, "status": "connected" if preference_settings["enabled"] else "disabled", "implementation": PROMPTS.diag_mem_preference_impl},
-                {"id": "episodic", "name": PROMPTS.diag_mem_episodic_name, "status": "connected-summary" if episodic_settings["enabled"] else "disabled", "implementation": PROMPTS.diag_mem_episodic_impl_with_task},
+                {"id": "preference", "name": PROMPTS.diag_mem_preference_name, "status": "connected" if preference_settings["preference_enabled"] else "disabled", "implementation": PROMPTS.diag_mem_preference_impl},
+                {"id": "episodic", "name": PROMPTS.diag_mem_episodic_name, "status": "connected-summary" if episodic_settings["episodic_enabled"] else "disabled", "implementation": PROMPTS.diag_mem_episodic_impl_with_task},
                 {"id": "knowledge", "name": PROMPTS.diag_mem_knowledge_name, "status": "static-injection", "implementation": PROMPTS.diag_mem_knowledge_impl_with_task},
             ],
             "knowledgeMechanism": {
@@ -1465,13 +1468,14 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
     def request_bridge_response(
         bridge, instructions, *, priority, interrupt=False,
         speech_policy="immediate", reason="unspecified", max_protection_ms=2500,
-        origin=None,
+        output_mode="audio", purpose="conversation", origin=None,
     ):
         if hasattr(bridge, "scheduler_snapshot"):
             return bridge.request_response(
                 instructions, priority=priority, interrupt=interrupt,
                 speech_policy=speech_policy, reason=reason,
                 max_protection_ms=max_protection_ms,
+                output_mode=output_mode, purpose=purpose,
                 origin=origin,
             )
         return bridge.request_response(instructions, priority=priority, interrupt=interrupt)
@@ -1632,7 +1636,7 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                             "jobId": job["jobId"],
                             "label": (job.get("payload") or {}).get("label", ""),
                         },
-                        job_id=job["jobId"], priority=90,
+                        job_id=job["jobId"], priority=90, allow_stale=True,
                     )
                     ledger.set_job_status(
                         job["jobId"], "completed",
@@ -1641,8 +1645,14 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                 bridge = owner.bridge
                 if bridge is not None and hasattr(bridge, "scheduler_snapshot"):
                     snapshot = bridge.scheduler_snapshot()
-                    if not snapshot.get("pending") and not snapshot.get("activeResponseIds") and not snapshot.get("queued"):
-                        claimed = ledger.claim_next_result()
+                    unresolved_input = bool(
+                        hasattr(bridge, "has_unresolved_user_input")
+                        and bridge.has_unresolved_user_input()
+                    )
+                    if not unresolved_input and not snapshot.get("pending") and not snapshot.get("activeResponseIds") and not snapshot.get("queued"):
+                        claimed = ledger.claim_next_result(
+                            latest_sequence=owner.latest_input_sequence,
+                        )
                         if claimed is not None:
                             accepted = request_bridge_response(
                                 bridge,
@@ -2560,7 +2570,7 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
         skill_control = semantic_decision.get("skillControl")
         selected_by_semantic = semantic_decision.get("selectedSkill")
         episodic_retrieval = None
-        if episodic_settings["enabled"]:
+        if episodic_settings["episodic_enabled"]:
             episodic_retrieval = active_episodic.retrieve(
                 transcript,
                 session_id=harness.session_id if harness else None,
@@ -2674,8 +2684,8 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                 "episodic.memory.retrieved",
                 "realtime-episodic-memory",
                 {
-                    "enabled": bool(episodic_settings["enabled"] or durable_retrieval is not None),
-                    "caseMemoryEnabled": episodic_settings["enabled"],
+                    "enabled": bool(episodic_settings["episodic_enabled"] or durable_retrieval is not None),
+                    "caseMemoryEnabled": episodic_settings["episodic_enabled"],
                     "participantMemoryEnabled": preference_enabled,
                     "method": episodic_retrieval["method"],
                     "query": episodic_retrieval["query"],
@@ -2998,7 +3008,7 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                     atom_consent = "explicit"
                 write_enabled = (
                     preference_enabled if requested_scope == "participant"
-                    else episodic_settings["enabled"]
+                    else episodic_settings["episodic_enabled"]
                 )
                 if not write_enabled:
                     skipped_reasons.append(f"{requested_scope}-memory-disabled")
@@ -4316,8 +4326,21 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                 or owner.transitioning
             ):
                 raise RuntimeError("tool call belongs to a stale case connection")
-            audit_count = len(session_tools.audit)
             source = dict(origin or {})
+            ledger = owner.work_ledger or CaseWorkLedger(harness.journal)
+            source_turn_id = str(source.get("turnId", ""))
+            source_intent_id = str(source.get("intentId", ""))
+            source_job_id = str(source.get("jobId", ""))
+            source_turn = ledger.turns().get(source_turn_id) if source_turn_id else None
+            source_intent = ledger.intents().get(source_intent_id) if source_intent_id else None
+            source_job = ledger.jobs().get(source_job_id) if source_job_id else None
+            if source_turn and source_turn.get("supersededBy"):
+                raise RuntimeError("tool call belongs to a corrected user turn")
+            if source_intent and source_intent.get("status") in {"suspended", "cancelled", "failed"}:
+                raise RuntimeError("tool call belongs to an inactive intent")
+            if source_job and source_job.get("status") in {"suspended", "cancelled", "failed"}:
+                raise RuntimeError("tool call belongs to an inactive job")
+            audit_count = len(session_tools.audit)
             declared_tools = source.get("tools")
             if not isinstance(declared_tools, list):
                 declared_tools = session_tool_declarations()
@@ -4483,15 +4506,25 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                     detail={"runtimeCheckpoint": origin.get("runtimeCheckpoint"), "reason": "response-interrupted"},
                 )
 
-        async def classify_semantic_turn(text: str) -> dict:
+        async def classify_semantic_turn(text: str, turn_id: str | None = None) -> dict:
             catalog = [
                 {"name": item["name"], "description": item["description"]}
                 for item in registry.summaries()
             ]
             turn_clock = clock_for_session(user_id, session_id)
+            turns = (owner.work_ledger or CaseWorkLedger(harness.journal)).turns()
+            previous = None
+            if turn_id:
+                current_sequence = int(turns.get(str(turn_id), {}).get("sequence") or 0)
+                previous = max(
+                    (item for item in turns.values() if str(item.get("turnId")) != str(turn_id) and int(item.get("sequence") or 0) < current_sequence),
+                    key=lambda item: int(item.get("sequence") or 0),
+                    default=None,
+                )
             semantic_router.set_turn_context(
                 clock_context=turn_clock.prompt_payload(),
                 memory_draft=timeline.pending_draft(user_id=user_id, case_id=session_id),
+                previous_turn=previous,
             )
             return await semantic_router.classify(text, catalog)
 
@@ -4518,6 +4551,9 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
             as 'task_update' WS messages via MemoryEventBus.emit_event().
             """
             slot.status = "running"
+            ledger = owner.work_ledger or CaseWorkLedger(harness.journal)
+            if slot.job_id and slot.job_id in ledger.jobs():
+                ledger.set_job_status(slot.job_id, "running")
             if owner.memory_bus:
                 owner.memory_bus.emit_event(
                     "task_update",
@@ -4527,18 +4563,23 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                     status="running",
                 )
             try:
-                async with owner.mutation_lock:
-                    result = process_transcript(
-                        candidate_text,
-                        harness,
-                        bg_runtime,
-                        persist_runtime_checkpoint=False,
-                        episodic_memory=current_episodic_memory(),
-                        user_scope=user_id,
-                        semantic_decision=bg_semantic,
-                        memory_policy=current_memory_policy(),
-                        clock_context=clock_for_session(user_id, session_id),
-                    )
+                # Background runtimes are isolated from the foreground runtime.
+                # Journal and TimelineMemory provide their own short transaction
+                # locks; holding the foreground mutation lock here would make a
+                # long background query delay every newer user turn.
+                result = process_transcript(
+                    candidate_text,
+                    harness,
+                    bg_runtime,
+                    turn_id=slot.turn_id,
+                    transcript_entry=ledger.turn_message(str(slot.turn_id)) if slot.turn_id else None,
+                    persist_runtime_checkpoint=False,
+                    episodic_memory=current_episodic_memory(),
+                    user_scope=user_id,
+                    semantic_decision=bg_semantic,
+                    memory_policy=current_memory_policy(),
+                    clock_context=clock_for_session(user_id, session_id),
+                )
                 slot.status = "done"
                 slot.completed_at = time.time()
                 write = result.get("timelineWrite") or {}
@@ -4549,6 +4590,27 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                         or ""
                     )[:80] or None
                 )
+                if slot.intent_id and slot.intent_id in ledger.intents():
+                    result_entry = ledger.enqueue_result(
+                        slot.intent_id,
+                        {
+                            "kind": candidate_kind,
+                            "status": "completed",
+                            "request": candidate_text,
+                            "outcome": {
+                                "routingAction": (result.get("decision") or {}).get("action"),
+                                "timelineAction": write.get("action"),
+                                "committedCardIds": list(write.get("committedCardIds") or []),
+                            },
+                            "sourceTurnId": slot.turn_id,
+                        },
+                        job_id=slot.job_id,
+                        priority=50,
+                        delivery=slot.delivery,
+                    )
+                    if slot.job_id and slot.job_id in ledger.jobs():
+                        ledger.set_job_status(slot.job_id, "completed", detail={"resultId": result_entry["resultId"]})
+                    ledger.set_intent_status(slot.intent_id, "completed", detail={"resultId": result_entry["resultId"]})
                 if owner.memory_bus:
                     owner.memory_bus.emit_event(
                         "task_update",
@@ -4564,6 +4626,10 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
             except asyncio.CancelledError:
                 slot.status = "cancelled"
                 slot.completed_at = time.time()
+                if slot.job_id and slot.job_id in ledger.jobs():
+                    ledger.set_job_status(slot.job_id, "cancelled", detail={"reason": "task-cancelled"})
+                if slot.intent_id and slot.intent_id in ledger.intents():
+                    ledger.set_intent_status(slot.intent_id, "cancelled", detail={"reason": "task-cancelled"})
                 if owner.memory_bus:
                     owner.memory_bus.emit_event(
                         "task_update",
@@ -4576,6 +4642,10 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
             except Exception as exc:
                 slot.status = "failed"
                 slot.completed_at = time.time()
+                if slot.job_id and slot.job_id in ledger.jobs():
+                    ledger.set_job_status(slot.job_id, "failed", detail={"error": str(exc)[:300]})
+                if slot.intent_id and slot.intent_id in ledger.intents():
+                    ledger.set_intent_status(slot.intent_id, "failed", detail={"error": str(exc)[:300]})
                 LOGGER.warning(
                     "Background intent %s failed: %s", slot.task_id, exc, exc_info=True
                 )
@@ -4593,7 +4663,7 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
             ledger = owner.work_ledger or CaseWorkLedger(harness.journal)
             ledger.set_turn_status(turn_id, "classifying")
             async with classification_limit:
-                semantic = await classify_semantic_turn(text)
+                semantic = await classify_semantic_turn(text, turn_id)
             ledger.set_turn_status(
                 turn_id, "ready", detail={"semanticMethod": semantic.get("method")},
             )
@@ -4630,6 +4700,13 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                 if owner.socket_token is not socket_token or owner.epoch != connection_epoch:
                     raise asyncio.CancelledError
                 work_ledger.set_turn_status(turn_id, "processing")
+                revision = semantic.get("revision")
+                if revision:
+                    work_ledger.revise_turn(
+                        turn_id,
+                        str(revision["supersedesTurnId"]),
+                        revision_type=str(revision.get("type", "correction")),
+                    )
                 pending_draft_before = timeline.pending_draft(
                     user_id=user_id, case_id=session_id,
                 )
@@ -4674,6 +4751,19 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                     if c is not selected_candidate
                     and c.kind in _BG_KINDS
                     and platform_capability_available("background-execution", capability_overrides)
+                ]
+                secondary_response_candidates = [
+                    c for c in remaining_candidates
+                    if c is not selected_candidate
+                    and (
+                        c.kind in {"foreground-dialogue", "waiting-input"}
+                        or (
+                            c.kind in _BG_KINDS
+                            and not platform_capability_available(
+                                "background-execution", capability_overrides,
+                            )
+                        )
+                    )
                 ]
 
                 requested_intent_kind = str(
@@ -4929,13 +5019,29 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                             "Background intent fanout; derived from compound turn classification."
                         ),
                     }
+                    _bg_intent = work_ledger.create_intent(
+                        turn_id,
+                        kind=_bg_cand.kind,
+                        payload={"semantic": _bg_semantic, "parentIntentId": intent["intentId"]},
+                        skill_ref={"name": _bg_skill} if _bg_skill else {},
+                        status="running-background",
+                    )
+                    _bg_job = work_ledger.create_job(
+                        _bg_intent["intentId"],
+                        kind=_bg_cand.kind,
+                        payload={"text": _bg_cand.text, "parentIntentId": intent["intentId"]},
+                        status="queued",
+                    )
                     _slot = TaskSlot(
-                        task_id=uuid4().hex[:16],
+                        task_id=_bg_job["jobId"],
                         kind=_bg_cand.kind,
                         text=_bg_cand.text,
                         status="pending",
                         created_at=time.time(),
                         turn_id=turn_id,
+                        intent_id=_bg_intent["intentId"],
+                        job_id=_bg_job["jobId"],
+                        delivery="display",
                     )
                     # Ring eviction: keep at most _BG_TASK_LIMIT slots per session
                     if len(owner.background_tasks) >= _BG_TASK_LIMIT:
@@ -4943,6 +5049,58 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                         del owner.background_tasks[_oldest]
                     owner.background_tasks[_slot.task_id] = _slot
                     _bg_task_queue.append((_slot, _bg_cand.text, _bg_cand.kind, _bg_rt, _bg_semantic))
+
+                # One compound turn may contain several immediate questions. The
+                # first remains the spoken response; each additional question has
+                # its own durable ownership chain and is queued as a text response.
+                _secondary_response_queue: list[tuple[str, dict[str, Any]]] = []
+                for _candidate in secondary_response_candidates:
+                    _candidate_waiting = _candidate.kind == "waiting-input"
+                    _candidate_unsupported = _candidate.kind in _BG_KINDS
+                    _candidate_kind = (
+                        "waiting-input" if _candidate_waiting else "foreground-dialogue"
+                    )
+                    _child_intent = work_ledger.create_intent(
+                        turn_id,
+                        kind=_candidate_kind,
+                        payload={
+                            "semantic": {
+                                **semantic,
+                                "intentKind": _candidate_kind,
+                                "requestedIntentKind": (
+                                    _candidate.kind if _candidate_unsupported else _candidate_kind
+                                ),
+                                "intentExecution": (
+                                    {
+                                        "status": "unsupported",
+                                        "capability": "background-execution",
+                                        "reason": "No durable background-execution executor is connected.",
+                                    }
+                                    if _candidate_unsupported else
+                                    {"status": "waiting-input"} if _candidate_waiting else None
+                                ),
+                                "intents": [_candidate.model_dump()],
+                            },
+                            "parentIntentId": intent["intentId"],
+                        },
+                        status="waiting-input" if _candidate_waiting else "pending",
+                    )
+                    _child_job = work_ledger.create_job(
+                        _child_intent["intentId"],
+                        kind=_candidate_kind,
+                        payload={"text": _candidate.text, "parentIntentId": intent["intentId"]},
+                        status="waiting-input" if _candidate_waiting else "waiting-result",
+                    )
+                    _secondary_response_queue.append((_candidate.text, {
+                        "turnId": turn_id,
+                        "intentId": _child_intent["intentId"],
+                        "jobId": _child_job["jobId"],
+                        "skill": current_skill_ref,
+                        "tools": session_tool_declarations(),
+                        "runtimeCheckpoint": runtime_checkpoint(processing_runtime),
+                        "waitingInput": _candidate_waiting,
+                        "unsupportedCapability": "background-execution" if _candidate_unsupported else None,
+                    }))
 
                 state_payload = state(
                     session_runtime,
@@ -5037,7 +5195,15 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                 selection = turn_policy(session_runtime).select(result["decision"])
                 request_bridge_response(
                     bridge,
-                    grounded_user_instructions(text, result, session_runtime),
+                    grounded_user_instructions(
+                        selected_candidate.text
+                        if secondary_response_candidates
+                        and selected_candidate is not None
+                        and selected_candidate.kind == "foreground-dialogue"
+                        else text,
+                        result,
+                        session_runtime,
+                    ),
                     priority=100,
                     interrupt=explicit,
                     speech_policy="immediate" if explicit else selection["policy"],
@@ -5057,6 +5223,27 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                         "runtimeCheckpoint": runtime_checkpoint(processing_runtime),
                     },
                 )
+                for _candidate_text, _candidate_origin in _secondary_response_queue:
+                    _secondary_instruction = (
+                        "State plainly that this additional subtask cannot run in the background because no "
+                        "durable background executor is connected; do not imply it was started: "
+                        if _candidate_origin.get("unsupportedCapability") else
+                        "Ask only for the missing information needed by this additional subtask: "
+                        if _candidate_origin.get("waitingInput") else
+                        "Answer only this additional subtask from the current compound user turn, "
+                        "without repeating answers to its other subtasks: "
+                    )
+                    request_bridge_response(
+                        bridge,
+                        _secondary_instruction + json.dumps(_candidate_text, ensure_ascii=False),
+                        priority=90,
+                        interrupt=False,
+                        speech_policy="immediate",
+                        reason="compound-turn-additional-subtask",
+                        output_mode="text",
+                        purpose="compound-subtask",
+                        origin=_candidate_origin,
+                    )
             elif result.get("control") != "stop-speaking" and turn_sequence < owner.latest_input_sequence:
                 session_trace(
                     "response.skipped.stale_user_turn",
@@ -5163,6 +5350,7 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
             owner.turn_sequence += 1
             owner.latest_input_sequence = owner.turn_sequence
             ledger = owner.work_ledger or CaseWorkLedger(harness.journal)
+            ledger.suspend_before_sequence(owner.turn_sequence, reason="newer-user-turn")
             captured = ledger.capture_turn(
                 text,
                 source="input-audio-transcript",
@@ -5172,7 +5360,7 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
 
         _turn_accumulator = TurnAccumulator(
             _do_enqueue_transcript,
-            window_ms=float(os.getenv("EGOASSIST_TURN_ACCUMULATE_MS", "1200")),
+            window_ms=float(os.getenv("EGOASSIST_TURN_ACCUMULATE_MS", "700")),
         )
 
         def transcript_received(text):
@@ -5379,6 +5567,9 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                     owner.turn_sequence += 1
                     owner.latest_input_sequence = owner.turn_sequence
                     ledger = owner.work_ledger or CaseWorkLedger(harness.journal)
+                    ledger.suspend_before_sequence(
+                        owner.turn_sequence, reason="newer-explicit-control",
+                    )
                     captured = ledger.capture_turn(
                         transcript,
                         source="explicit-control",

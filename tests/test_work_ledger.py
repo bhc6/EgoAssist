@@ -76,6 +76,28 @@ def test_result_inbox_keeps_multiple_results_until_each_is_delivered(tmp_path):
     assert [item["resultId"] for item in ledger.pending_results()] == [second["resultId"]]
 
 
+def test_result_arbiter_skips_suspended_stale_intent(tmp_path):
+    ledger = CaseWorkLedger(SessionJournal(tmp_path / "case.jsonl", session_id="case"))
+    old_turn = ledger.capture_turn("old topic", source="test", sequence=1)
+    old_intent = ledger.create_intent(old_turn["turnId"], kind="background-work", status="running-background")
+    old_result = ledger.enqueue_result(old_intent["intentId"], "old result", priority=100)
+    new_turn = ledger.capture_turn("new topic", source="test", sequence=2)
+    ledger.suspend_before_sequence(2)
+
+    assert ledger.claim_next_result(latest_sequence=2) is None
+    assert ledger.results()[old_result["resultId"]]["status"] == "pending"
+
+
+def test_stale_scheduled_result_can_be_delivered_when_explicitly_allowed(tmp_path):
+    ledger = CaseWorkLedger(SessionJournal(tmp_path / "case.jsonl", session_id="case"))
+    old_turn = ledger.capture_turn("old reminder", source="test", sequence=1)
+    intent = ledger.create_intent(old_turn["turnId"], kind="background-reminder", status="running-background")
+    result = ledger.enqueue_result(intent["intentId"], "reminder fired", allow_stale=True, priority=90)
+    ledger.capture_turn("new topic", source="test", sequence=2)
+
+    assert ledger.claim_next_result(latest_sequence=2)["resultId"] == result["resultId"]
+
+
 def test_due_jobs_are_recoverable_after_disconnect(tmp_path):
     ledger = CaseWorkLedger(SessionJournal(tmp_path / "case.jsonl", session_id="case"))
     turn = ledger.capture_turn("remind me", source="test")
@@ -149,3 +171,18 @@ def test_memory_draft_continuation_links_new_turn_to_existing_intent(tmp_path):
     restored = ledger.intents()[intent["intentId"]]
     assert restored["turnIds"] == [first_turn["turnId"], followup["turnId"]]
     assert ledger.journal.entries()[-1]["type"] == "intent_turn_link"
+
+
+def test_turn_revision_cancels_superseded_work(tmp_path):
+    ledger = CaseWorkLedger(SessionJournal(tmp_path / "case.jsonl", session_id="case"))
+    old_turn = ledger.capture_turn("check Beijing", source="test", sequence=1)
+    intent = ledger.create_intent(old_turn["turnId"], kind="foreground-dialogue", status="foreground")
+    job = ledger.create_job(intent["intentId"], kind="lookup", status="running")
+    new_turn = ledger.capture_turn("not Beijing, Shanghai", source="test", sequence=2)
+
+    ledger.revise_turn(new_turn["turnId"], old_turn["turnId"])
+
+    assert ledger.turns()[old_turn["turnId"]]["supersededBy"] == new_turn["turnId"]
+    assert ledger.intents()[intent["intentId"]]["status"] == "cancelled"
+    assert ledger.jobs()[job["jobId"]]["status"] == "cancelled"
+    assert ledger.turn_message(old_turn["turnId"])["message"]["content"] == "check Beijing"

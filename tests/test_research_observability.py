@@ -67,6 +67,7 @@ def speech_bridge(policy):
     bridge._cancel_when_created = False
     bridge._barge_in_pending = False
     bridge._trace_sink = None
+    bridge._assistant_transcript_buffers = {}
     bridge.conversation = Conversation()
     return bridge
 

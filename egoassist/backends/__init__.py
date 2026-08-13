@@ -22,7 +22,7 @@ def build_backend(name: str | None = None, **kw):
     from .._env import env
 
     name = (name or env("EGOASSIST_BACKEND", "mock")).lower()
-    device = kw.pop("device", None) or env("EGOASSIST_DEVICE", "cuda")
+    device = kw.pop("device", None) or env("EGOASSIST_DEVICE", "auto")
 
     if name == "mock":
         return MockBackend(**kw)

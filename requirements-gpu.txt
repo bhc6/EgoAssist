@@ -1,4 +1,5 @@
-# Optional local-video and EgoLife benchmark dependencies.
+# Optional local-model, video, and EgoLife benchmark dependencies.
+# PyTorch is intentionally installed separately for the target CUDA/MPS/CPU platform.
 # Install in the project virtual environment after the base package.
 transformers>=4.49
 accelerate>=0.34

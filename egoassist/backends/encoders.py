@@ -11,9 +11,12 @@ X-Clip/CLIP4Clip 的做法，便于同编码器下比较）。
 
 from __future__ import annotations
 
+import os
 from typing import Sequence
 
 import numpy as np
+
+from .devices import resolve_device
 
 
 def _to_pil(frame: np.ndarray):
@@ -30,11 +33,19 @@ class ClipEncoder:
     """冻结图文双塔编码器。默认 open_clip ViT-B-32（轻，8G 显存无压力）。"""
 
     def __init__(self, model_name: str = "ViT-B-32",
-                 pretrained: str = "laion2b_s34b_b79k", device: str = "cuda"):
-        self.device = device
+                 pretrained: str = "laion2b_s34b_b79k", device: str = "auto",
+                 batch_size: int | None = None):
+        import torch
+
+        self.device = resolve_device(device, torch_module=torch)
+        configured_batch = (batch_size if batch_size is not None
+                            else int(os.environ.get("EGOASSIST_EMBED_BATCH_SIZE", "64")))
+        if configured_batch < 1:
+            raise ValueError("CLIP embedding batch size must be at least 1")
+        self.batch_size = configured_batch
         self._backend = None
-        # 防止意外落 CPU：CUDA 可用时仍传 device='cpu' 会造成 ~10× 性能退化
-        if device == "cpu":
+        # Warn only when CPU was explicitly requested; auto may legitimately resolve to CPU.
+        if str(device).strip().lower() == "cpu":
             try:
                 import torch as _t
                 if _t.cuda.is_available():
@@ -47,21 +58,19 @@ class ClipEncoder:
                 pass
         try:
             import open_clip  # type: ignore
-            import torch
             self._torch = torch
             self._model, _, self._preprocess = open_clip.create_model_and_transforms(
-                model_name, pretrained=pretrained, device=device)
+                model_name, pretrained=pretrained, device=self.device)
             self._model.eval()
             self._tokenizer = open_clip.get_tokenizer(model_name)
             self.dim = self._model.text_projection.shape[1]
             self._backend = "open_clip"
         except Exception:
             # 回退：transformers CLIP
-            import torch
             from transformers import CLIPModel, CLIPProcessor
             self._torch = torch
             hf = "openai/clip-vit-base-patch32"
-            self._model = CLIPModel.from_pretrained(hf).to(device).eval()
+            self._model = CLIPModel.from_pretrained(hf).to(self.device).eval()
             self._proc = CLIPProcessor.from_pretrained(hf)
             self.dim = self._model.config.projection_dim
             self._backend = "hf"
@@ -78,7 +87,7 @@ class ClipEncoder:
             return np.zeros(self.dim, dtype=np.float32)
         t = self._torch
         pil = [_to_pil(f) for f in frames]
-        with t.no_grad():
+        with t.inference_mode():
             if self._backend == "open_clip":
                 x = t.stack([self._preprocess(p) for p in pil]).to(self.device)
                 feats = self._model.encode_image(x)
@@ -90,7 +99,7 @@ class ClipEncoder:
 
     def embed_text(self, text: str) -> np.ndarray:
         t = self._torch
-        with t.no_grad():
+        with t.inference_mode():
             if self._backend == "open_clip":
                 tok = self._tokenizer([text]).to(self.device)
                 feats = self._model.encode_text(tok)[0]
@@ -113,12 +122,15 @@ class ClipEncoder:
         if len(frames) == 0:
             return np.empty((0, self.dim), dtype=np.float32)
         t = self._torch
-        pil = [_to_pil(f) for f in frames]
-        with t.no_grad():
-            if self._backend == "open_clip":
-                x = t.stack([self._preprocess(p) for p in pil]).to(self.device)
-                feats = self._model.encode_image(x)           # (N, D)
-            else:
-                x = self._proc(images=pil, return_tensors="pt").to(self.device)
-                feats = self._model.get_image_features(**x)   # (N, D)
-        return self._l2_batch(feats.float().cpu().numpy())
+        chunks = []
+        with t.inference_mode():
+            for start in range(0, len(frames), self.batch_size):
+                pil = [_to_pil(f) for f in frames[start:start + self.batch_size]]
+                if self._backend == "open_clip":
+                    x = t.stack([self._preprocess(p) for p in pil]).to(self.device)
+                    feats = self._model.encode_image(x)
+                else:
+                    x = self._proc(images=pil, return_tensors="pt").to(self.device)
+                    feats = self._model.get_image_features(**x)
+                chunks.append(feats.float().cpu().numpy())
+        return self._l2_batch(np.concatenate(chunks, axis=0))

@@ -56,7 +56,7 @@ def scheduler_bridge():
     bridge._active_response_requests = {}
     bridge._output_channels_seen = set()
     bridge._suppressed_output_channels_seen = set()
-    bridge._assistant_transcript_buffer = ""
+    bridge._assistant_transcript_buffers = {}
     bridge._last_assistant_utterance = ""
     bridge._last_assistant_utterance_at = 0.0
     bridge.last_proactive_check = 0.0

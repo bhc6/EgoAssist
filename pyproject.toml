@@ -35,7 +35,7 @@ dependencies = [
 [project.optional-dependencies]
 # 云端作答后端
 api = ["openai>=1.40", "google-generativeai>=0.8"]
-# 本地 GPU 作答 + 检索编码器（torch 需按 Blackwell 单独装，见 requirements-gpu.txt）
+# 本地模型作答 + 检索编码器（torch 按平台单独安装；FAISS 依赖为 CPU 版）
 gpu = [
     "transformers>=4.49", "accelerate>=0.34", "qwen-vl-utils>=0.0.8",
     "bitsandbytes>=0.44", "open_clip_torch>=2.24", "pillow>=10",

@@ -18,6 +18,7 @@ from typing import List, Sequence
 import numpy as np
 
 from .base import Answer, VLMBackend
+from .devices import preferred_dtype, resolve_device
 from .encoders import ClipEncoder, _to_pil
 
 _SYS = (
@@ -72,7 +73,7 @@ def _data_url(frame: np.ndarray) -> str:
 class _ClipEmbedBackend(VLMBackend):
     """共享检索嵌入 + 关键帧下采样；子类实现 caption()/answer()。"""
 
-    def __init__(self, encoder: ClipEncoder | None = None, device: str = "cuda",
+    def __init__(self, encoder: ClipEncoder | None = None, device: str = "auto",
                  max_frames: int = 4):
         self.encoder = encoder or ClipEncoder(device=device)
         self.dim = self.encoder.dim
@@ -110,7 +111,7 @@ class LocalQwenBackend(_ClipEmbedBackend):
     故默认改为 bf16 全精度；显存确实不足时可手动传 load_in_4bit=True。"""
 
     def __init__(self, model_id: str = "Qwen/Qwen2.5-VL-3B-Instruct",
-                 load_in_4bit: bool = False, device: str = "cuda",
+                 load_in_4bit: bool = False, device: str = "auto",
                  encoder: ClipEncoder | None = None, encoder_device: str | None = None,
                  max_frames: int = 4, caption_tokens: int = 48,
                  answer_tokens: int = 128):
@@ -126,18 +127,34 @@ class LocalQwenBackend(_ClipEmbedBackend):
                 from transformers import Qwen2_5_VLForConditionalGeneration as model_class
             except ImportError:
                 from transformers import Qwen2VLForConditionalGeneration as model_class
-        kw = dict(dtype=torch.bfloat16, device_map=device)
+        self.device = resolve_device(device, torch_module=torch)
+        dtype = preferred_dtype(torch, self.device)
+        kw = {"dtype": dtype}
         if load_in_4bit:
+            if not self.device.startswith("cuda"):
+                raise ValueError("4-bit bitsandbytes loading requires a CUDA device")
             from transformers import BitsAndBytesConfig
             kw["quantization_config"] = BitsAndBytesConfig(
-                load_in_4bit=True, bnb_4bit_compute_dtype=torch.bfloat16,
+                load_in_4bit=True, bnb_4bit_compute_dtype=dtype,
                 bnb_4bit_quant_type="nf4", bnb_4bit_use_double_quant=True)
             kw.pop("dtype", None)
+            kw["device_map"] = {"": self.device}
         self.torch = torch
         self.caption_tokens = caption_tokens
         self.answer_tokens = answer_tokens
         self.model = model_class.from_pretrained(model_id, **kw).eval()
+        if not load_in_4bit:
+            self.model = self.model.to(self.device)
         self.processor = AutoProcessor.from_pretrained(model_id)
+
+    def _model_device(self):
+        device = getattr(self.model, "device", None)
+        if device is not None:
+            return device
+        try:
+            return next(self.model.parameters()).device
+        except (StopIteration, AttributeError):
+            return self.device
 
     def _run(self, images: List[np.ndarray], prompt: str, system: str | None = None,
              max_new_tokens: int | None = None) -> str:
@@ -148,8 +165,8 @@ class LocalQwenBackend(_ClipEmbedBackend):
         text = self.processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
         pil_images = [_to_pil(im) for im in images]
         inputs = self.processor(text=[text], images=pil_images or None,
-                                return_tensors="pt").to(self.model.device)
-        with self.torch.no_grad():
+                                return_tensors="pt").to(self._model_device())
+        with self.torch.inference_mode():
             out = self.model.generate(
                 **inputs, max_new_tokens=max_new_tokens or self.answer_tokens,
                 do_sample=False,
@@ -178,7 +195,7 @@ class GeminiBackend(_ClipEmbedBackend):
     """作答走 Gemini（贴近 VisionClaw 的 Gemini 路径），检索走本地 CLIP。"""
 
     def __init__(self, model: str = "gemini-2.5-flash", api_key: str | None = None,
-                 device: str = "cuda", encoder: ClipEncoder | None = None, max_frames: int = 4):
+                 device: str = "auto", encoder: ClipEncoder | None = None, max_frames: int = 4):
         super().__init__(encoder=encoder, device=device, max_frames=max_frames)
         import os
 
@@ -212,7 +229,7 @@ class OpenAIBackend(_ClipEmbedBackend):
     """作答走 OpenAI 多模态（如 gpt-4o），检索走本地 CLIP。可选 logprob 置信度。"""
 
     def __init__(self, model: str = "gpt-4o", api_key: str | None = None,
-                 use_logprobs: bool = True, device: str = "cuda",
+                 use_logprobs: bool = True, device: str = "auto",
                  encoder: ClipEncoder | None = None, max_frames: int = 4):
         super().__init__(encoder=encoder, device=device, max_frames=max_frames)
         import os
@@ -263,7 +280,7 @@ class DashScopeQwenBackend(_ClipEmbedBackend):
     """DashScope Qwen-VL/Omni视觉后端；检索仍使用同一OpenCLIP编码器。"""
 
     def __init__(self, model: str = "qwen3-vl-plus", api_key: str | None = None,
-                 device: str = "cuda", encoder: ClipEncoder | None = None,
+                 device: str = "auto", encoder: ClipEncoder | None = None,
                  max_frames: int = 4):
         super().__init__(encoder=encoder, device=device, max_frames=max_frames)
         import os

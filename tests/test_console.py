@@ -33,7 +33,10 @@ def test_frontend_exposes_memory_pipeline_and_treats_steps_as_reference_map():
     html = (CONSOLE_ROOT / "index.html").read_text(encoding="utf-8")
     script = (CONSOLE_ROOT / "app.js").read_text(encoding="utf-8")
 
-    assert 'id="memoryFlow"' in html
+    assert 'id="liveWorkflow"' in html
+    assert 'id="memoryTraceLog"' not in html
+    assert 'id="taskQueueLog"' not in html
+    assert 'id="memoryFlow"' not in html
     assert 'id="assistantCaption"' in html
     assert 'id="memoryScope"' in html
     assert 'id="memoryProfile"' in html
@@ -51,7 +54,7 @@ def test_frontend_exposes_memory_pipeline_and_treats_steps_as_reference_map():
     assert '"?session=" + encodeURIComponent(selectedSessionId)' in script
     assert 'id="mirrorCamera"' in html
     assert 'vendor/livekit-client.umd.js?v=2.21.0' in html
-    assert 'app.js?v=20260730-m4' in html
+    assert 'app.js?v=20260813-workflow' in html
     assert '/api/livekit/token' in script
     assert 'activateWebSocketMediaFallback' in script
     assert 'interactionTransport === "livekit"' in script
@@ -78,7 +81,7 @@ def test_frontend_supports_unloaded_runtime_and_audio_attribution():
     script = (CONSOLE_ROOT / "app.js").read_text(encoding="utf-8")
     assert 'id="intentRouting"' in html
     assert 'id="audioAttribution"' in html
-    assert 'id="episodicEpisodes"' in html
+    assert "workflowStages" in script
     assert "state.activeSkill?.name || \"\"" in script
     assert "task?.decision || state.genericDecision" in script
     assert 'type: "media_config"' in script

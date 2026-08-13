@@ -115,6 +115,21 @@ def test_invalid_complete_journal_line_fails_closed(tmp_path):
         SessionJournal(path, session_id="invalid")
 
 
+def test_superseded_user_turn_is_excluded_from_provider_context(tmp_path):
+    journal = SessionJournal(tmp_path / "revision.jsonl", session_id="revision")
+    harness = ContextHarness(journal, small_settings())
+    first = harness.record_user("look up Beijing", source="test", turn_id="turn-1")
+    harness.record_user("correction: Shanghai", source="test", turn_id="turn-2")
+    journal.append("turn_revision", {
+        "turnId": "turn-2", "supersedesTurnId": "turn-1", "revisionType": "correction",
+    })
+
+    built = harness.build([])
+
+    assert not any(message.get("entryId") == first["id"] for message in built["messages"])
+    assert any(message["content"] == "correction: Shanghai" for message in built["messages"])
+
+
 def test_long_session_compacts_to_self_contained_checkpoint(tmp_path):
     journal = SessionJournal(tmp_path / "long.jsonl", session_id="long")
     harness = ContextHarness(journal, small_settings())

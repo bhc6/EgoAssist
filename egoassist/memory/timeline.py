@@ -802,7 +802,15 @@ class TimelineMemory:
         """Remove expired memory cards/drafts for one account with bounded counts."""
         cutoff_value = _iso(cutoff)
         with self._lock, self._connect() as connection:
-            cards = connection.execute("DELETE FROM memory_cards WHERE user_id=? AND updated_at<?", (str(user_id), cutoff_value)).rowcount
+            # Retention is based on the memory's event/effective time, not the
+            # last projection update. Consolidation and correction must not
+            # silently extend an old memory's lifetime.
+            cards = connection.execute(
+                """DELETE FROM memory_cards
+                   WHERE user_id=?
+                     AND COALESCE(effective_at, happened_at, recorded_at, created_at)<?""",
+                (str(user_id), cutoff_value),
+            ).rowcount
             drafts = connection.execute("DELETE FROM memory_drafts WHERE user_id=? AND updated_at<?", (str(user_id), cutoff_value)).rowcount
         return {"memoryCards": int(cards or 0), "memoryDrafts": int(drafts or 0)}
 
@@ -889,11 +897,20 @@ class TimelineMemory:
             fast_key = memory_key_for(query_subject, query_predicate)
             if fast_key:
                 with self._lock, self._connect() as fast_conn:
+                    fast_scope_clauses = [
+                        "user_id=?", "scope=?", "memory_key=?", "status='active'",
+                    ]
+                    fast_scope_values: list[Any] = [
+                        str(user_id), scope, fast_key,
+                    ]
+                    if scope == "case":
+                        fast_scope_clauses.append("case_id=?")
+                        fast_scope_values.append(str(case_id or ""))
                     fast_row = fast_conn.execute(
                         "SELECT * FROM memory_cards "
-                        "WHERE user_id=? AND memory_key=? AND status='active' "
+                        "WHERE " + " AND ".join(fast_scope_clauses) + " "
                         "ORDER BY happened_at DESC LIMIT 1",
-                        [str(user_id), fast_key],
+                        fast_scope_values,
                     ).fetchone()
                 if fast_row is not None:
                     fast_card_id = str(fast_row["id"])

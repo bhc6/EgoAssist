@@ -2,7 +2,7 @@
 
 EgoAssist acts as an MCP *client*.  External MCP servers expose tools
 (calendar, file system, web search, etc.) over stdio or HTTP/SSE.
-This module bridges those servers into the SkillToolExecutor.
+This module provides an asynchronous client for those servers.
 
 Supported transports
 --------------------
@@ -14,14 +14,8 @@ Supported transports
 Usage
 -----
 from egoassist.realtime.mcp_provider import MCPToolProvider, StdioTransport
-from egoassist.realtime.tools import SkillToolExecutor
-
 provider = MCPToolProvider(StdioTransport(["npx", "-y", "@modelcontextprotocol/server-filesystem", "/tmp"]))
 await provider.start()
-executor = SkillToolExecutor()
-executor.attach_mcp_provider(provider)
-
-# list_tools() returns declarations compatible with SkillToolExecutor
 tools = await provider.list_tools()
 result = await provider.call_tool("read_file", {"path": "/tmp/notes.txt"})
 await provider.stop()
@@ -31,7 +25,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import subprocess
 from typing import Any
 
 LOGGER = logging.getLogger(__name__)
@@ -46,7 +39,6 @@ class StdioTransport:
     def __init__(self, command: list[str]) -> None:
         self._command = list(command)
         self._proc: asyncio.subprocess.Process | None = None
-        self._seq = 0
 
     async def start(self) -> None:
         self._proc = await asyncio.create_subprocess_exec(
@@ -176,20 +168,6 @@ class MCPToolProvider:
                 text_parts = [c.get("text", "") for c in content if c.get("type") == "text"]
                 return {"status": "ok", "output": "\n".join(text_parts), "raw": result}
         return {"status": "ok", "output": str(result), "raw": result}
-
-    def as_handlers(self) -> dict[str, Any]:
-        """Return a handlers dict suitable for SkillToolExecutor.register_handler()."""
-        return {
-            f"mcp.{tool['name']}": self._make_handler(tool["name"])
-            for tool in self._tools
-        }
-
-    # ---- Internal ----
-
-    def _make_handler(self, tool_name: str):
-        async def _handler(arguments: dict[str, Any], _declaration: dict[str, Any]) -> dict[str, Any]:
-            return await self.call_tool(tool_name, arguments)
-        return _handler
 
     @staticmethod
     def _normalize_tool(raw: dict[str, Any]) -> dict[str, Any]:

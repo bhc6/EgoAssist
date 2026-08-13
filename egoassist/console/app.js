@@ -20,8 +20,50 @@ const AUDIO_BUFFER_HIGH_WATER = 512 * 1024;
 const VIDEO_BUFFER_HIGH_WATER = 128 * 1024;
 let droppedAudioChunks = 0;
 let droppedVideoFrames = 0;
-const memoryOps = [];  // Phase 1: memory trace events ring buffer
-const MAX_MEMORY_OPS = 60;
+const workflow = {turn: 0, active: false, stages: {}, activity: []};
+const workflowStages = [
+  ["input", "理解请求"],
+  ["reasoning", "思考中"],
+  ["memory", "记忆检索中"],
+  ["action", "执行与校验"],
+  ["delivery", "组织回答"],
+];
+
+function resetWorkflow(detail) {
+  workflow.turn += 1;
+  workflow.active = true;
+  workflow.stages = {input: {status: "active", detail, at: Date.now()}};
+  workflow.activity = [];
+  recordWorkflow("input", detail);
+}
+
+function setWorkflowStage(stage, status, detail) {
+  if (!workflow.active && status === "active") workflow.active = true;
+  workflow.stages[stage] = {status, detail, at: Date.now()};
+  if (detail) recordWorkflow(stage, detail);
+  renderLiveWorkflow();
+}
+
+function recordWorkflow(stage, detail) {
+  const previous = workflow.activity.at(-1);
+  if (previous?.stage === stage && previous.detail === detail) return;
+  workflow.activity.push({stage, detail, at: Date.now()});
+  workflow.activity = workflow.activity.slice(-8);
+}
+
+function renderLiveWorkflow() {
+  const root = $("#liveWorkflow");
+  if (!root) return;
+  const stages = workflowStages.map(([key, label]) => {
+    const item = workflow.stages[key] || {status: "waiting", detail: "等待前序可观测事件"};
+    const statusLabel = {active: "进行中", complete: "已完成", skipped: "未使用", failed: "失败", waiting: "等待"}[item.status] || item.status;
+    return "<article class='workflow-stage " + esc(item.status) + "'><span class='workflow-marker'></span><div><b>" + esc(label) + "</b><small>" + esc(item.detail) + "</small></div><em>" + esc(statusLabel) + "</em></article>";
+  }).join("");
+  const activity = workflow.activity.length
+    ? workflow.activity.slice().reverse().map(item => "<li><time>" + new Date(item.at).toLocaleTimeString("zh-CN", {hour12: false}) + "</time><b>" + esc(workflowStages.find(stage => stage[0] === item.stage)?.[1] || item.stage) + "</b><span>" + esc(item.detail) + "</span></li>").join("")
+    : "<li class='workflow-empty'>等待真实运行事件</li>";
+  root.innerHTML = "<div class='workflow-head'><b>当前工作流</b><span>仅展示事件、检索、工具和响应状态，不展示隐藏思维链</span></div><div class='workflow-stages'>" + stages + "</div><ol class='workflow-activity'>" + activity + "</ol>";
+}
 
 async function request(path, options = {}) {
   const response = await fetch(path, options);
@@ -197,13 +239,6 @@ async function boot() {
 }
 
 const actionName = action => ({silent: "静默", guide: "指导", ask: "询问", correct: "纠错", emergency: "紧急"}[action] || action);
-const memoryStageName = key => ({evidence: "证据", candidate: "候选", confirmation: "确认", retrieval: "召回", impact: "影响"}[key] || key);
-const memoryStatusName = status => ({
-  observed: "已有证据", waiting: "等待中", pending: "待确认", confirmed: "已确认",
-  matched: "已匹配", ready: "待语音提醒", reused: "已注入", "already-used": "已抑制重复",
-  "no-match": "无匹配", none: "无", disabled: "已关闭"
-}[status] || status);
-
 const eventClass = type => type.startsWith("media.") || type.startsWith("audio.") || type.startsWith("perception.") ? "input" : type.startsWith("memory.") ? "memory" : type.startsWith("response.") || type.startsWith("barge_in.") ? "response" : type.includes("decision") || type.startsWith("task.") ? "decision" : "";
 const eventTime = event => (event.timestampWall || "").slice(11, 23);
 
@@ -241,6 +276,27 @@ function renderPipeline(task, mechanism, step) {
   ];
   $("#pipeline").innerHTML = pipelineDetails.map((item, index) => "<article class='pipeline-node " + esc(item.status) + "' data-pipeline='" + index + "'><div><h3>" + esc(item.title) + "</h3><p>" + esc(item.summary) + "</p></div><b>" + esc(item.stage) + "</b></article>").join("");
   $$('[data-pipeline]').forEach(node => node.onclick = () => inspect(pipelineDetails[Number(node.dataset.pipeline)]));
+  renderLiveWorkflow();
+}
+
+function syncWorkflowFromState(task, mechanism) {
+  if (!workflow.active) return;
+  const retrieval = mechanism?.retrieval || {};
+  const candidates = retrieval.candidates || [];
+  if (retrieval.status === "matched") {
+    const selected = candidates.filter(item => item.selected).length;
+    setWorkflowStage("memory", "complete", "检索完成：候选 " + candidates.length + "，选中 " + selected);
+  } else if (["no-match", "none", "disabled"].includes(retrieval.status)) {
+    setWorkflowStage("memory", "skipped", retrieval.status === "disabled" ? "当前记忆策略已关闭" : "本轮没有可注入的匹配记忆");
+  }
+  const decision = task?.decision || state.genericDecision;
+  if (decision?.action) {
+    setWorkflowStage("reasoning", "complete", "已形成可观测决策：" + actionName(decision.action) + " · 置信度 " + Math.round((decision.confidence || 0) * 100) + "%");
+    if (!state.scheduler?.pending && !(state.scheduler?.activeResponseIds || []).length) {
+      setWorkflowStage("action", "skipped", "当前决策不需要外部工具或后台任务");
+      setWorkflowStage("delivery", "active", "决策已进入响应调度器");
+    }
+  }
 }
 
 function renderTimeline(events) {
@@ -249,99 +305,6 @@ function renderTimeline(events) {
   $$('[data-event]').forEach(node => node.onclick = () => inspect(events.find(event => event.eventId === node.dataset.event)));
   const selected = events.find(event => event.eventId === selectedEventId) || [...events].reverse().find(event => !event.type.startsWith("media."));
   if (selected) inspect(selected);
-}
-
-// Phase 2A: Background task queue functions
-const bgTasks = {};  // task_id → task slot object
-
-function applyTaskUpdate(msg) {
-  const id = msg.task_id;
-  if (!id) return;
-  const prev = bgTasks[id] || {};
-  bgTasks[id] = { ...prev, ...msg };
-  renderTaskQueue();
-}
-
-function renderTaskQueue() {
-  const el = $("#taskQueueLog");
-  if (!el) return;
-  const slots = Object.values(bgTasks).sort((a, b) => (b.ts || 0) - (a.ts || 0));
-  const running = slots.filter(s => s.status === "running").length;
-  const pending = slots.filter(s => s.status === "pending").length;
-  const badge = running ? running + " 运行中" : pending ? pending + " 待执行" : slots.length + " tasks";
-  $("#taskQueueCount").textContent = badge;
-  if (selectedSessionId)
-    $("#taskQueueLink").href = "/api/background-tasks?session=" + encodeURIComponent(selectedSessionId);
-  if (!slots.length) {
-    el.innerHTML = "<span class='trace-empty'>等待后台任务</span>";
-    return;
-  }
-  el.innerHTML = slots.slice(0, 20).map(s => {
-    const t = new Date((s.ts || 0) * 1000).toLocaleTimeString("zh-CN", {hour: "2-digit", minute: "2-digit", second: "2-digit"});
-    const dur = s.duration_ms != null ? " · " + s.duration_ms + "ms" : "";
-    const preview = esc((s.text_preview || s.result_preview || "").slice(0, 60));
-    const err = s.error ? " · " + esc(s.error.slice(0, 50)) : "";
-    return "<div class='task-slot task-slot--" + esc(s.status || "pending") + "'>" +
-      "<b class='task-status-badge'>" + esc(taskStatusLabel(s.status)) + "</b>" +
-      "<span class='task-kind'>" + esc(s.kind || "background-job") + "</span>" +
-      "<span class='task-preview'>" + preview + err + "</span>" +
-      "<time>" + t + dur + "</time></div>";
-  }).join("");
-}
-
-function taskStatusLabel(status) {
-  return { pending: "待执行", running: "执行中", done: "完成", failed: "失败", cancelled: "已取消" }[status] || status || "?";
-}
-
-// Phase 1: Memory observability functions
-function appendMemoryOp(op) {
-  memoryOps.push(op);
-  if (memoryOps.length > MAX_MEMORY_OPS) memoryOps.shift();
-  renderMemoryTraceLog();
-}
-
-function renderMemoryTraceLog() {
-  const el = $("#memoryTraceLog");
-  if (!el) return;
-  $("#memoryOpCount").textContent = memoryOps.length + " ops";
-  if (selectedSessionId) {
-    $("#memoryStateLink").href = "/api/memory/state?session=" + encodeURIComponent(selectedSessionId);
-  }
-  if (!memoryOps.length) {
-    el.innerHTML = "<span class='trace-empty'>等待记忆操作</span>";
-    return;
-  }
-  el.innerHTML = memoryOps.slice().reverse().map(op => {
-    const time = new Date((op.ts || 0) * 1000).toLocaleTimeString("zh-CN", {hour: "2-digit", minute: "2-digit", second: "2-digit"});
-    return "<div class='memory-op memory-op--" + esc(op.op) + "'>" +
-      "<b>" + esc(opLabel(op.op)) + "</b>" +
-      "<span>" + esc(opSummary(op)) + "</span>" +
-      "<time>" + esc(time) + "</time></div>";
-  }).join("");
-}
-
-function opLabel(op) {
-  const labels = {
-    "encode": "记忆写入",
-    "retrieve": "情景检索",
-    "compact": "上下文压缩",
-    "working_memory_push": "工作记忆"
-  };
-  return labels[op] || op;
-}
-
-function opSummary(op) {
-  if (op.op === "encode") {
-    return (op.kind || "?") + " · " + (op.tier || "?") + "层 · " + (op.text_preview || "").slice(0, 60);
-  }
-  if (op.op === "retrieve") {
-    const score = op.top_score != null ? " · 最高分 " + Number(op.top_score).toFixed(2) : "";
-    return "候选 " + (op.candidate_count || 0) + " · 选中 " + (op.selected_count || 0) + score;
-  }
-  if (op.op === "compact") {
-    return (op.tokens_before || "?") + " → " + (op.tokens_after || "?") + " tokens · " + (op.reason || "");
-  }
-  return JSON.stringify(op).slice(0, 80);
 }
 
 const terminalWorkStatus = status => ["completed", "failed", "cancelled", "delivered", "dismissed"].includes(status);
@@ -664,20 +627,9 @@ function render(next) {
     : latestRejection ? "rejected · " + latestRejection.reason : "等待任务绑定的结构化视觉证据";
   $("#memoryScope").textContent = "exact-trigger-lookup · " + (mechanism.scope.skill || "general") + " / " + (mechanism.scope.task || "unscoped");
   renderMemoryPolicy(state.memoryPolicy, state.memoryProfiles || []);
-  $("#memorySystems").innerHTML = state.memorySystems.map(item => "<article class='system-card " + esc(item.status) + "'><b>" + esc(item.name) + "</b><span>" + esc(item.status + " · " + item.implementation) + "</span></article>").join("");
-  $("#memoryFlow").innerHTML = ["evidence", "candidate", "confirmation", "retrieval", "impact"].map(key => {
-    const stage = mechanism[key];
-    const source = key === "evidence" && stage.source ? "<small>" + esc(stage.source) + "</small>" : "";
-    return "<article class='memory-stage " + esc(stage.status) + "'><span>" + esc(memoryStageName(key)) + "</span><b>" + esc(memoryStatusName(stage.status)) + "</b><p>" + esc(stage.text) + "</p>" + source + "</article>";
-  }).join("");
-  const candidates = mechanism.retrieval.candidates || [];
-  $("#retrievalCandidates").innerHTML = "<b>RETRIEVAL CANDIDATES</b>" + (candidates.length ? candidates.map(item => "<div class='rank-row " + (item.selected ? "selected" : "") + "'><b>" + esc(item.memoryId) + "</b><span>score " + item.score.toFixed(2) + " · " + esc(item.selected ? "selected" : item.rejectionReasons.join(", ")) + "</span><small>task=" + item.match.task + " checkpoint=" + item.match.checkpoint + "</small></div>").join("") : "<p>无候选记录</p>");
-  $("#memories").innerHTML = memory.records.length ? memory.records.map(item => "<article><b>" + esc(item.preference) + "</b><small>trigger " + esc(item.trigger.task) + " / " + esc(item.trigger.step) + "</small><button data-delete='" + esc(item.id) + "'>删除</button></article>").join("") : "<span>暂无已确认偏好</span>";
   const episodic = state.episodicMemory || {recent: [], retrieval: {candidates: []}};
   renderTimelineCards(episodic);
-  // Legacy episodic divs are now hidden; kept for backwardcompat event-wiring below.
   $("#toolAudit").innerHTML = state.toolAudit.length ? state.toolAudit.map(item => "<article><b>" + esc(item.tool || item.action || "tool") + "</b><p>" + esc(JSON.stringify(item.arguments || item.result || {})) + "</p><small>" + esc(item.time || item.timestamp || "") + "</small></article>").join("") : "<span class='muted'>暂无工具调用</span>";
-  $$("[data-delete]").forEach(button => button.onclick = () => runMemoryMutation(button, post("/api/memory/delete", {id: button.dataset.delete, sessionId: selectedSessionId})));
   $$("[data-delete-card]").forEach(button => button.onclick = () => runMemoryMutation(button, post("/api/memory/delete", {id: button.dataset.deleteCard, sessionId: selectedSessionId})));
   $("#memoryCandidate").innerHTML = memory.candidate ? "<div class='candidate'><b>要记住这个提示偏好吗？</b><p>" + esc(memory.candidate.preference) + "</p><button data-accept='true'>确认保存</button><button data-accept='false'>不要保存</button></div>" : "";
   $$("[data-accept]").forEach(button => button.onclick = () => runMemoryMutation(button, post("/api/candidate", {accepted: button.dataset.accept === "true", sessionId: selectedSessionId})));
@@ -689,6 +641,7 @@ function render(next) {
   $("#taskDebug").hidden = !task;
   renderWorkCenter();
   renderPipeline(task, mechanism, step);
+  syncWorkflowFromState(task, mechanism);
   renderTimeline(state.events || []);
   renderPerceptionEvidence(task);
   renderManualSteps();
@@ -1095,10 +1048,16 @@ async function connectRealtimeSession(generation) {
     } else if (message.type === "user_transcript") {
       $("#transcript").textContent = "你 · " + (message.channel || "input_audio_transcription") + "：" + message.text + (message.echoRisk === "suspected" ? " · 可能残余回声" : "");
       $("#duplexState").textContent = "正在听你说话";
+      resetWorkflow("收到用户转写：" + String(message.text || "").slice(0, 80));
+      setWorkflowStage("input", "complete", "用户转写已归因并进入当前轮次");
+      setWorkflowStage("reasoning", "active", "正在进行意图路由与上下文编排");
+      setWorkflowStage("memory", "active", "正在查询当前范围的 TimelineMemory");
     } else if (message.type === "assistant_transcript" && ["conversation", "proactive-utterance"].includes(message.purpose)) {
       assistantText = message.done ? message.text : assistantText + message.text;
       $("#assistantCaption").innerHTML = "<span>助手语音字幕 · provider output channel · " + (message.done ? "已完成" : "生成中") + "</span><p>" + esc(assistantText) + "</p>";
       $("#duplexState").textContent = message.done ? "全双工在线 · 正在听" : "助手正在说 · 你可以随时打断";
+      setWorkflowStage("delivery", message.done ? "complete" : "active", message.done ? "回答已通过 provider 输出通道交付" : "正在生成并流式交付回答");
+      if (message.done) workflow.active = false;
       if (message.done) assistantText = "";
     } else if (message.type === "memory_status") {
       $("#assistantCaption").innerHTML = "<span>记忆事务 · 服务端确认</span><p>" + esc(message.message) + "</p>";
@@ -1106,10 +1065,16 @@ async function connectRealtimeSession(generation) {
         ? "记忆已提交 · 正在听"
         : message.status === "needs-input" ? "等待补充要记住的内容" : "记忆未提交 · 正在听";
     } else if (message.type === "memory_trace") {
-      appendMemoryOp(message);
+      if (message.op === "retrieve") {
+        setWorkflowStage("memory", "complete", "检索完成：候选 " + (message.candidate_count || 0) + "，选中 " + (message.selected_count || 0));
+        setWorkflowStage("reasoning", "active", "正在基于检索证据与当前状态形成可交付决策");
+      } else if (message.op === "working_memory_push") {
+        setWorkflowStage("memory", "complete", "检索证据已注入当前工作上下文");
+      }
     } else if (message.type === "task_update") {
-      applyTaskUpdate(message);
+      setWorkflowStage("action", ["done", "completed"].includes(message.status) ? "complete" : message.status === "failed" ? "failed" : "active", "后台任务 " + (message.kind || "job") + " · " + (message.status || "pending"));
     } else if (message.type === "tool_confirmation_required") {
+      setWorkflowStage("action", "active", "工具 " + message.tool + " 等待用户确认");
       const details = JSON.stringify(message.arguments || {}, null, 2);
       const accepted = window.confirm("Allow tool " + message.tool + "?\n\n" + details);
       if (socket === ws && ws.readyState === WebSocket.OPEN) {

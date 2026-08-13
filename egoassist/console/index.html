@@ -6,7 +6,7 @@
   <title>EgoAssist Research Console</title>
   <link rel="icon" href="data:,">
   <link rel="stylesheet" href="styles.css">
-  <link rel="stylesheet" href="memory-controls.css">
+  <link rel="stylesheet" href="memory-controls.css?v=20260813-workflow">
   <link rel="stylesheet" href="responsive.css?v=20260729-mirror">
 </head>
 <body class="auth-required">
@@ -74,6 +74,7 @@
 
       <section class="pipeline-panel panel">
         <div class="panel-head"><div><span>02 / EXECUTION GRAPH</span><h1>可解释 Pipeline</h1></div><b>可观测状态，不是思维链</b></div>
+        <div id="liveWorkflow" class="live-workflow" aria-live="polite"></div>
         <div id="pipeline" class="pipeline"></div>
         <div class="decision-block"><span>INTERVENTION OUTPUT</span><div id="decision"></div></div>
         <div id="memoryCandidate"></div>
@@ -123,28 +124,6 @@
       <div id="timeline" class="timeline"></div>
     </section>
 
-    <section class="memory-trace-panel panel">
-      <div class="panel-head">
-        <div><span>05 / MEMORY LAYER</span><h1>记忆层实时观测</h1></div>
-        <div class="memory-trace-controls">
-          <b id="memoryOpCount">0 ops</b>
-          <a id="memoryStateLink" href="/api/memory/state" target="_blank" title="完整记忆状态快照 JSON">状态快照 ↗</a>
-        </div>
-      </div>
-      <div id="memoryTraceLog" class="memory-trace-log"><span class="trace-empty">等待记忆操作</span></div>
-    </section>
-
-    <section class="task-queue-panel panel">
-      <div class="panel-head">
-        <div><span>06 / TASK QUEUE</span><h1>后台任务队列</h1></div>
-        <div class="memory-trace-controls">
-          <b id="taskQueueCount">0 tasks</b>
-          <a id="taskQueueLink" href="/api/background-tasks" target="_blank" title="任务队列快照 JSON">任务快照 ↗</a>
-        </div>
-      </div>
-      <div id="taskQueueLog" class="task-queue-log"><span class="trace-empty">等待后台任务</span></div>
-    </section>
-
     <section class="analysis-grid">
       <section class="panel">
         <div class="panel-head">
@@ -159,16 +138,6 @@
         </div>
         <div id="timelineRetrievalSummary" class="timeline-retrieval-summary"></div>
         <div id="timelineCards" class="timeline-cards"></div>
-        <details class="memory-legacy-detail">
-          <summary>偏好记忆候选与已确认记录</summary>
-          <div id="memorySystems" class="system-grid"></div>
-          <div id="memoryFlow"></div>
-          <div id="retrievalCandidates" class="rank-list"></div>
-          <div id="memories" class="archive"></div>
-          <div id="memoryCandidate_pref"></div>
-        </details>
-        <div id="episodicRetrieval" class="rank-list" hidden></div>
-        <div id="episodicEpisodes" class="archive" hidden></div>
       </section>
       <section class="panel"><div class="panel-head"><div><span>TASK HYPOTHESES</span><h2 id="taskTitle">Checkpoint Ledger</h2></div><b id="mapStatus"></b></div><div id="steps" class="checkpoint-list"></div><div id="perceptionEvidence" class="perception-evidence"></div><div id="knowledge" class="knowledge-box"></div></section>
       <section class="panel"><div class="panel-head"><div><span>RUNTIME CONTROL</span><h2>路由、归因与调度</h2></div></div><details open><summary>意图候选与激活证据</summary><pre id="intentRouting"></pre></details><details><summary>用户/助手声道归因</summary><pre id="audioAttribution"></pre></details><div id="scheduler" class="scheduler"></div><p class="tools-title">当前 Skill 工具</p><div id="skillTools" class="quick"></div><p id="toolResult"></p><div id="toolAudit" class="archive"></div><div id="trace" hidden></div></section>
@@ -210,6 +179,6 @@
     </form>
   </dialog>
   <script src="vendor/livekit-client.umd.js?v=2.21.0"></script>
-  <script src="app.js?v=20260730-m4"></script>
+  <script src="app.js?v=20260813-workflow"></script>
 </body>
 </html>

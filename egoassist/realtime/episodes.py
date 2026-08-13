@@ -46,7 +46,6 @@ class RealtimeEpisodeMemory:
         if self.scope not in {None, "case", "participant"}:
             raise ValueError("invalid episodic memory scope")
         self._last_retrieval_by_session: dict[str, dict[str, Any]] = {}
-        self._last_retrieval: dict[str, Any] = self._empty_retrieval("")
         # Preference compatibility layer (lazy-initialized on first use)
         self._pref_lock = threading.RLock()
         self._pref: "PreferenceMemory | None" = None  # type: ignore[name-defined]
@@ -196,7 +195,6 @@ class RealtimeEpisodeMemory:
             "claimBoundary": raw["claimBoundary"],
         }
         key = session_id or "__default__"
-        self._last_retrieval = result
         self._last_retrieval_by_session[key] = result
         if emit and session_id is None:
             self._emit("episodic.memory.retrieved", {
@@ -228,7 +226,6 @@ class RealtimeEpisodeMemory:
         result["injection"] = injection
         scope = result.get("scope", {})
         key = str(scope.get("session") or "__default__")
-        self._last_retrieval = result
         self._last_retrieval_by_session[key] = result
         if scope.get("session") is None:
             self._emit("episodic.memory.injected", injection)
@@ -355,20 +352,6 @@ class RealtimeEpisodeMemory:
             "sessionMatch": True,
             "layer": item.get("layer"),
             "record": cls._record(item["card"]),
-        }
-
-    @staticmethod
-    def _empty_retrieval(query: str) -> dict[str, Any]:
-        return {
-            "method": "timeline-hybrid-retrieval-v1",
-            "query": query,
-            "referential": False,
-            "scope": {},
-            "routing": {"recent": False, "today": False, "longTerm": False, "layers": []},
-            "minimumScore": DEFAULT_RETRIEVAL_MIN_SCORE,
-            "candidates": [],
-            "selected": [],
-            "injection": {"status": "not-injected", "episodeIds": []},
         }
 
     # ------------------------------------------------------------------

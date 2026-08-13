@@ -444,7 +444,10 @@ class ContextHarness:
         return self.journal.append_message(
             "user", content, source=source,
             idempotency_key=f"user:{turn_id}" if turn_id else None,
-            metadata={"trust": "untrusted-user-data"},
+            metadata={
+                "trust": "untrusted-user-data",
+                **({"turnId": str(turn_id)} if turn_id else {}),
+            },
         )
 
     def record_assistant(
@@ -504,6 +507,7 @@ class ContextHarness:
                     "content": str(message["content"]),
                     "entryId": entry.get("id"),
                     "status": entry.get("status"),
+                    "turnId": str((message.get("metadata") or {}).get("turnId", "")) or None,
                 }
         if entry_type == "tool_call":
             return {
@@ -539,6 +543,10 @@ class ContextHarness:
 
     def _context_messages(self) -> tuple[list[dict[str, Any]], str | None]:
         entries = self.journal.entries()
+        superseded_turn_ids = {
+            str(entry.get("supersedesTurnId"))
+            for entry in entries if entry.get("type") == "turn_revision"
+        }
         latest_compaction_index = self._latest_compaction_index(entries)
         messages: list[dict[str, Any]] = []
         compaction_id = None
@@ -555,9 +563,19 @@ class ContextHarness:
                 "status": "completed",
                 "kind": "compaction_summary",
             })
-            messages.extend(dict(item) for item in checkpoint.get("retainedTail", []))
+            messages.extend(
+                dict(item) for item in checkpoint.get("retainedTail", [])
+                if str(item.get("turnId", "")) not in superseded_turn_ids
+            )
             start = latest_compaction_index + 1
         for entry in entries[start:]:
+            if (
+                entry.get("type") == "message"
+                and str(
+                    ((entry.get("message") or {}).get("metadata") or entry.get("metadata") or {}).get("turnId", "")
+                ) in superseded_turn_ids
+            ):
+                continue
             message = self._entry_message(entry)
             if message:
                 messages.append(message)

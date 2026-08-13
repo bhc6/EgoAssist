@@ -207,6 +207,49 @@ def test_same_memory_key_never_supersedes_across_scope_or_case(tmp_path):
     assert memory.cards(user_id="user-a", case_id="case-b", scope="case")[0]["id"] == second_case["id"]
 
 
+def test_structured_fast_path_preserves_scope_and_case_isolation(tmp_path):
+    memory = TimelineMemory(tmp_path / "timeline.sqlite3")
+    participant = remember(
+        memory,
+        "participant location is home",
+        scope="participant",
+        case_id=None,
+        kind="state",
+        subject="vitamin",
+        predicate="location",
+        value="home",
+    )
+    case_a = remember(
+        memory,
+        "case A location is kitchen",
+        case_id="case-a",
+        kind="state",
+        subject="vitamin",
+        predicate="location",
+        value="kitchen",
+    )
+    case_b = remember(
+        memory,
+        "case B location is desk",
+        case_id="case-b",
+        kind="state",
+        subject="vitamin",
+        predicate="location",
+        value="desk",
+    )
+
+    query = {"subject": "vitamin", "predicate": "location"}
+    assert memory.retrieve(
+        "where is vitamin", user_id="user-a", case_id="case-a", scope="case", query_spec=query,
+    )["selected"][0]["cardId"] == case_a["id"]
+    assert memory.retrieve(
+        "where is vitamin", user_id="user-a", case_id="case-b", scope="case", query_spec=query,
+    )["selected"][0]["cardId"] == case_b["id"]
+    assert memory.retrieve(
+        "where is vitamin", user_id="user-a", case_id=None, scope="participant", query_spec=query,
+    )["selected"][0]["cardId"] == participant["id"]
+
+
 def test_unrelated_chinese_cards_do_not_match_on_one_shared_character(tmp_path):
     memory = TimelineMemory(tmp_path / "timeline.sqlite3")
     remember(memory, "用户把番茄放在案板旁边", kind="scene")
@@ -317,6 +360,27 @@ def test_real_civil_time_is_separate_from_recording_time(tmp_path):
     )
     assert [item["cardId"] for item in yesterday["selected"]] == [card["id"]]
     assert today["selected"] == []
+
+
+def test_memory_retention_uses_event_time_not_last_update_time(tmp_path):
+    memory = TimelineMemory(tmp_path / "timeline.sqlite3")
+    old = datetime(2020, 1, 1, tzinfo=timezone.utc)
+    card = remember(
+        memory,
+        "old durable fact",
+        kind="fact",
+        happened_at=old,
+        recorded_at=old,
+    )
+
+    result = memory.apply_retention(
+        user_id="user-a", cutoff=datetime(2021, 1, 1, tzinfo=timezone.utc),
+    )
+
+    assert result["memoryCards"] == 1
+    assert memory.cards(
+        user_id="user-a", case_id="case-a", scope="case", statuses=("active", "deleted"),
+    ) == []
 
 
 def test_daily_recurrence_uses_participant_timezone():

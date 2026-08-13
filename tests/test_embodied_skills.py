@@ -101,6 +101,24 @@ def test_tool_contract_drives_defaults_and_fails_closed():
         SkillToolExecutor({}).execute("demo_action", {}, declaration)
 
 
+def test_tool_executor_rejects_async_handlers_without_audit():
+    declaration = [{
+        "name": "async_action",
+        "handler": "test.async",
+        "requires_confirmation": False,
+        "arguments": {"type": "object", "properties": {}},
+    }]
+
+    async def async_handler(_arguments, _declaration):
+        return {"status": "ok"}
+
+    executor = SkillToolExecutor({"test.async": async_handler})
+
+    with pytest.raises(TypeError, match="must be synchronous"):
+        executor.execute("async_action", {}, declaration)
+    assert executor.audit == []
+
+
 def test_skill_can_supply_policy_and_tools_without_a_task_catalog(tmp_path):
     root = tmp_path / "context-helper"
     root.mkdir()

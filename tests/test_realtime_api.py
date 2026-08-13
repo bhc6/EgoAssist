@@ -1423,6 +1423,43 @@ def test_realtime_transcripts_are_classified_and_committed_in_fifo_order(tmp_pat
     asyncio.run(scenario())
 
 
+def test_compound_turn_keeps_each_foreground_subtask(tmp_path, monkeypatch):
+    instances = install_queue_test_bridge(monkeypatch)
+
+    async def classify(_self, text, catalog):
+        result = semantic_result(text)
+        result["intents"] = [
+            {"kind": "foreground-dialogue", "text": "explain alpha", "parameters": {}},
+            {"kind": "foreground-dialogue", "text": "compare beta", "parameters": {}},
+        ]
+        return result
+
+    monkeypatch.setattr(run_egoassist.SemanticTurnRouter, "classify", classify)
+
+    async def scenario():
+        app = create_app(
+            str(BUILTIN_SKILLS_ROOT), None,
+            str(tmp_path / "memory.json"), "test-realtime", "Ethan",
+        )
+        async with TestClient(TestServer(app)) as client:
+            await register_client(client, "compound-foreground")
+            session_id = (await (await client.post("/api/sessions")).json())["session"]["id"]
+            ws = await client.ws_connect(f"/ws/realtime?session={session_id}")
+            await ws.receive_json()
+            await ws.receive_json()
+            instances[0].on_transcript("explain alpha and compare beta")
+            state = (await _recv_wait(ws, timeout=1))["state"]
+            await asyncio.wait_for(instances[0].request_event.wait(), timeout=1)
+
+            assert len(state["workLedger"]["intents"]) == 2
+            assert len(state["workLedger"]["jobs"]) == 2
+            assert len(instances[0].requests) == 2
+            assert "compare beta" in instances[0].requests[1][0]
+            await ws.close()
+
+    asyncio.run(scenario())
+
+
 def test_new_vad_segment_blocks_old_answer_before_its_transcript_arrives(tmp_path, monkeypatch):
     instances = install_queue_test_bridge(monkeypatch)
     classification_started = asyncio.Event()
@@ -1949,5 +1986,44 @@ def test_provider_tool_callback_is_blocked_after_case_transition(tmp_path, monke
         journal = tmp_path / "users" / user["id"] / "sessions" / f"{session_id}.jsonl"
         entries = [json.loads(line) for line in journal.read_text(encoding="utf-8").splitlines()]
         assert not any(item.get("type") == "tool_audit" for item in entries)
+
+    asyncio.run(scenario())
+
+
+def test_provider_tool_callback_is_blocked_after_turn_correction(tmp_path, monkeypatch):
+    instances = install_queue_test_bridge(monkeypatch)
+    patch_semantic_router(monkeypatch)
+
+    async def scenario():
+        app = create_app(
+            str(BUILTIN_SKILLS_ROOT), None,
+            str(tmp_path / "memory.json"), "test-realtime", "Ethan",
+        )
+        async with TestClient(TestServer(app)) as client:
+            user = await register_client(client, "corrected-tool-call")
+            session_id = (await (await client.post("/api/sessions")).json())["session"]["id"]
+            ws = await client.ws_connect(f"/ws/realtime?session={session_id}")
+            await ws.receive_json()
+            await ws.receive_json()
+            instances[0].on_transcript("old request")
+            state = (await _recv_wait(ws, timeout=1))["state"]
+            origin_intent = state["workLedger"]["intents"][-1]
+            origin_job = state["workLedger"]["jobs"][-1]
+
+            journal_path = tmp_path / "users" / user["id"] / "sessions" / f"{session_id}.jsonl"
+            ledger = CaseWorkLedger(SessionJournal(journal_path, session_id=session_id))
+            replacement = ledger.capture_turn("corrected request", source="test", sequence=2)
+            ledger.revise_turn(replacement["turnId"], origin_intent["turnId"])
+
+            with pytest.raises(RuntimeError, match="corrected user turn"):
+                instances[0].tool_handler(
+                    "set_timer", {"seconds": 5, "label": "stale"}, False,
+                    {
+                        "turnId": origin_intent["turnId"],
+                        "intentId": origin_intent["intentId"],
+                        "jobId": origin_job["jobId"],
+                    },
+                )
+            await ws.close()
 
     asyncio.run(scenario())

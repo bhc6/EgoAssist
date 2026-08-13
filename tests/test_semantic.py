@@ -327,6 +327,50 @@ def test_structured_router_supplies_clock_and_pending_draft_to_provider():
     assert supplied["pendingMemoryDraft"]["subject"] == "小李"
 
 
+def test_router_revision_must_target_the_supplied_previous_turn():
+    valid = json.loads(decision())
+    valid["revision"] = {"type": "correction", "supersedesTurnId": "turn-1"}
+    router = SemanticTurnRouter(
+        "test-key", generation_call=lambda **_: provider_response(json.dumps(valid)),
+    )
+    router.set_turn_context(
+        clock_context=None, memory_draft=None,
+        previous_turn={"turnId": "turn-1", "text": "old request"},
+    )
+    result = asyncio.run(router.classify("correction", []))
+    assert result["revision"] == valid["revision"]
+
+    valid["revision"]["supersedesTurnId"] = "turn-other"
+    invalid = asyncio.run(router.classify("bad correction target", []))
+    assert invalid["status"] == "invalid"
+    assert invalid["revision"] is None
+
+
+def test_router_turn_context_is_isolated_between_concurrent_classifications():
+    supplied = {}
+
+    def generation_call(**kwargs):
+        payload = json.loads(kwargs["messages"][1]["content"])
+        supplied[payload["transcript"]] = payload["previousTurn"]["turnId"]
+        return provider_response(decision())
+
+    router = SemanticTurnRouter("test-key", generation_call=generation_call)
+
+    async def classify(text, previous_id):
+        router.set_turn_context(
+            clock_context=None, memory_draft=None,
+            previous_turn={"turnId": previous_id},
+        )
+        await asyncio.sleep(0)
+        return await router.classify(text, [])
+
+    async def scenario():
+        await asyncio.gather(classify("first", "previous-1"), classify("second", "previous-2"))
+
+    asyncio.run(scenario())
+    assert supplied == {"first": "previous-1", "second": "previous-2"}
+
+
 def test_server_memory_intent_gate_rejects_questions_and_unrelated_drafts():
     assert is_explicit_memory_request("你帮我记几个电话吧。") is True
     assert is_explicit_memory_request("我最后再说一遍，你必须记住这个位置。") is True
