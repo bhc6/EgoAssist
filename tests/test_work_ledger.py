@@ -106,6 +106,28 @@ def test_background_envelope_carries_session_and_generation(tmp_path):
     }
 
 
+def test_discarded_result_is_terminal_and_not_claimable(tmp_path):
+    journal = SessionJournal(tmp_path / "session.jsonl", session_id="discard")
+    ledger = CaseWorkLedger(journal)
+    turn = ledger.capture_turn("background", source="test", sequence=1)
+    intent = ledger.create_intent(turn["turnId"], kind="background-job", status="running-background")
+    result = ledger.enqueue_result(intent["intentId"], "late")
+    ledger.discard_result(result["resultId"], reason="superseded-by-user")
+    assert ledger.results()[result["resultId"]]["status"] == "discarded"
+    assert ledger.claim_next_result() is None
+
+
+def test_speaking_claim_is_recovered_after_reconnect(tmp_path):
+    journal = SessionJournal(tmp_path / "session.jsonl", session_id="recover")
+    ledger = CaseWorkLedger(journal)
+    turn = ledger.capture_turn("background", source="test", sequence=1)
+    intent = ledger.create_intent(turn["turnId"], kind="background-job", status="running-background")
+    result = ledger.enqueue_result(intent["intentId"], "late")
+    ledger.set_result_status(result["resultId"], "speaking")
+    assert ledger.recover_delivery_claims() == 1
+    assert ledger.results()[result["resultId"]]["status"] == "pending"
+
+
 def test_stale_scheduled_result_can_be_delivered_when_explicitly_allowed(tmp_path):
     ledger = CaseWorkLedger(SessionJournal(tmp_path / "case.jsonl", session_id="case"))
     old_turn = ledger.capture_turn("old reminder", source="test", sequence=1)

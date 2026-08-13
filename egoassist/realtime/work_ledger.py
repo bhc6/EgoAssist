@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from typing import Any
+from dataclasses import dataclass
 from uuid import uuid4
 from datetime import datetime, timezone
 
@@ -20,7 +21,35 @@ JOB_STATUSES = {
     "queued", "running", "suspended", "waiting-input", "waiting-result",
     "completed", "failed", "cancelled",
 }
-RESULT_STATUSES = {"pending", "displayed", "speaking", "delivered", "dismissed"}
+RESULT_STATUSES = {"pending", "displayed", "speaking", "delivered", "dismissed", "discarded"}
+
+
+@dataclass(frozen=True)
+class ExecutionEnvelope:
+    """Typed ownership context carried across turn, job, result and provider edges."""
+
+    session_id: str
+    turn_id: str
+    intent_id: str | None = None
+    job_id: str | None = None
+    generation: int | None = None
+    kind: str = "foreground-dialogue"
+
+    def correlation(self, *, result_id: str | None = None) -> dict[str, Any]:
+        value: dict[str, Any] = {
+            "sessionId": self.session_id,
+            "turnId": self.turn_id,
+        }
+        if self.intent_id:
+            value["intentId"] = self.intent_id
+        if self.job_id:
+            value["jobId"] = self.job_id
+        if result_id:
+            value["resultId"] = result_id
+        if self.generation is not None:
+            value["generation"] = int(self.generation)
+        value["kind"] = self.kind
+        return value
 
 
 def _latest_by_id(
@@ -494,6 +523,14 @@ class CaseWorkLedger:
         return self.journal.append("result_delivery", {
             "resultId": str(result_id), "status": status, "detail": dict(detail or {}),
         })
+
+    def discard_result(self, result_id: str, *, reason: str) -> dict[str, Any]:
+        result = self.results().get(str(result_id))
+        if result is None:
+            raise ValueError(f"unknown result: {result_id}")
+        if result.get("status") in {"delivered", "dismissed", "discarded"}:
+            return result
+        return self.set_result_status(result_id, "discarded", detail={"reason": str(reason)})
 
     def results(self) -> dict[str, dict[str, Any]]:
         return _latest_by_id(

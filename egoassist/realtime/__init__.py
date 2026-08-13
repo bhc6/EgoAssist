@@ -35,7 +35,7 @@ from .semantic import (
     is_explicit_memory_request, memory_draft_candidate,
 )
 from .locale_prompts import PROMPTS, PromptBundle, get_prompts
-from .work_ledger import CaseWorkLedger
+from .work_ledger import CaseWorkLedger, ExecutionEnvelope
 try:
     from .livekit_transport import (
         LIVEKIT_DATA_TOPIC,
@@ -63,7 +63,7 @@ __all__ = [
     "MEMORY_POLICY_VERSION", "default_memory_policy", "memory_profiles", "normalize_memory_policy",
     "SemanticTurnRouter", "TurnAccumulator", "TURN_ROUTER_POLICY_VERSION", "explicit_memory_fallback_atoms",
     "is_explicit_memory_request", "memory_draft_candidate",
-    "CaseWorkLedger",
+    "CaseWorkLedger", "ExecutionEnvelope",
     "PROMPTS", "PromptBundle", "get_prompts",
     "LIVEKIT_DATA_TOPIC",
     "LiveKitInteractionTransport",

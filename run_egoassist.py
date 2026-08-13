@@ -1653,32 +1653,43 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                         and bridge.has_unresolved_user_input()
                     )
                     if not unresolved_input and not snapshot.get("pending") and not snapshot.get("activeResponseIds") and not snapshot.get("queued"):
-                        claimed = ledger.claim_next_result(
-                            latest_sequence=owner.latest_input_sequence,
-                        )
-                        if claimed is not None:
-                            accepted = request_bridge_response(
-                                bridge,
-                                "Deliver this completed background result naturally and briefly. "
-                                "Do not mention internal ledgers: "
-                                + json.dumps(claimed.get("content"), ensure_ascii=False),
-                                priority=int(claimed.get("priority", 50)),
-                                reason="result-inbox-arbiter",
-                                origin={
-                                    "sessionId": (claimed.get("correlation") or {}).get("sessionId", owner.session_id),
-                                    "turnId": (claimed.get("correlation") or {}).get("turnId"),
-                                    "intentId": claimed.get("intentId"),
-                                    "jobId": claimed.get("jobId"),
-                                    "resultId": claimed.get("resultId"),
-                                    "generation": (claimed.get("correlation") or {}).get("generation"),
-                                    "background": True,
-                                },
-                            )
-                            if not accepted:
-                                ledger.set_result_status(
-                                    claimed["resultId"], "pending",
-                                    detail={"reason": "speech-arbiter-not-accepted"},
+                        async with owner.mutation_lock:
+                            if owner.bridge is not bridge or owner.socket is None or owner.transitioning:
+                                claimed = None
+                            else:
+                                claimed = ledger.claim_next_result(
+                                    latest_sequence=owner.latest_input_sequence,
                                 )
+                            if claimed is not None:
+                                correlation = dict(claimed.get("correlation") or {})
+                                if correlation.get("sessionId") not in {None, owner.session_id}:
+                                    ledger.discard_result(
+                                        claimed["resultId"], reason="cross-session-result",
+                                    )
+                                    claimed = None
+                            if claimed is not None:
+                                accepted = request_bridge_response(
+                                    bridge,
+                                    "Deliver this completed background result naturally and briefly. "
+                                    "Do not mention internal ledgers: "
+                                    + json.dumps(claimed.get("content"), ensure_ascii=False),
+                                    priority=int(claimed.get("priority", 50)),
+                                    reason="result-inbox-arbiter",
+                                    origin={
+                                        "sessionId": (claimed.get("correlation") or {}).get("sessionId", owner.session_id),
+                                        "turnId": (claimed.get("correlation") or {}).get("turnId"),
+                                        "intentId": claimed.get("intentId"),
+                                        "jobId": claimed.get("jobId"),
+                                        "resultId": claimed.get("resultId"),
+                                        "generation": (claimed.get("correlation") or {}).get("generation"),
+                                        "background": True,
+                                    },
+                                )
+                                if not accepted:
+                                    ledger.set_result_status(
+                                        claimed["resultId"], "pending",
+                                        detail={"reason": "speech-arbiter-not-accepted"},
+                                    )
                 await asyncio.sleep(0.25)
 
         task = asyncio.create_task(run(), name=f"egoassist-job-scheduler:{owner.session_id}")
@@ -4587,19 +4598,26 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                 # Journal and TimelineMemory provide their own short transaction
                 # locks; holding the foreground mutation lock here would make a
                 # long background query delay every newer user turn.
-                result = process_transcript(
-                    candidate_text,
-                    harness,
-                    bg_runtime,
-                    turn_id=slot.turn_id,
-                    transcript_entry=ledger.turn_message(str(slot.turn_id)) if slot.turn_id else None,
-                    persist_runtime_checkpoint=False,
-                    episodic_memory=current_episodic_memory(),
-                    user_scope=user_id,
-                    semantic_decision=bg_semantic,
-                    memory_policy=current_memory_policy(),
-                    clock_context=clock_for_session(user_id, session_id),
-                    project_retrieval=False,
+                timeout_seconds = max(
+                    1.0, float(os.getenv("EGOASSIST_BACKGROUND_TIMEOUT_SECONDS", "120")),
+                )
+                result = await asyncio.wait_for(
+                    asyncio.to_thread(
+                        process_transcript,
+                        candidate_text,
+                        harness,
+                        bg_runtime,
+                        turn_id=slot.turn_id,
+                        transcript_entry=ledger.turn_message(str(slot.turn_id)) if slot.turn_id else None,
+                        persist_runtime_checkpoint=False,
+                        episodic_memory=current_episodic_memory(),
+                        user_scope=user_id,
+                        semantic_decision=bg_semantic,
+                        memory_policy=current_memory_policy(),
+                        clock_context=clock_for_session(user_id, session_id),
+                        project_retrieval=False,
+                    ),
+                    timeout=timeout_seconds,
                 )
                 slot.status = "done"
                 slot.completed_at = time.time()
