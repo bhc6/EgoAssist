@@ -157,6 +157,7 @@ class RealtimeEpisodeMemory:
         referential: bool = False,
         clock: ClockContext | None = None,
         query_spec: dict[str, Any] | None = None,
+        project: bool = True,
     ) -> dict[str, Any]:
         user_id, case_id, memory_scope = self._identity(
             session_id=session_id,
@@ -194,8 +195,9 @@ class RealtimeEpisodeMemory:
             "injection": {"status": "not-injected", "episodeIds": []},
             "claimBoundary": raw["claimBoundary"],
         }
-        key = session_id or "__default__"
-        self._last_retrieval_by_session[key] = result
+        if project:
+            key = session_id or "__default__"
+            self._last_retrieval_by_session[key] = result
         if emit and session_id is None:
             self._emit("episodic.memory.retrieved", {
                 "query": str(query),
@@ -204,7 +206,7 @@ class RealtimeEpisodeMemory:
             })
         return result
 
-    def mark_injected(self, result: dict[str, Any]) -> dict[str, Any]:
+    def mark_injected(self, result: dict[str, Any], *, project: bool = True) -> dict[str, Any]:
         selected = result.get("selected", [])
         injection = {
             "status": "injected" if selected else "no-evidence",
@@ -225,8 +227,9 @@ class RealtimeEpisodeMemory:
         }
         result["injection"] = injection
         scope = result.get("scope", {})
-        key = str(scope.get("session") or "__default__")
-        self._last_retrieval_by_session[key] = result
+        if project:
+            key = str(scope.get("session") or "__default__")
+            self._last_retrieval_by_session[key] = result
         if scope.get("session") is None:
             self._emit("episodic.memory.injected", injection)
         return injection

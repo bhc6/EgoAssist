@@ -86,3 +86,17 @@ def test_retrieval_never_crosses_session_scope_by_default(tmp_path):
     assert second["id"] not in selected_ids
     assert second["id"] not in {item["episodeId"] for item in result["candidates"]}
     assert result["scope"]["memoryScope"] == "case"
+
+
+def test_background_retrieval_does_not_replace_session_projection(tmp_path):
+    memory = RealtimeEpisodeMemory(tmp_path / "episodes.json")
+    memory.remember("foreground evidence", kind="fact", source="test", skill=None, task=None)
+    foreground = memory.retrieve("foreground evidence", project=True)
+    memory.mark_injected(foreground, project=True)
+
+    background = memory.retrieve("unrelated background query", project=False)
+    memory.mark_injected(background, project=False)
+
+    projected = memory.snapshot()["retrieval"]
+    assert projected["query"] == "foreground evidence"
+    assert projected["injection"]["episodeIds"] == foreground["injection"]["episodeIds"]

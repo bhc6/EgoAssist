@@ -2542,6 +2542,7 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
         memory_policy: dict | None = None,
         episodic_memory: RealtimeEpisodeMemory | None = None,
         clock_context: ClockContext | None = None,
+        project_retrieval: bool = True,
     ) -> dict:
         nonlocal routing_state, active_episode_injection
         # Guard: normalize early so every caller is protected, not just the audio path.
@@ -2582,6 +2583,7 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                 referential=semantic_decision.get("memoryQuery") == "referential",
                 clock=clock_context,
                 query_spec=semantic_decision.get("memoryQuerySpec"),
+                project=project_retrieval,
             )
             # Phase 1: instrument episodic retrieval for observability
             if episodic_retrieval is not None and harness is not None:
@@ -2611,6 +2613,7 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                 referential=semantic_decision.get("memoryQuery") == "referential",
                 clock=clock_context,
                 query_spec=semantic_decision.get("memoryQuerySpec"),
+                project=project_retrieval,
             )
         if episodic_retrieval is not None and durable_retrieval is not None:
             merged_by_id = {
@@ -2661,7 +2664,9 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                 "claimBoundary": "Explicitly durable participant timeline cards; case episodic memory is disabled.",
             }
         if episodic_retrieval is not None:
-            turn_episode_injection = active_episodic.mark_injected(episodic_retrieval)
+            turn_episode_injection = active_episodic.mark_injected(
+                episodic_retrieval, project=project_retrieval,
+            )
         else:
             episodic_retrieval = {
                 "method": "disabled-by-memory-policy",
@@ -4590,6 +4595,7 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                     semantic_decision=bg_semantic,
                     memory_policy=current_memory_policy(),
                     clock_context=clock_for_session(user_id, session_id),
+                    project_retrieval=False,
                 )
                 slot.status = "done"
                 slot.completed_at = time.time()
