@@ -1990,6 +1990,41 @@ def test_provider_tool_callback_is_blocked_after_case_transition(tmp_path, monke
     asyncio.run(scenario())
 
 
+def test_foreground_tool_origin_is_rejected_after_new_turn_generation(tmp_path, monkeypatch):
+    instances = install_queue_test_bridge(monkeypatch)
+    patch_semantic_router(monkeypatch)
+
+    async def scenario():
+        app = create_app(
+            str(BUILTIN_SKILLS_ROOT), None,
+            str(tmp_path / "memory.json"), "test-realtime", "Ethan",
+        )
+        async with TestClient(TestServer(app)) as client:
+            user = await register_client(client, "generation-tool")
+            session_id = (await (await client.post("/api/sessions")).json())["session"]["id"]
+            ws = await client.ws_connect(f"/ws/realtime?session={session_id}")
+            await ws.receive_json()
+            await ws.receive_json()
+
+            instances[0].on_transcript("old request")
+            state = (await _recv_wait(ws, timeout=1))["state"]
+            origin = {
+                "turnId": state["workLedger"]["turnInbox"][-1]["turnId"],
+                "generation": 1,
+            }
+            instances[0].on_transcript("new request")
+            await _recv_wait(ws, timeout=1)
+            with pytest.raises(RuntimeError, match="superseded foreground turn"):
+                instances[0].tool_handler("set_timer", {"seconds": 5, "label": "stale"}, False, origin)
+            await ws.close()
+
+        journal = tmp_path / "users" / user["id"] / "sessions" / f"{session_id}.jsonl"
+        entries = [json.loads(line) for line in journal.read_text(encoding="utf-8").splitlines()]
+        assert not any(item.get("type") == "tool_audit" for item in entries)
+
+    asyncio.run(scenario())
+
+
 def test_provider_tool_callback_is_blocked_after_turn_correction(tmp_path, monkeypatch):
     instances = install_queue_test_bridge(monkeypatch)
     patch_semantic_router(monkeypatch)

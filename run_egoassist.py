@@ -300,6 +300,9 @@ class CaseRuntimeOwner:
     transitioning: bool = False
     turn_sequence: int = 0
     latest_input_sequence: int = 0
+    # Monotonic fence for user-visible foreground output. Background work may
+    # outlive this value, but foreground responses and tools may not.
+    output_generation: int = 0
     work_ledger: CaseWorkLedger | None = None
     classification_tasks: set[asyncio.Task] = field(default_factory=set)
     queued_turn_ids: set[str] = field(default_factory=set)
@@ -4331,6 +4334,14 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
             source_turn_id = str(source.get("turnId", ""))
             source_intent_id = str(source.get("intentId", ""))
             source_job_id = str(source.get("jobId", ""))
+            source_generation = source.get("generation")
+            if source_generation is not None:
+                try:
+                    generation_matches = int(source_generation) == owner.output_generation
+                except (TypeError, ValueError):
+                    generation_matches = False
+                if not generation_matches:
+                    raise RuntimeError("tool call belongs to a superseded foreground turn")
             source_turn = ledger.turns().get(source_turn_id) if source_turn_id else None
             source_intent = ledger.intents().get(source_intent_id) if source_intent_id else None
             source_job = ledger.jobs().get(source_job_id) if source_job_id else None
@@ -4669,6 +4680,47 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
             )
             return semantic
 
+        async def admit_foreground_response(
+            *,
+            turn_id: str,
+            turn_sequence: int,
+            generation: int,
+            instructions: str,
+            priority: int,
+            interrupt: bool,
+            speech_policy: str,
+            reason: str,
+            max_protection_ms: int,
+            output_mode: str = "audio",
+            purpose: str = "conversation",
+            origin: dict[str, Any],
+        ) -> bool:
+            """Atomically re-check ownership immediately before provider output."""
+            async with owner.mutation_lock:
+                if owner.socket_token is not socket_token or owner.epoch != connection_epoch:
+                    return False
+                if generation != owner.output_generation:
+                    session_trace(
+                        "response.skipped.stale_generation", "output-admission-gate",
+                        {"turnId": turn_id, "turnSequence": turn_sequence,
+                         "generation": generation, "currentGeneration": owner.output_generation},
+                    )
+                    return False
+                if turn_sequence != owner.latest_input_sequence:
+                    session_trace(
+                        "response.skipped.stale_user_turn", "output-admission-gate",
+                        {"turnId": turn_id, "turnSequence": turn_sequence,
+                         "latestInputSequence": owner.latest_input_sequence},
+                    )
+                    return False
+                accepted_origin = {**origin, "generation": generation, "turnId": turn_id}
+                return bool(request_bridge_response(
+                    bridge, instructions, priority=priority, interrupt=interrupt,
+                    speech_policy=speech_policy, reason=reason,
+                    max_protection_ms=max_protection_ms, output_mode=output_mode,
+                    purpose=purpose, origin=accepted_origin,
+                ))
+
         def resolve_semantic_turn(text: str, result: dict, semantic: dict) -> None:
             harness.journal.append("control_decision", {
                 "decision": semantic,
@@ -4699,6 +4751,7 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
             async with owner.mutation_lock:
                 if owner.socket_token is not socket_token or owner.epoch != connection_epoch:
                     raise asyncio.CancelledError
+                turn_generation = owner.output_generation
                 work_ledger.set_turn_status(turn_id, "processing")
                 revision = semantic.get("revision")
                 if revision:
@@ -5145,7 +5198,14 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                 if memory_response.get("requested")
                 else None
             )
-            if server_memory_reply and not ws.closed:
+            if (
+                server_memory_reply
+                and not ws.closed
+                and owner.socket_token is socket_token
+                and owner.epoch == connection_epoch
+                and owner.output_generation == turn_generation
+                and turn_sequence == owner.latest_input_sequence
+            ):
                 response_id = f"memory-policy-{connection_epoch}-{turn_sequence}"
                 harness.journal.append_message(
                     "assistant",
@@ -5178,6 +5238,7 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                         ),
                     },
                 )
+            response_generation = turn_generation
             if (
                 not background_intent
                 and
@@ -5193,9 +5254,11 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                 )
             ):
                 selection = turn_policy(session_runtime).select(result["decision"])
-                request_bridge_response(
-                    bridge,
-                    grounded_user_instructions(
+                await admit_foreground_response(
+                    turn_id=turn_id,
+                    turn_sequence=turn_sequence,
+                    generation=response_generation,
+                    instructions=grounded_user_instructions(
                         selected_candidate.text
                         if secondary_response_candidates
                         and selected_candidate is not None
@@ -5233,13 +5296,16 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                         "Answer only this additional subtask from the current compound user turn, "
                         "without repeating answers to its other subtasks: "
                     )
-                    request_bridge_response(
-                        bridge,
-                        _secondary_instruction + json.dumps(_candidate_text, ensure_ascii=False),
+                    await admit_foreground_response(
+                        turn_id=turn_id,
+                        turn_sequence=turn_sequence,
+                        generation=response_generation,
+                        instructions=_secondary_instruction + json.dumps(_candidate_text, ensure_ascii=False),
                         priority=90,
                         interrupt=False,
                         speech_policy="immediate",
                         reason="compound-turn-additional-subtask",
+                        max_protection_ms=2500,
                         output_mode="text",
                         purpose="compound-subtask",
                         origin=_candidate_origin,
@@ -5349,6 +5415,15 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
             """Enqueue one complete (already-accumulated) utterance."""
             owner.turn_sequence += 1
             owner.latest_input_sequence = owner.turn_sequence
+            owner.output_generation += 1
+            # A newer user turn invalidates all currently queued foreground
+            # output. The bridge returns interrupted result-backed responses to
+            # the durable inbox; background jobs themselves remain running.
+            if hasattr(bridge, "cancel_response"):
+                try:
+                    bridge.cancel_response(drop_queued_below=101, reason="newer-user-turn")
+                except TypeError:
+                    bridge.cancel_response()
             ledger = owner.work_ledger or CaseWorkLedger(harness.journal)
             ledger.suspend_before_sequence(owner.turn_sequence, reason="newer-user-turn")
             captured = ledger.capture_turn(
@@ -5566,6 +5641,14 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                     future = asyncio.get_running_loop().create_future()
                     owner.turn_sequence += 1
                     owner.latest_input_sequence = owner.turn_sequence
+                    owner.output_generation += 1
+                    if hasattr(bridge, "cancel_response"):
+                        try:
+                            bridge.cancel_response(
+                                drop_queued_below=101, reason="newer-explicit-control",
+                            )
+                        except TypeError:
+                            bridge.cancel_response()
                     ledger = owner.work_ledger or CaseWorkLedger(harness.journal)
                     ledger.suspend_before_sequence(
                         owner.turn_sequence, reason="newer-explicit-control",
