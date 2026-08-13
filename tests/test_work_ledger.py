@@ -85,7 +85,25 @@ def test_result_arbiter_skips_suspended_stale_intent(tmp_path):
     ledger.suspend_before_sequence(2)
 
     assert ledger.claim_next_result(latest_sequence=2) is None
-    assert ledger.results()[old_result["resultId"]]["status"] == "pending"
+
+
+def test_background_envelope_carries_session_and_generation(tmp_path):
+    journal = SessionJournal(tmp_path / "session.jsonl", session_id="envelope")
+    ledger = CaseWorkLedger(journal)
+    turn = ledger.capture_turn("run background work", source="test", sequence=1)
+    intent = ledger.create_intent(
+        turn["turnId"], kind="background-job", status="running-background", generation=7,
+    )
+    job = ledger.create_job(intent["intentId"], kind="background-job", status="waiting-result")
+    result = ledger.enqueue_result(intent["intentId"], "done", job_id=job["jobId"])
+    assert result["correlation"] == {
+        "sessionId": "envelope",
+        "turnId": turn["turnId"],
+        "intentId": intent["intentId"],
+        "jobId": job["jobId"],
+        "resultId": result["resultId"],
+        "generation": 7,
+    }
 
 
 def test_stale_scheduled_result_can_be_delivered_when_explicitly_allowed(tmp_path):

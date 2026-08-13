@@ -1665,9 +1665,13 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                                 priority=int(claimed.get("priority", 50)),
                                 reason="result-inbox-arbiter",
                                 origin={
+                                    "sessionId": (claimed.get("correlation") or {}).get("sessionId", owner.session_id),
+                                    "turnId": (claimed.get("correlation") or {}).get("turnId"),
                                     "intentId": claimed.get("intentId"),
                                     "jobId": claimed.get("jobId"),
                                     "resultId": claimed.get("resultId"),
+                                    "generation": (claimed.get("correlation") or {}).get("generation"),
+                                    "background": True,
                                 },
                             )
                             if not accepted:
@@ -5084,6 +5088,7 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                         payload={"semantic": _bg_semantic, "parentIntentId": intent["intentId"]},
                         skill_ref={"name": _bg_skill} if _bg_skill else {},
                         status="running-background",
+                        generation=owner.output_generation,
                     )
                     _bg_job = work_ledger.create_job(
                         _bg_intent["intentId"],
@@ -5143,6 +5148,7 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                             "parentIntentId": intent["intentId"],
                         },
                         status="waiting-input" if _candidate_waiting else "pending",
+                        generation=owner.output_generation,
                     )
                     _child_job = work_ledger.create_job(
                         _child_intent["intentId"],

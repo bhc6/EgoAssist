@@ -195,12 +195,19 @@ class CaseWorkLedger:
         skill_ref: Mapping[str, Any] | None = None,
         status: str = "pending",
         intent_id: str | None = None,
+        generation: int | None = None,
     ) -> dict[str, Any]:
         if status not in INTENT_STATUSES:
             raise ValueError(f"invalid intent status: {status}")
         if str(turn_id) not in self.turns():
             raise ValueError(f"unknown turn: {turn_id}")
         stable_id = str(intent_id or uuid4().hex[:16])
+        correlation = {
+            "sessionId": str(self.journal.session_id),
+            "turnId": str(turn_id), "intentId": stable_id,
+        }
+        if generation is not None:
+            correlation["generation"] = int(generation)
         return self.journal.append("intent_envelope", {
             "intentId": stable_id,
             "turnId": str(turn_id),
@@ -208,7 +215,7 @@ class CaseWorkLedger:
             "payload": dict(payload or {}),
             "skillRef": dict(skill_ref or {}),
             "status": status,
-            "correlation": {"turnId": str(turn_id), "intentId": stable_id},
+            "correlation": correlation,
         }, idempotency_key=f"intent:{stable_id}")
 
     def set_intent_status(
@@ -355,10 +362,14 @@ class CaseWorkLedger:
         intent = self.intents()[str(intent_id)]
         job_payload = dict(payload or {})
         correlation = {
+            "sessionId": str(self.journal.session_id),
             "turnId": str(intent.get("turnId", "")),
             "intentId": str(intent_id),
             "jobId": stable_id,
         }
+        intent_correlation = intent.get("correlation") or {}
+        if intent_correlation.get("generation") is not None:
+            correlation["generation"] = int(intent_correlation["generation"])
         if job_payload.get("workflowId"):
             correlation["workflowId"] = str(job_payload["workflowId"])
         return self.journal.append("job_ledger", {
@@ -443,10 +454,14 @@ class CaseWorkLedger:
         stable_id = str(result_id or uuid4().hex[:16])
         intent = self.intents()[str(intent_id)]
         correlation = {
+            "sessionId": str(self.journal.session_id),
             "turnId": str(intent.get("turnId", "")),
             "intentId": str(intent_id),
             "resultId": stable_id,
         }
+        intent_correlation = intent.get("correlation") or {}
+        if intent_correlation.get("generation") is not None:
+            correlation["generation"] = int(intent_correlation["generation"])
         if job_id is not None:
             job = self.jobs()[str(job_id)]
             correlation["jobId"] = str(job_id)
