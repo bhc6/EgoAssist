@@ -1,0 +1,338 @@
+{
+  "mock": false,
+  "model": "qwen3.5-omni-flash-realtime",
+  "input": "text-control",
+  "physicalCompletionMeasured": false,
+  "passed": true,
+  "turns": [
+    {
+      "input": "我要做番茄炒蛋，请告诉我第一步。",
+      "audioPackets": 30,
+      "firstTextMs": 2521.1,
+      "firstAudioMs": 2771.5,
+      "transcript": "好的，开始做番茄炒蛋。第一步是准备：把鸡蛋、番茄、少量油和盐都放到操作区。你那边都准备好了吗？",
+      "terminal": {
+        "sequence": 1,
+        "status": "response.done",
+        "usage": {
+          "inputTokens": 2102,
+          "outputTokens": 150,
+          "totalTokens": 2252,
+          "inputTokenDetails": {
+            "text_tokens": 2102
+          },
+          "outputTokenDetails": {
+            "text_tokens": 32,
+            "audio_tokens": 118
+          }
+        },
+        "fragmentCommitted": true,
+        "interrupted": false,
+        "localCancelRequested": false
+      },
+      "finishedMs": 4559.9,
+      "state": {
+        "activeSkill": "kitchen-coach",
+        "toolAudit": [],
+        "task": {
+          "id": "tomato-eggs",
+          "title": "番茄炒蛋",
+          "version": "1.1",
+          "provenance": "bundled/household-procedure"
+        },
+        "currentCheckpointId": "prepare",
+        "paused": false,
+        "stepIndex": 0
+      },
+      "passed": true
+    },
+    {
+      "input": "请重复当前步骤。",
+      "audioPackets": 24,
+      "firstTextMs": 1309.3,
+      "firstAudioMs": 1573.9,
+      "transcript": "先把鸡蛋、番茄、少量油和盐都放到操作区，确认一下你那边准备好了没有？",
+      "terminal": {
+        "sequence": 2,
+        "status": "response.done",
+        "usage": {
+          "inputTokens": 2459,
+          "outputTokens": 114,
+          "totalTokens": 2573,
+          "inputTokenDetails": {
+            "text_tokens": 2459
+          },
+          "outputTokenDetails": {
+            "text_tokens": 21,
+            "audio_tokens": 93
+          }
+        },
+        "fragmentCommitted": true,
+        "interrupted": false,
+        "localCancelRequested": false
+      },
+      "finishedMs": 2951.0,
+      "state": {
+        "activeSkill": "kitchen-coach",
+        "toolAudit": [],
+        "task": {
+          "id": "tomato-eggs",
+          "title": "番茄炒蛋",
+          "version": "1.1",
+          "provenance": "bundled/household-procedure"
+        },
+        "currentCheckpointId": "prepare",
+        "paused": false,
+        "stepIndex": 0
+      },
+      "passed": true
+    },
+    {
+      "input": "暂停当前任务。",
+      "audioPackets": 5,
+      "firstTextMs": 1614.2,
+      "firstAudioMs": 1856.4,
+      "transcript": "好的，任务已暂停。",
+      "terminal": {
+        "sequence": 3,
+        "status": "response.done",
+        "usage": {
+          "inputTokens": 2779,
+          "outputTokens": 28,
+          "totalTokens": 2807,
+          "inputTokenDetails": {
+            "text_tokens": 2779
+          },
+          "outputTokenDetails": {
+            "text_tokens": 8,
+            "audio_tokens": 20
+          }
+        },
+        "fragmentCommitted": true,
+        "interrupted": false,
+        "localCancelRequested": false
+      },
+      "finishedMs": 2205.0,
+      "state": {
+        "activeSkill": "kitchen-coach",
+        "toolAudit": [],
+        "task": {
+          "id": "tomato-eggs",
+          "title": "番茄炒蛋",
+          "version": "1.1",
+          "provenance": "bundled/household-procedure"
+        },
+        "currentCheckpointId": "prepare",
+        "paused": true,
+        "stepIndex": 0
+      },
+      "passed": true
+    },
+    {
+      "input": "继续当前任务。",
+      "audioPackets": 22,
+      "firstTextMs": 1641.0,
+      "firstAudioMs": 1959.4,
+      "transcript": "现在可以开始准备鸡蛋、番茄、少量油和盐，把它们都放到操作区。你那边准备好了吗？",
+      "terminal": {
+        "sequence": 4,
+        "status": "response.done",
+        "usage": {
+          "inputTokens": 3088,
+          "outputTokens": 110,
+          "totalTokens": 3198,
+          "inputTokenDetails": {
+            "text_tokens": 3088
+          },
+          "outputTokenDetails": {
+            "text_tokens": 24,
+            "audio_tokens": 86
+          }
+        },
+        "fragmentCommitted": true,
+        "interrupted": false,
+        "localCancelRequested": false
+      },
+      "finishedMs": 3435.0,
+      "state": {
+        "activeSkill": "kitchen-coach",
+        "toolAudit": [],
+        "task": {
+          "id": "tomato-eggs",
+          "title": "番茄炒蛋",
+          "version": "1.1",
+          "provenance": "bundled/household-procedure"
+        },
+        "currentCheckpointId": "prepare",
+        "paused": false,
+        "stepIndex": 0
+      },
+      "passed": true
+    },
+    {
+      "input": "我确认已经准备好鸡蛋、番茄、油和盐，这一步完成了。",
+      "audioPackets": 21,
+      "firstTextMs": 1330.0,
+      "firstAudioMs": 1654.5,
+      "transcript": "好的，准备步骤确认完成。接下来把番茄洗净并擦干。你那边开始清洗了吗？",
+      "terminal": {
+        "sequence": 5,
+        "status": "response.done",
+        "usage": {
+          "inputTokens": 3457,
+          "outputTokens": 105,
+          "totalTokens": 3562,
+          "inputTokenDetails": {
+            "text_tokens": 3457
+          },
+          "outputTokenDetails": {
+            "text_tokens": 22,
+            "audio_tokens": 83
+          }
+        },
+        "fragmentCommitted": true,
+        "interrupted": false,
+        "localCancelRequested": false
+      },
+      "finishedMs": 2913.9,
+      "state": {
+        "activeSkill": "kitchen-coach",
+        "toolAudit": [],
+        "task": {
+          "id": "tomato-eggs",
+          "title": "番茄炒蛋",
+          "version": "1.1",
+          "provenance": "bundled/household-procedure"
+        },
+        "currentCheckpointId": "wash",
+        "paused": false,
+        "stepIndex": 1
+      },
+      "passed": true
+    },
+    {
+      "input": "回到上一步。",
+      "audioPackets": 21,
+      "firstTextMs": 2104.4,
+      "firstAudioMs": 2399.4,
+      "transcript": "好的，已回到准备步骤。现在请确认鸡蛋、番茄、油和盐都已放在操作区。",
+      "terminal": {
+        "sequence": 6,
+        "status": "response.done",
+        "usage": {
+          "inputTokens": 3784,
+          "outputTokens": 104,
+          "totalTokens": 3888,
+          "inputTokenDetails": {
+            "text_tokens": 3784
+          },
+          "outputTokenDetails": {
+            "text_tokens": 23,
+            "audio_tokens": 81
+          }
+        },
+        "fragmentCommitted": true,
+        "interrupted": false,
+        "localCancelRequested": false
+      },
+      "finishedMs": 3622.7,
+      "state": {
+        "activeSkill": "kitchen-coach",
+        "toolAudit": [],
+        "task": {
+          "id": "tomato-eggs",
+          "title": "番茄炒蛋",
+          "version": "1.1",
+          "provenance": "bundled/household-procedure"
+        },
+        "currentCheckpointId": "prepare",
+        "paused": false,
+        "stepIndex": 0
+      },
+      "passed": true
+    },
+    {
+      "input": "我要组装凳子，请告诉我第一步。",
+      "audioPackets": 43,
+      "firstTextMs": 2496.3,
+      "firstAudioMs": 2766.3,
+      "transcript": "好的，开始组装平板包装凳。第一步是清点：按产品手册清点板件、紧固件和工具。你那边有产品手册吗？或者先把所有零件都倒在桌面上看看数量对不对？",
+      "terminal": {
+        "sequence": 7,
+        "status": "response.done",
+        "usage": {
+          "inputTokens": 4024,
+          "outputTokens": 214,
+          "totalTokens": 4238,
+          "inputTokenDetails": {
+            "text_tokens": 4024
+          },
+          "outputTokenDetails": {
+            "text_tokens": 43,
+            "audio_tokens": 171
+          }
+        },
+        "fragmentCommitted": true,
+        "interrupted": false,
+        "localCancelRequested": false
+      },
+      "finishedMs": 5335.5,
+      "state": {
+        "activeSkill": "assembly-coach",
+        "toolAudit": [],
+        "task": {
+          "id": "flat-pack-stool",
+          "title": "组装平板包装凳",
+          "version": "1.0",
+          "provenance": "bundled/generic-flat-pack-demo"
+        },
+        "currentCheckpointId": "inventory",
+        "paused": false,
+        "stepIndex": 0
+      },
+      "passed": true
+    },
+    {
+      "input": "请展示当前步骤的参考资料。",
+      "audioPackets": 70,
+      "firstTextMs": 2972.4,
+      "firstAudioMs": 3266.3,
+      "transcript": "当前步骤是清点零件，请参考随产品提供的手册核对板件、紧固件和工具的数量。如果手册在手边，请先查看；若暂时找不到，可以先将所有零件倒在桌面上，确认总数是否与包装箱或说明书标注一致。你那边有手册吗？",
+      "terminal": {
+        "sequence": 8,
+        "status": "response.done",
+        "usage": {
+          "inputTokens": 4398,
+          "outputTokens": 334,
+          "totalTokens": 4732,
+          "inputTokenDetails": {
+            "text_tokens": 4398
+          },
+          "outputTokenDetails": {
+            "text_tokens": 56,
+            "audio_tokens": 278
+          }
+        },
+        "fragmentCommitted": true,
+        "interrupted": false,
+        "localCancelRequested": false
+      },
+      "finishedMs": 7227.1,
+      "state": {
+        "activeSkill": "assembly-coach",
+        "toolAudit": [],
+        "task": {
+          "id": "flat-pack-stool",
+          "title": "组装平板包装凳",
+          "version": "1.0",
+          "provenance": "bundled/generic-flat-pack-demo"
+        },
+        "currentCheckpointId": "inventory",
+        "paused": false,
+        "stepIndex": 0
+      },
+      "passed": true
+    }
+  ],
+  "sessionId": "5b944e59e311402c"
+}

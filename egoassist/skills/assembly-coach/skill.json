@@ -1,8 +1,10 @@
 {
   "tasks": "tasks/*.json",
+  "instruction_resources": ["references/evidence-policy.md"],
   "default_task": "water-filter",
   "activation_phrases": ["组装家具", "装配家具", "组装净水器", "安装净水器", "assembly", "assemble", "flat-pack"],
   "allow_custom_tasks": true,
+  "automatic_activation_requires_manifest_evidence": true,
   "capabilities": ["part-verification", "orientation-check", "reversible-recovery"],
   "proactive_check_seconds": 5,
   "turn_taking": {

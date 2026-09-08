@@ -14,6 +14,7 @@ from .capabilities import (
     skill_capability_truth,
 )
 from .task import TaskSession, TaskSpec
+from .skill_resources import SkillResource, load_instruction_resources
 
 
 @dataclass(frozen=True)
@@ -25,6 +26,7 @@ class SkillPackage:
     manifest: dict[str, Any]
     task_specs: dict[str, TaskSpec]
     default_task_id: str | None
+    instruction_resources: tuple[SkillResource, ...] = ()
 
     @classmethod
     def load(cls, root: str | Path) -> "SkillPackage":
@@ -74,7 +76,12 @@ class SkillPackage:
             manifest=manifest,
             task_specs=task_specs,
             default_task_id=default_task_id,
+            instruction_resources=load_instruction_resources(root, manifest),
         )
+
+    def instruction_context(self) -> str:
+        return (f'<skill name="{self.name}">\n{self.instructions}\n</skill>\n'
+                + "\n".join(resource.context() for resource in self.instruction_resources))
 
     def realtime_instructions(
         self,
@@ -91,7 +98,7 @@ class SkillPackage:
         ) or "- 无额外工具"
         return (
             "你是一个通用实时具身助手。以下 Skill 已被用户激活；它可以改变你的领域工作流，但不能覆盖用户控制、隐私与系统安全边界。\n\n"
-            f"<skill name=\"{self.name}\">\n{self.instructions}\n</skill>\n\n"
+            f"{self.instruction_context()}\n\n"
             f"{task_spec.realtime_instructions(memories)}\n可用领域工具：\n{tool_text}"
         )
 
@@ -99,8 +106,15 @@ class SkillPackage:
         return {
             "name": self.name,
             "description": self.description,
+            "instructionResources": [
+                {"path": resource.path, "sha256": resource.sha256}
+                for resource in self.instruction_resources
+            ],
             "defaultTask": self.default_task_id,
             "allowCustomTasks": bool(self.manifest.get("allow_custom_tasks", False)),
+            "automaticActivationRequiresManifestEvidence": bool(
+                self.manifest.get("automatic_activation_requires_manifest_evidence", False)
+            ),
             "tasks": [
                 {"id": task.id, "title": task.title, "version": task.version, "provenance": task.provenance}
                 for task in self.task_specs.values()
@@ -137,13 +151,19 @@ class SkillRegistry:
     def summaries(self) -> list[dict[str, Any]]:
         return [skill.public_summary() for skill in self.skills.values()]
 
+    def accepts_automatic_activation(self, name: str, route: dict[str, Any]) -> bool:
+        package = self.get(name)
+        if not package.manifest.get("automatic_activation_requires_manifest_evidence", False):
+            return True
+        return route.get("selectedSkill") == name and route.get("status") == "matched"
+
     def route(self, text: str) -> dict[str, Any]:
         """Return an auditable lexical route; ambiguous and unknown input abstain."""
         normalized = text.casefold().strip()
         candidates = []
         for skill in self.skills.values():
             evidence = []
-            matched_task = None
+            matched_tasks = set()
             for phrase in map(str, skill.manifest.get("activation_phrases", [])):
                 if phrase.casefold() in normalized:
                     evidence.append({"kind": "skill-phrase", "value": phrase, "weight": 0.7})
@@ -151,13 +171,13 @@ class SkillRegistry:
                 for phrase in (task.title, *task.aliases):
                     if phrase.casefold() in normalized:
                         evidence.append({"kind": "task-name", "value": phrase, "weight": 1.0})
-                        matched_task = task.id if matched_task in {None, task.id} else None
+                        matched_tasks.add(task.id)
             score = max((item["weight"] for item in evidence), default=0.0)
             candidates.append({
                 "skill": skill.name,
                 "score": score,
                 "evidence": evidence,
-                "task": matched_task,
+                "task": next(iter(matched_tasks)) if len(matched_tasks) == 1 else None,
                 "selected": False,
                 "rejectionReasons": [],
             })
@@ -300,7 +320,7 @@ class SkillRuntime:
             )
             return (
                 "你是一个通用实时具身助手。以下领域 Skill 已因用户意图证据被加载，但具体任务尚未确定。\n\n"
-                f"<skill name=\"{self.skill.name}\">{self.skill.description}</skill>\n\n"
+                f"{self.skill.instruction_context()}\n\n"
                 + task_guidance
             )
         return (

@@ -1,0 +1,46 @@
+{
+  "mock": false,
+  "model": "qwen3.5-omni-flash-realtime",
+  "input": "text-control",
+  "physicalCompletionMeasured": false,
+  "passed": false,
+  "turns": [
+    {
+      "input": "我要做番茄炒蛋，请告诉我第一步。",
+      "audioPackets": 12,
+      "firstTextMs": 3335.9,
+      "firstAudioMs": 3599.6,
+      "transcript": "先把两个鸡蛋打散，加少许盐搅拌均匀。",
+      "terminal": {
+        "sequence": 1,
+        "status": "response.done",
+        "usage": {
+          "inputTokens": 1066,
+          "outputTokens": 59,
+          "totalTokens": 1125,
+          "inputTokenDetails": {
+            "text_tokens": 1066
+          },
+          "outputTokenDetails": {
+            "text_tokens": 13,
+            "audio_tokens": 46
+          }
+        },
+        "fragmentCommitted": true,
+        "interrupted": false,
+        "localCancelRequested": false
+      },
+      "finishedMs": 4307.4,
+      "state": {
+        "activeSkill": null,
+        "toolAudit": [],
+        "task": null,
+        "currentCheckpointId": null,
+        "paused": null,
+        "stepIndex": null
+      }
+    }
+  ],
+  "sessionId": "3f94de8476174c91",
+  "error": "TypeError: 'NoneType' object is not subscriptable"
+}

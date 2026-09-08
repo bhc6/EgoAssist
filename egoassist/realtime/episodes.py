@@ -190,6 +190,7 @@ class RealtimeEpisodeMemory:
             },
             "routing": raw["routing"],
             "minimumScore": raw["minimumScore"],
+            "timing": raw.get("timing", {}),
             "candidates": candidates,
             "selected": selected,
             "injection": {"status": "not-injected", "episodeIds": []},

@@ -1,8 +1,10 @@
 {
   "tasks": "tasks/*.json",
+  "instruction_resources": ["references/safety-sources.md"],
   "default_task": "tomato-eggs",
   "activation_phrases": ["做菜", "做饭", "烹饪", "下厨", "cook", "cooking"],
   "allow_custom_tasks": true,
+  "automatic_activation_requires_manifest_evidence": true,
   "capabilities": ["food-hygiene", "knife-safety", "heat-safety", "step-recovery"],
   "proactive_check_seconds": 4,
   "turn_taking": {

@@ -16,10 +16,10 @@ from egoassist.product.contracts import IntentCandidate
 from .router_protocol import ROUTER_PROMPT, expand_decision
 
 
-TURN_ROUTER_POLICY_VERSION = "semantic-turn-router-v7"
+TURN_ROUTER_POLICY_VERSION = "semantic-turn-router-v8"
 TASK_CONTROLS = {
     "none", "confirm-step", "rollback", "repeat",
-    "pause-task", "resume-task", "request-help",
+    "pause-task", "resume-task", "request-help", "show-reference",
 }
 
 _EXPLICIT_MEMORY_REQUESTS = (

@@ -1,0 +1,215 @@
+{
+  "mock": false,
+  "model": "qwen3.5-omni-flash-realtime",
+  "input": "text-control",
+  "physicalCompletionMeasured": false,
+  "passed": false,
+  "turns": [
+    {
+      "input": "我要做番茄炒蛋，请告诉我第一步。",
+      "audioPackets": 21,
+      "firstTextMs": 2725.9,
+      "firstAudioMs": 2993.4,
+      "transcript": "先把鸡蛋、番茄和少量油、盐准备好，放在操作区。你那边准备好了吗？",
+      "terminal": {
+        "sequence": 1,
+        "status": "response.done",
+        "usage": {
+          "inputTokens": 2048,
+          "outputTokens": 102,
+          "totalTokens": 2150,
+          "inputTokenDetails": {
+            "text_tokens": 2048
+          },
+          "outputTokenDetails": {
+            "text_tokens": 21,
+            "audio_tokens": 81
+          }
+        },
+        "fragmentCommitted": true,
+        "interrupted": false,
+        "localCancelRequested": false
+      },
+      "finishedMs": 4232.0,
+      "state": {
+        "activeSkill": "kitchen-coach",
+        "toolAudit": [],
+        "task": {
+          "id": "tomato-eggs",
+          "title": "番茄炒蛋",
+          "version": "1.1",
+          "provenance": "bundled/household-procedure"
+        },
+        "currentCheckpointId": "prepare",
+        "paused": false,
+        "stepIndex": 0
+      },
+      "passed": true
+    },
+    {
+      "input": "请重复当前步骤。",
+      "audioPackets": 24,
+      "firstTextMs": 2705.3,
+      "firstAudioMs": 2958.7,
+      "transcript": "先把鸡蛋、番茄和少量油、盐准备好，放在操作区。你那边准备好了吗？",
+      "terminal": {
+        "sequence": 2,
+        "status": "response.done",
+        "usage": {
+          "inputTokens": 2394,
+          "outputTokens": 113,
+          "totalTokens": 2507,
+          "inputTokenDetails": {
+            "text_tokens": 2394
+          },
+          "outputTokenDetails": {
+            "text_tokens": 20,
+            "audio_tokens": 93
+          }
+        },
+        "fragmentCommitted": true,
+        "interrupted": false,
+        "localCancelRequested": false
+      },
+      "finishedMs": 4349.5,
+      "state": {
+        "activeSkill": "kitchen-coach",
+        "toolAudit": [],
+        "task": {
+          "id": "tomato-eggs",
+          "title": "番茄炒蛋",
+          "version": "1.1",
+          "provenance": "bundled/household-procedure"
+        },
+        "currentCheckpointId": "prepare",
+        "paused": false,
+        "stepIndex": 0
+      },
+      "passed": true
+    },
+    {
+      "input": "暂停当前任务。",
+      "audioPackets": 4,
+      "firstTextMs": 1625.9,
+      "firstAudioMs": 1878.0,
+      "transcript": "好的，任务已暂停。",
+      "terminal": {
+        "sequence": 3,
+        "status": "response.done",
+        "usage": {
+          "inputTokens": 2713,
+          "outputTokens": 23,
+          "totalTokens": 2736,
+          "inputTokenDetails": {
+            "text_tokens": 2713
+          },
+          "outputTokenDetails": {
+            "text_tokens": 8,
+            "audio_tokens": 15
+          }
+        },
+        "fragmentCommitted": true,
+        "interrupted": false,
+        "localCancelRequested": false
+      },
+      "finishedMs": 2181.9,
+      "state": {
+        "activeSkill": "kitchen-coach",
+        "toolAudit": [],
+        "task": {
+          "id": "tomato-eggs",
+          "title": "番茄炒蛋",
+          "version": "1.1",
+          "provenance": "bundled/household-procedure"
+        },
+        "currentCheckpointId": "prepare",
+        "paused": true,
+        "stepIndex": 0
+      },
+      "passed": true
+    },
+    {
+      "input": "继续当前任务。",
+      "audioPackets": 17,
+      "firstTextMs": 1803.6,
+      "firstAudioMs": 2162.8,
+      "transcript": "先把鸡蛋、番茄和少量油、盐准备好，放在操作区。你那边准备好了吗？",
+      "terminal": {
+        "sequence": 4,
+        "status": "response.done",
+        "usage": {
+          "inputTokens": 3022,
+          "outputTokens": 86,
+          "totalTokens": 3108,
+          "inputTokenDetails": {
+            "text_tokens": 3022
+          },
+          "outputTokenDetails": {
+            "text_tokens": 21,
+            "audio_tokens": 65
+          }
+        },
+        "fragmentCommitted": true,
+        "interrupted": false,
+        "localCancelRequested": false
+      },
+      "finishedMs": 3116.8,
+      "state": {
+        "activeSkill": "kitchen-coach",
+        "toolAudit": [],
+        "task": {
+          "id": "tomato-eggs",
+          "title": "番茄炒蛋",
+          "version": "1.1",
+          "provenance": "bundled/household-procedure"
+        },
+        "currentCheckpointId": "prepare",
+        "paused": false,
+        "stepIndex": 0
+      },
+      "passed": true
+    },
+    {
+      "input": "我确认已经准备好鸡蛋、番茄、油和盐，这一步完成了。",
+      "audioPackets": 18,
+      "firstTextMs": 1303.8,
+      "firstAudioMs": 1594.2,
+      "transcript": "好的，准备步骤完成。接下来把番茄洗净并擦干，你开始清洗吧。",
+      "terminal": {
+        "sequence": 5,
+        "status": "response.done",
+        "usage": {
+          "inputTokens": 3380,
+          "outputTokens": 92,
+          "totalTokens": 3472,
+          "inputTokenDetails": {
+            "text_tokens": 3380
+          },
+          "outputTokenDetails": {
+            "text_tokens": 20,
+            "audio_tokens": 72
+          }
+        },
+        "fragmentCommitted": true,
+        "interrupted": false,
+        "localCancelRequested": false
+      },
+      "finishedMs": 2696.8,
+      "state": {
+        "activeSkill": "kitchen-coach",
+        "toolAudit": [],
+        "task": {
+          "id": "tomato-eggs",
+          "title": "番茄炒蛋",
+          "version": "1.1",
+          "provenance": "bundled/household-procedure"
+        },
+        "currentCheckpointId": "prepare",
+        "paused": false,
+        "stepIndex": 0
+      }
+    }
+  ],
+  "sessionId": "54e63d8768e94671",
+  "error": "AssertionError: {'activeSkill': 'kitchen-coach', 'toolAudit': [], 'task': {'id': 'tomato-eggs', 'title': '番茄炒蛋', 'version': '1.1', 'provenance': 'bundled/household-procedure'}, 'currentCheckpointId': 'prepare', 'paused': False, 'stepIndex': 0}"
+}

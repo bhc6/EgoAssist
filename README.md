@@ -10,6 +10,8 @@ protocol, routes each turn through an explicit Skill/task state machine rather
 than a free-running agent loop, and keeps memory, retrieval, and perception
 behind typed boundaries so each layer can be replaced independently.
 
+Latest real-provider audit: [memory latency and Skill workflows (2026-09-09)](docs/MEMORY_SKILLS_VALIDATION_2026-09-09.md), including failed trials, fixes, and the remaining cloud-latency limits.
+
 ---
 
 ## Architecture

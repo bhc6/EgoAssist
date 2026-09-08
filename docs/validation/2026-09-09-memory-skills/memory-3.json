@@ -1,0 +1,235 @@
+{
+  "passed": true,
+  "mock": false,
+  "model": "qwen3.5-omni-flash-realtime",
+  "input": "text-control",
+  "freshSession": true,
+  "value": "780649",
+  "turns": [
+    {
+      "input": "我的储物柜编号是什么？",
+      "audioPackets": 10,
+      "firstTextMs": 2915.5,
+      "firstAudioMs": 3186.7,
+      "transcript": "你的储物柜编号是780649。",
+      "terminal": {
+        "sequence": 1,
+        "status": "response.done",
+        "usage": {
+          "inputTokens": 1174,
+          "outputTokens": 54,
+          "totalTokens": 1228,
+          "inputTokenDetails": {
+            "text_tokens": 1174
+          },
+          "outputTokenDetails": {
+            "text_tokens": 14,
+            "audio_tokens": 40
+          }
+        },
+        "fragmentCommitted": true,
+        "interrupted": false,
+        "localCancelRequested": false
+      },
+      "finishedMs": 3824.9
+    },
+    {
+      "input": "请用刚才查到的编号，写一句我可以发给前台的取物说明。",
+      "audioPackets": 19,
+      "firstTextMs": 2138.5,
+      "firstAudioMs": 2424.2,
+      "transcript": "你好，我是780649号储物柜的持有者，麻烦帮我取一下物品，谢谢。",
+      "terminal": {
+        "sequence": 2,
+        "status": "response.done",
+        "usage": {
+          "inputTokens": 1507,
+          "outputTokens": 100,
+          "totalTokens": 1607,
+          "inputTokenDetails": {
+            "text_tokens": 1507
+          },
+          "outputTokenDetails": {
+            "text_tokens": 26,
+            "audio_tokens": 74
+          }
+        },
+        "fragmentCommitted": true,
+        "interrupted": false,
+        "localCancelRequested": false
+      },
+      "finishedMs": 3648.1
+    }
+  ],
+  "writeSession": "35540dc26e4941c3",
+  "receipt": {
+    "type": "memory_status",
+    "status": "committed",
+    "message": "已保存：我的储物柜编号是780649。",
+    "committedCardIds": [
+      "dbc97e26aef3479e"
+    ]
+  },
+  "receiptMs": 2338.4,
+  "recallSession": "84ec8102d88a4a43",
+  "retrievalMs": [
+    14.006,
+    13.856
+  ],
+  "writePolicyMs": [
+    13.095
+  ],
+  "routing": [
+    {
+      "method": "semantic-turn-router-v8",
+      "model": "qwen-flash",
+      "status": "classified",
+      "speechControl": null,
+      "taskControl": null,
+      "preferenceIntent": null,
+      "memoryQuery": null,
+      "memoryKind": "fact",
+      "memoryText": "我的储物柜编号是780649。",
+      "memoryKey": null,
+      "memoryScope": "participant",
+      "memoryConsent": "explicit",
+      "memoryAtoms": [
+        {
+          "kind": "fact",
+          "text": "我的储物柜编号是780649。",
+          "consent": "explicit",
+          "scope": "participant",
+          "value": "780649",
+          "predicate": "编号",
+          "subject": "储物柜"
+        }
+      ],
+      "memoryDraft": null,
+      "memoryQuerySpec": null,
+      "skillControl": null,
+      "selectedSkill": null,
+      "intentKind": "foreground-dialogue",
+      "intents": [
+        {
+          "kind": "foreground-dialogue",
+          "text": "请记住：我的储物柜编号是780649。",
+          "parameters": {}
+        }
+      ],
+      "revision": null,
+      "skillStatus": "no-match",
+      "rawOutput": "{\"v\":1,\"memoryAtoms\":[{\"kind\":\"fact\",\"text\":\"我的储物柜编号是780649。\",\"subject\":\"储物柜\",\"predicate\":\"编号\",\"value\":\"780649\",\"scope\":\"participant\",\"consent\":\"explicit\"}]}",
+      "requestMetrics": {
+        "httpStatus": 200,
+        "usage": {
+          "input_tokens": 1740,
+          "output_tokens": 57,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "total_tokens": 1797
+        },
+        "requestId": "84430694-8102-92ef-b487-9c9e3a49414a"
+      },
+      "latencyMs": 2170.2,
+      "policyVersion": "semantic-turn-router-v8",
+      "claimBoundary": "Only the current transcript is classified, with explicit clock, pending draft and previous-turn context. Labels are hypotheses, not facts.",
+      "acceptedIntents": []
+    },
+    {
+      "method": "semantic-turn-router-v8",
+      "model": "qwen-flash",
+      "status": "classified",
+      "speechControl": null,
+      "taskControl": null,
+      "preferenceIntent": null,
+      "memoryQuery": "referential",
+      "memoryKind": null,
+      "memoryText": null,
+      "memoryKey": null,
+      "memoryScope": null,
+      "memoryConsent": null,
+      "memoryAtoms": [],
+      "memoryDraft": null,
+      "memoryQuerySpec": {
+        "subject": "储物柜",
+        "predicate": "编号"
+      },
+      "skillControl": null,
+      "selectedSkill": null,
+      "intentKind": "foreground-dialogue",
+      "intents": [
+        {
+          "kind": "foreground-dialogue",
+          "text": "我的储物柜编号是什么？",
+          "parameters": {}
+        }
+      ],
+      "revision": null,
+      "skillStatus": "no-match",
+      "rawOutput": "{\"v\":1,\"memoryQuerySpec\":{\"subject\":\"储物柜\",\"predicate\":\"编号\"}}",
+      "requestMetrics": {
+        "httpStatus": 200,
+        "usage": {
+          "input_tokens": 1731,
+          "output_tokens": 19,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "total_tokens": 1750
+        },
+        "requestId": "10096cdf-d372-9298-a827-a4276ac42f0f"
+      },
+      "latencyMs": 2261.3,
+      "policyVersion": "semantic-turn-router-v8",
+      "claimBoundary": "Only the current transcript is classified, with explicit clock, pending draft and previous-turn context. Labels are hypotheses, not facts.",
+      "acceptedIntents": []
+    },
+    {
+      "method": "semantic-turn-router-v8",
+      "model": "qwen-flash",
+      "status": "classified",
+      "speechControl": null,
+      "taskControl": null,
+      "preferenceIntent": null,
+      "memoryQuery": null,
+      "memoryKind": null,
+      "memoryText": null,
+      "memoryKey": null,
+      "memoryScope": null,
+      "memoryConsent": null,
+      "memoryAtoms": [],
+      "memoryDraft": null,
+      "memoryQuerySpec": null,
+      "skillControl": null,
+      "selectedSkill": "kitchen-coach",
+      "intentKind": "foreground-dialogue",
+      "intents": [
+        {
+          "kind": "foreground-dialogue",
+          "text": "write a message to the front desk about retrieving an item using the storage cabinet number",
+          "parameters": {}
+        }
+      ],
+      "revision": null,
+      "skillStatus": "matched",
+      "rawOutput": "{\"v\":1,\"skill\":\"kitchen-coach\",\"intentKind\":\"foreground-dialogue\",\"intents\":[{\"kind\":\"foreground-dialogue\",\"text\":\"write a message to the front desk about retrieving an item using the storage cabinet number\",\"parameters\":{}}]}",
+      "requestMetrics": {
+        "httpStatus": 200,
+        "usage": {
+          "input_tokens": 1989,
+          "output_tokens": 52,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "total_tokens": 2041
+        },
+        "requestId": "cd95b0b8-758f-91f7-9ec3-5a76e5d8502e"
+      },
+      "latencyMs": 1552.1,
+      "policyVersion": "semantic-turn-router-v8",
+      "claimBoundary": "Only the current transcript is classified, with explicit clock, pending draft and previous-turn context. Labels are hypotheses, not facts.",
+      "acceptedIntents": []
+    }
+  ]
+}

@@ -23,6 +23,18 @@ def remember(memory, text, **overrides):
     return memory.remember(text, **values)
 
 
+def test_structured_lookup_obeys_kind_allowlist_and_zero_score_constraints(tmp_path):
+    memory = TimelineMemory(tmp_path / "memory.sqlite3")
+    remember(memory, "相机位置是抽屉", kind="capture", subject="相机", predicate="位置", value="抽屉")
+    remember(memory, "钥匙位置是门口", subject="钥匙", predicate="位置", value="门口")
+    for kinds in ([], ["capture"], ["event"], ["fact"]):
+        result = memory.retrieve("相机位置", user_id="user-a", case_id="case-a", scope="case",
+                                 kinds=kinds, query_spec={"subject": "相机", "predicate": "位置"}, min_score=0)
+        assert result["selected"] == []
+        assert all(item["kind"] != "capture" for item in result["candidates"])
+    assert result["timing"]["scannedCards"] == 1
+
+
 def test_timeline_persists_and_retrieves_declarative_fact_after_restart(tmp_path):
     path = tmp_path / "timeline.sqlite3"
     memory = TimelineMemory(path)

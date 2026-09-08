@@ -7,6 +7,7 @@ import json
 import re
 import sqlite3
 import threading
+import time
 import unicodedata
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -874,6 +875,7 @@ class TimelineMemory:
     ) -> dict[str, Any]:
         if scope not in MEMORY_SCOPES:
             raise ValueError("invalid memory scope")
+        started = time.perf_counter()
         clock = clock or ClockContext.current(now_utc=now or utc_now())
         now = clock.now_utc
         query_spec = dict(query_spec or {})
@@ -888,44 +890,25 @@ class TimelineMemory:
         if scope == "case":
             clauses.append("case_id=?")
             values.append(str(case_id or ""))
-        if requested_kinds:
-            clauses.append("kind IN (" + ",".join("?" for _ in requested_kinds) + ")")
-            values.extend(sorted(requested_kinds))
+        # An empty allowlist must not widen the query to every kind (including
+        # raw captures). Apply the same scope to ranking and canonical pinning.
+        clauses.append("kind IN (" + ",".join("?" for _ in requested_kinds) + ")" if requested_kinds else "0")
+        values.extend(sorted(requested_kinds))
         with self._lock, self._connect() as connection:
             rows = connection.execute(
                 "SELECT * FROM memory_cards WHERE " + " AND ".join(clauses), values,
             ).fetchall()
 
-        # Fast-path: direct memory_key lookup whenever both subject and predicate
-        # are provided in the query spec.  memory_key_for() generates a canonical
-        # key for any predicate (phone → contact:{e}:phone, location → location:{e},
-        # else → {rel}:{e}), so the fast-path generalises to all structured facts.
+        # Canonical-key pinning uses the already scoped candidates. It is a
+        # ranking rule, not a second query that can bypass the kind allowlist.
         pinned_card_ids: set[str] = set()
         if query_subject and query_predicate:
             fast_key = memory_key_for(query_subject, query_predicate)
             if fast_key:
-                with self._lock, self._connect() as fast_conn:
-                    fast_scope_clauses = [
-                        "user_id=?", "scope=?", "memory_key=?", "status='active'",
-                    ]
-                    fast_scope_values: list[Any] = [
-                        str(user_id), scope, fast_key,
-                    ]
-                    if scope == "case":
-                        fast_scope_clauses.append("case_id=?")
-                        fast_scope_values.append(str(case_id or ""))
-                    fast_row = fast_conn.execute(
-                        "SELECT * FROM memory_cards "
-                        "WHERE " + " AND ".join(fast_scope_clauses) + " "
-                        "ORDER BY happened_at DESC LIMIT 1",
-                        fast_scope_values,
-                    ).fetchone()
+                fast_row = max((row for row in rows if row["memory_key"] == fast_key),
+                               key=lambda row: row["happened_at"], default=None)
                 if fast_row is not None:
-                    fast_card_id = str(fast_row["id"])
-                    pinned_card_ids.add(fast_card_id)
-                    existing_ids = {r["id"] for r in rows}
-                    if fast_card_id not in existing_ids:
-                        rows = [fast_row] + list(rows)
+                    pinned_card_ids.add(str(fast_row["id"]))
 
         wants_today = any(marker in query_normalized for marker in self._hints.today_hints)
         today_key = clock.local_now.date().isoformat()
@@ -936,18 +919,19 @@ class TimelineMemory:
         if query_terms and rows:
             try:
                 fts_query_str = " OR ".join(f'"{term}"' for term in query_terms)
-                row_ids = [row["id"] for row in rows]
-                placeholders = ",".join("?" * len(row_ids))
+                scoped_clauses = ["mc." + clause if clause != "0" else clause for clause in clauses]
                 with self._lock, self._connect() as fts_conn:
                     # bm25() must reference the FTS5 table by its real name, not a
                     # SQL alias — `bm25(mf)` raises "no such column: mf".
+                    # CROSS JOIN keeps FTS as the driving table; allowing SQLite
+                    # to drive this join from scoped cards repeats MATCH work.
                     fts_rows = fts_conn.execute(
                         f"""SELECT mc.id, bm25(memory_fts) as score
                             FROM memory_fts
-                            JOIN memory_cards mc ON mc.rowid = memory_fts.rowid
+                            CROSS JOIN memory_cards mc ON mc.rowid = memory_fts.rowid
                             WHERE memory_fts MATCH ?
-                              AND mc.id IN ({placeholders})""",
-                        [fts_query_str] + row_ids,
+                              AND {" AND ".join(scoped_clauses)}""",
+                        [fts_query_str] + values,
                     ).fetchall()
                     for fts_row in fts_rows:
                         # bm25() returns negative scores; more negative = better
@@ -987,7 +971,11 @@ class TimelineMemory:
                 verbatim = normalize_identity(card["text"])
                 subject_eligible = not query_subject or query_subject in verbatim
                 predicate_eligible = not query_predicate or query_predicate in verbatim
-            card_terms = self._tokenize(card["text"])
+            # Ineligible rows remain in the audit, but cannot contribute a score.
+            # Avoid tokenizing their text on every structured lookup.
+            card_terms = self._tokenize(card["text"]) if (
+                time_eligible and subject_eligible and predicate_eligible
+            ) else set()
             overlap = len(query_terms & card_terms)
             union = max(1, len(query_terms | card_terms))
             lexical = overlap / union if query_terms else 0.0
@@ -1013,7 +1001,7 @@ class TimelineMemory:
             # A canonical fact recorded outside the asked-about range is not an
             # answer to a time-scoped question (e.g. "did I take my meds at 3pm?"
             # must not surface the 4pm dose just because it shares the same key).
-            if card["id"] in pinned_card_ids and time_eligible:
+            if card["id"] in pinned_card_ids and time_eligible and subject_eligible and predicate_eligible:
                 score = 1.0
                 eligible = True
             reasons = []
@@ -1046,7 +1034,7 @@ class TimelineMemory:
         )
         _min_score = min_score if min_score is not None else self._weights.min_score
         selected = [
-            item for item in candidates if item["score"] >= _min_score
+            item for item in candidates if not item["rejectionReasons"] and item["score"] >= _min_score
         ][:max(1, int(limit))]
         selected_ids = {item["cardId"] for item in selected}
         for item in candidates:
@@ -1064,6 +1052,8 @@ class TimelineMemory:
                 "querySpec": {"subject": query_subject, "predicate": query_predicate},
             },
             "minimumScore": _min_score,
+            "timing": {"retrievalMs": round((time.perf_counter() - started) * 1000, 3),
+                       "scannedCards": len(rows)},
             "candidates": candidates[:20],
             "selected": selected,
             "injection": {"status": "not-injected", "cardIds": []},

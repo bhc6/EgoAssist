@@ -1,0 +1,9 @@
+{
+  "mock": false,
+  "model": "qwen-flash",
+  "n": 24,
+  "passed": 20,
+  "unavailable": 0,
+  "medianMs": 742.0,
+  "maxMs": 1650.4
+}

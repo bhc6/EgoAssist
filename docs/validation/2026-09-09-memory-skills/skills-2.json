@@ -1,0 +1,10 @@
+{
+  "mock": false,
+  "model": "qwen3.5-omni-flash-realtime",
+  "input": "text-control",
+  "physicalCompletionMeasured": false,
+  "passed": false,
+  "turns": [],
+  "sessionId": "f46e529020db4a21",
+  "error": "AttributeError: 'NoneType' object has no attribute 'get'"
+}

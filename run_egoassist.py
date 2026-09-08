@@ -64,6 +64,7 @@ from egoassist.realtime.ambient import AMBIENT_SCHEMA_VERSION
 from egoassist.realtime.media_audit import MediaAuditAccumulator
 from egoassist.realtime.locale_prompts import PROMPTS
 from egoassist.realtime.tools import tool_result_succeeded
+from egoassist.realtime.routed_tools import execute_reference_request
 from egoassist.habits import ambient_reminder_decision
 from egoassist.product import (
     AmbientFrameContext,
@@ -98,7 +99,7 @@ LOGGER = logging.getLogger("egoassist.realtime")
 AUTH_COOKIE = "egoassist_session"
 TASK_CONTROL_LABELS = {
     None, "confirm-step", "rollback", "repeat",
-    "pause-task", "resume-task", "request-help",
+    "pause-task", "resume-task", "request-help", "show-reference",
 }
 SKILL_CONTROL_LABELS = {None, "deactivate"}
 AMBIENT_CONSENT_PURPOSE = "ambient-observation"
@@ -1884,6 +1885,10 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
             return PROMPTS.task_resume
         return (
             "Respond to the current user control request already present in conversation data. "
+            f"The authoritative current checkpoint is {active_runtime.task.current_step.id}: "
+            f"{active_runtime.task.current_step.instruction}. "
+            "No task transition was accepted for this turn. Do not claim the step was marked complete "
+            "or guide the next step; if the user intended completion, ask them to confirm the current step. "
             + PROMPTS.task_general
         )
 
@@ -1953,7 +1958,17 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                 " No active memory card was committed for this turn. Never claim that the request was remembered, "
                 "saved, or made persistent."
             )
-        if intent_execution.get("status") != "queued":
+        if result.get("referenceResult"):
+            reference_result = result["referenceResult"]
+            instructions += (
+                " The reference request has already been executed by the server. Do not call it again. "
+                "Describe only the committed reference result below. Resolved means the bundled document "
+                "is available in the interface, not that the user opened it or that it is the manufacturer's manual. "
+                "Reply briefly in the user's language; omit internal source labels, paths and identifiers: "
+                + json.dumps({"status": reference_result.get("status"),
+                              "title": (reference_result.get("artifact") or {}).get("title")}, ensure_ascii=False)
+            )
+        elif intent_execution.get("status") != "queued":
             instructions += (
                 " No tool result has been committed for this response yet. Never claim that a reminder, timer, message, "
                 "or other external action succeeded unless a later committed tool_result explicitly reports success."
@@ -2683,6 +2698,7 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
         task_control = semantic_decision.get("taskControl")
         skill_control = semantic_decision.get("skillControl")
         selected_by_semantic = semantic_decision.get("selectedSkill")
+        retrieval_started = time.perf_counter()
         episodic_retrieval = None
         if episodic_settings["episodic_enabled"]:
             episodic_retrieval = active_episodic.retrieve(
@@ -2810,6 +2826,7 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                     "referential": episodic_retrieval.get("referential", False),
                     "scope": episodic_retrieval["scope"],
                     "minimumScore": episodic_retrieval.get("minimumScore"),
+                    "retrievalMs": round((time.perf_counter() - retrieval_started) * 1000, 3),
                     "candidates": [{
                         "episodeId": item["episodeId"],
                         "score": item["score"],
@@ -2864,6 +2881,7 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                 ),
             }
         elif semantic_supplied and selected_by_semantic:
+            activation_accepted = registry.accepts_automatic_activation(selected_by_semantic, lexical_routing)
             selected_task = (
                 lexical_routing.get("selectedTask")
                 if lexical_routing.get("selectedSkill") == selected_by_semantic
@@ -2872,14 +2890,17 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
             turn_routing = {
                 **lexical_routing,
                 "method": semantic_method + "+manifest-evidence",
-                "status": "matched",
-                "selectedSkill": selected_by_semantic,
+                "status": "matched" if activation_accepted else "unverified-domain-intent",
+                "proposedSkill": selected_by_semantic,
+                "selectedSkill": selected_by_semantic if activation_accepted else None,
                 "selectedTask": selected_task,
                 "claimBoundary": (
-                    "Constrained semantic Skill selection; exact manifest evidence may select a task. "
+                    "Semantic Skill proposal validated against the package activation policy; manifest evidence may select a task. "
                     "Neither output is a calibrated probability."
                 ),
             }
+            if not activation_accepted:
+                selected_by_semantic = None
         elif semantic_supplied:
             turn_routing = {
                 **lexical_routing,
@@ -3020,6 +3041,7 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                         "runtime.task.selected", "semantic-turn-router", {"task": selected_task},
                         [route_event["eventId"]],
                     )
+        memory_write_started = time.perf_counter()
         timeline_write = None
         memory_kind = semantic_decision.get("memoryKind")
         memory_consent = semantic_decision.get("memoryConsent")
@@ -3263,6 +3285,7 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                 "committedCardIds": [],
             }
         if harness and timeline_write:
+            memory_write_ms = round((time.perf_counter() - memory_write_started) * 1000, 3)
             card = timeline_write.get("card", {})
             cards = timeline_write.get("cards") or ([card] if card else [])
             event_type = {
@@ -3278,6 +3301,7 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                     "cardId": (card or {}).get("id"),
                     "cardIds": [item.get("id") for item in cards if item.get("id")],
                     "cardCount": len(cards),
+                    "writePolicyMs": memory_write_ms,
                     "kind": (card or {}).get("kind") or memory_kind,
                     "tier": (card or {}).get("tier"),
                     "storageScope": (card or {}).get("scope") or timeline_write.get("storageScope"),
@@ -5275,6 +5299,11 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                 )
                 if not background_intent and hasattr(bridge, "set_tools"):
                     bridge.set_tools(session_tool_declarations(), session_tool_handler)
+                if not background_intent and result.get("taskControl") == "show-reference":
+                    result["referenceResult"] = execute_reference_request(
+                        harness, execute_session_tool, session_tool_declarations(),
+                        {"turnId": turn_id, "intentId": intent["intentId"], "jobId": job["jobId"]},
+                    )
                 if not background_intent:
                     refresh_harness_context(bridge, harness, session_runtime)
                 if not background_intent and result.get("skillControl") == "deactivate":

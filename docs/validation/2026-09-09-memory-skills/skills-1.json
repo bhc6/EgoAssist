@@ -1,0 +1,330 @@
+{
+  "mock": false,
+  "model": "qwen3.5-omni-flash-realtime",
+  "input": "text-control",
+  "physicalCompletionMeasured": false,
+  "passed": false,
+  "turns": [
+    {
+      "input": "我要做番茄炒蛋，请告诉我第一步。",
+      "audioPackets": 28,
+      "firstTextMs": 2778.1,
+      "firstAudioMs": 3061.7,
+      "transcript": "好的，我们开始做番茄炒蛋。第一步是准备：把鸡蛋、番茄、少量油和盐都放在操作区准备好。你那边材料都齐了吗？",
+      "terminal": {
+        "sequence": 1,
+        "status": "response.done",
+        "usage": {
+          "inputTokens": 2048,
+          "outputTokens": 146,
+          "totalTokens": 2194,
+          "inputTokenDetails": {
+            "text_tokens": 2048
+          },
+          "outputTokenDetails": {
+            "text_tokens": 36,
+            "audio_tokens": 110
+          }
+        },
+        "fragmentCommitted": true,
+        "interrupted": false,
+        "localCancelRequested": false
+      },
+      "finishedMs": 4768.4,
+      "state": {
+        "activeSkill": {
+          "name": "kitchen-coach",
+          "description": "Real-time hands-free cooking guidance with food hygiene, knife and heat safety, concise step coaching, error recovery, and user-confirmed personalization. Use for cooking, meal preparation, or kitchen training.",
+          "instructionResources": [
+            {
+              "path": "references/safety-sources.md",
+              "sha256": "f618969d3757670e68c5eecf2fe62f9efb1de50afee0352276c573332bc4d8e5"
+            }
+          ],
+          "defaultTask": "tomato-eggs",
+          "allowCustomTasks": true,
+          "tasks": [
+            {
+              "id": "fruit-salad",
+              "title": "水果沙拉",
+              "version": "1.0",
+              "provenance": "bundled/no-cook-procedure"
+            },
+            {
+              "id": "oatmeal",
+              "title": "香蕉燕麦粥",
+              "version": "1.0",
+              "provenance": "bundled/simple-breakfast"
+            },
+            {
+              "id": "tomato-eggs",
+              "title": "番茄炒蛋",
+              "version": "1.1",
+              "provenance": "bundled/household-procedure"
+            }
+          ],
+          "tools": [
+            {
+              "name": "set_timer",
+              "description": "Check a relative cooking deadline; the local adapter will explicitly report that alarm delivery is unsupported",
+              "availability": {
+                "status": "unsupported",
+                "executable": false,
+                "reason": "No durable workflow or acknowledged notification endpoint is connected."
+              },
+              "requires_confirmation": false,
+              "handler": "builtin.relative-deadline.v1",
+              "arguments": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "seconds": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 86400,
+                    "default": 60
+                  },
+                  "label": {
+                    "type": "string",
+                    "maxLength": 80,
+                    "default": "当前任务"
+                  }
+                },
+                "required": [
+                  "seconds"
+                ]
+              }
+            },
+            {
+              "name": "request_human_help",
+              "description": "Demo-only local acknowledgement; no external helper is contacted",
+              "availability": {
+                "status": "demo-only",
+                "executable": false,
+                "reason": "No external helper queue, connector receipt, or acknowledgement endpoint is configured."
+              },
+              "requires_confirmation": true,
+              "handler": "builtin.local-acknowledgement.v1",
+              "arguments": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {}
+              },
+              "result": {
+                "status": "demo-only",
+                "message": "No external helper or acknowledgement endpoint is connected."
+              }
+            }
+          ],
+          "capabilities": [
+            "food-hygiene",
+            "knife-safety",
+            "heat-safety",
+            "step-recovery"
+          ],
+          "capabilityTruth": [
+            {
+              "id": "food-hygiene",
+              "status": "descriptive",
+              "executable": false,
+              "reason": "Manifest metadata describes desired behavior; no capability dispatcher is connected."
+            },
+            {
+              "id": "knife-safety",
+              "status": "descriptive",
+              "executable": false,
+              "reason": "Manifest metadata describes desired behavior; no capability dispatcher is connected."
+            },
+            {
+              "id": "heat-safety",
+              "status": "descriptive",
+              "executable": false,
+              "reason": "Manifest metadata describes desired behavior; no capability dispatcher is connected."
+            },
+            {
+              "id": "step-recovery",
+              "status": "descriptive",
+              "executable": false,
+              "reason": "Manifest metadata describes desired behavior; no capability dispatcher is connected."
+            }
+          ]
+        },
+        "task": {
+          "task": {
+            "id": "tomato-eggs",
+            "title": "番茄炒蛋",
+            "version": "1.1",
+            "provenance": "bundled/household-procedure"
+          },
+          "completed": false,
+          "paused": false,
+          "stepIndex": 0,
+          "progress": 0.0,
+          "currentCheckpointId": "prepare",
+          "checkpointLedger": {
+            "prepare": {
+              "status": "active",
+              "confidence": 1.0,
+              "evidenceIds": [],
+              "updatedBy": "session-start"
+            },
+            "wash": {
+              "status": "unknown",
+              "confidence": 0.0,
+              "evidenceIds": [],
+              "updatedBy": null
+            },
+            "cut": {
+              "status": "unknown",
+              "confidence": 0.0,
+              "evidenceIds": [],
+              "updatedBy": null
+            },
+            "beat": {
+              "status": "unknown",
+              "confidence": 0.0,
+              "evidenceIds": [],
+              "updatedBy": null
+            },
+            "egg": {
+              "status": "unknown",
+              "confidence": 0.0,
+              "evidenceIds": [],
+              "updatedBy": null
+            },
+            "tomato": {
+              "status": "unknown",
+              "confidence": 0.0,
+              "evidenceIds": [],
+              "updatedBy": null
+            },
+            "combine": {
+              "status": "unknown",
+              "confidence": 0.0,
+              "evidenceIds": [],
+              "updatedBy": null
+            }
+          },
+          "steps": [
+            {
+              "id": "prepare",
+              "title": "准备",
+              "instruction": "准备鸡蛋、番茄、少量油和盐。",
+              "completion": "材料和工具在操作区",
+              "risk": "low",
+              "source": "recipe-v1.1",
+              "status": "active",
+              "confidence": 1.0,
+              "evidenceIds": [],
+              "updatedBy": "session-start"
+            },
+            {
+              "id": "wash",
+              "title": "清洗",
+              "instruction": "把番茄洗净并擦干。",
+              "completion": "番茄完成清洗",
+              "risk": "low",
+              "source": "WHO Five Keys to Safer Food",
+              "status": "unknown",
+              "confidence": 0.0,
+              "evidenceIds": [],
+              "updatedBy": null
+            },
+            {
+              "id": "cut",
+              "title": "切配",
+              "instruction": "把番茄放稳，刀尖朝外，慢慢切块。",
+              "completion": "番茄切成块",
+              "risk": "medium",
+              "source": "kitchen knife safety",
+              "status": "unknown",
+              "confidence": 0.0,
+              "evidenceIds": [],
+              "updatedBy": null
+            },
+            {
+              "id": "beat",
+              "title": "打蛋",
+              "instruction": "鸡蛋打入碗中并搅匀，接触蛋液后洗手。",
+              "completion": "蛋液均匀且台面无蛋液污染",
+              "risk": "medium",
+              "source": "USDA egg handling",
+              "status": "unknown",
+              "confidence": 0.0,
+              "evidenceIds": [],
+              "updatedBy": null
+            },
+            {
+              "id": "egg",
+              "title": "炒蛋",
+              "instruction": "中火少油，蛋液凝固后盛出。",
+              "completion": "鸡蛋凝固并离锅",
+              "risk": "high",
+              "source": "recipe-v1.1",
+              "status": "unknown",
+              "confidence": 0.0,
+              "evidenceIds": [],
+              "updatedBy": null
+            },
+            {
+              "id": "tomato",
+              "title": "炒番茄",
+              "instruction": "中火翻炒番茄到明显出汁。",
+              "completion": "番茄明显出汁",
+              "risk": "high",
+              "source": "recipe-v1.1",
+              "status": "unknown",
+              "confidence": 0.0,
+              "evidenceIds": [],
+              "updatedBy": null
+            },
+            {
+              "id": "combine",
+              "title": "合炒",
+              "instruction": "倒回鸡蛋，少量盐，翻匀后关火。",
+              "completion": "混合完成且火已关闭",
+              "risk": "high",
+              "source": "recipe-v1.1",
+              "status": "unknown",
+              "confidence": 0.0,
+              "evidenceIds": [],
+              "updatedBy": null
+            }
+          ],
+          "observation": null,
+          "decision": {
+            "action": "guide",
+            "message": "准备鸡蛋、番茄、少量油和盐。",
+            "reason": "开始任务",
+            "confidence": 1.0
+          },
+          "announcedMemoryIds": [],
+          "perception": {
+            "contextId": "task-context-92c2d2d97bf942e99528da74db236c06",
+            "taskId": "tomato-eggs",
+            "taskVersion": "1.1",
+            "taskProvenance": "bundled/household-procedure",
+            "checkpointId": "prepare",
+            "checkpointEpoch": 0,
+            "allowedTransitions": [
+              "wash"
+            ],
+            "completionCriteria": "材料和工具在操作区",
+            "risk": "low",
+            "sourceReference": "recipe-v1.1",
+            "completionEvidence": [],
+            "audit": [],
+            "policy": "evidence-only-user-confirmation-required"
+          },
+          "trace": []
+        },
+        "currentCheckpointId": null,
+        "paused": null,
+        "stepIndex": null,
+        "toolAudit": []
+      }
+    }
+  ],
+  "sessionId": "41dec078a9954042",
+  "error": "KeyError: 'id'"
+}

@@ -23,13 +23,18 @@ CASES = [
     ('skill', '我要开始做番茄炒蛋，请指导我。', {'selectedSkill': 'kitchen-coach'}),
     ('compound', '五分钟后提醒我关烤箱，现在告诉我烤土豆该用多少度。', {'intentKind': 'background-reminder'}),
     ('draft', '帮我记住小李的电话号码。', {'memoryKind': 'capture'}),
+    ('confirm-step', '我确认已经准备好鸡蛋、番茄、油和盐，这一步完成了。', {'taskControl': 'confirm-step'}),
+    ('question-step', '这一步完成了吗？', {'taskControl': None}),
+    ('negated-step', '这一步还没完成，不要进入下一步。', {'taskControl': 'pause-task'}),
+    ('incomplete-step', '我还没有完成当前步骤。', {'taskControl': None}),
+    ('write-note', '请用刚才查到的编号，写一句我可以发给前台的取物说明。', {'selectedSkill': None}),
 ]
 
 
-async def run(output, repeats):
+async def run(output, repeats, model=None):
     load_env(str(ROOT / '.env'))
     output.mkdir(parents=True, exist_ok=False)
-    router = SemanticTurnRouter(os.environ['QWEN_API_KEY'])
+    router = SemanticTurnRouter(os.environ['QWEN_API_KEY'], model=model)
     rows = []
     try:
         for repeat in range(repeats):
@@ -69,7 +74,8 @@ if __name__ == '__main__':
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('--output', required=True, type=Path)
     p.add_argument('--repeats', type=int, default=2)
+    p.add_argument('--model', default=None)
     args = p.parse_args()
     if args.repeats < 1:
         p.error('--repeats must be positive')
-    sys.exit(0 if asyncio.run(run(args.output, args.repeats)) else 1)
+    sys.exit(0 if asyncio.run(run(args.output, args.repeats, args.model)) else 1)

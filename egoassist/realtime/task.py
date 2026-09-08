@@ -375,7 +375,7 @@ class TaskSession:
         intent = str(intent or "none")
         allowed = {
             "none", "confirm-step", "rollback", "repeat",
-            "pause-task", "resume-task", "request-help",
+            "pause-task", "resume-task", "request-help", "show-reference",
         }
         if intent not in allowed:
             raise ValueError(f"unsupported task voice intent: {intent}")

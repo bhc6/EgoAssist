@@ -14,3 +14,4 @@ Identify or confirm the actual object and procedure before manipulation. Select 
 - Require confirmation before using powered tools or sharing context with a remote expert.
 - Store user preferences only after explicit confirmation and scope them to this task and step.
 - Read [references/evidence-policy.md](references/evidence-policy.md) before product-specific or irreversible guidance.
+- When the user asks to display or open the current reference, call `show_reference` if it is in the available tools. Wait for its result before claiming a document was resolved. Explain that the bundled demonstration reference does not replace the exact product manual.

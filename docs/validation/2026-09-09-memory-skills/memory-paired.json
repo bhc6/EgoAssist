@@ -1,0 +1,32 @@
+{
+  "fixture": "synthetic",
+  "providerMeasured": false,
+  "sizes": [
+    {
+      "cards": 100,
+      "writeMedianMs": null,
+      "beforeWarmMedianMs": 6.675,
+      "readColdMs": 5.338,
+      "readWarmMedianMs": 4.881,
+      "readMaxMs": 6.872
+    },
+    {
+      "cards": 1000,
+      "writeMedianMs": null,
+      "beforeWarmMedianMs": 27.141,
+      "readColdMs": 20.872,
+      "readWarmMedianMs": 18.761,
+      "readMaxMs": 21.862
+    },
+    {
+      "cards": 5000,
+      "writeMedianMs": null,
+      "beforeWarmMedianMs": 311.466,
+      "readColdMs": 89.508,
+      "readWarmMedianMs": 216.706,
+      "readMaxMs": 233.632
+    }
+  ],
+  "baselineRef": "f136c9d",
+  "comparison": "alternating old/new reads on identical SQLite fixtures"
+}

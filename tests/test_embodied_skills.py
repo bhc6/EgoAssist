@@ -16,6 +16,40 @@ from egoassist.realtime import (
 ROOT = Path(__file__).parents[1]
 
 
+def test_active_skill_injects_declared_policy_even_before_task_selection():
+    runtime = SkillRuntime(SkillRegistry(BUILTIN_SKILLS_ROOT), None)
+    runtime.activate("assembly-coach", select_default=False)
+    assert "exact product manual" in runtime.context([])
+    assert "evidence-policy.md" in runtime.context([])
+    assert "sha256=" in runtime.context([])
+    runtime.select_task("flat-pack-stool")
+    assert "exact product manual" in runtime.context([])
+    runtime.deactivate()
+    assert "exact product manual" not in runtime.context([])
+
+
+def test_skill_resource_loader_rejects_missing_and_escaping_paths(tmp_path):
+    from egoassist.realtime.skill_resources import load_instruction_resources
+    for path in ("../outside.md", "references/missing.md"):
+        with pytest.raises(ValueError):
+            load_instruction_resources(tmp_path, {"instruction_resources": [path]})
+
+
+def test_multiple_task_mentions_never_reselect_last_alias():
+    registry = SkillRegistry(BUILTIN_SKILLS_ROOT)
+    route = registry.route("做水果沙拉还是番茄炒蛋，西红柿炒鸡蛋也可以")
+    assert route["selectedSkill"] == "kitchen-coach"
+    assert route["selectedTask"] is None
+
+
+def test_bundled_skill_activation_requires_domain_evidence():
+    registry = SkillRegistry(BUILTIN_SKILLS_ROOT)
+    unrelated = registry.route("请用刚才查到的编号，写一句我可以发给前台的取物说明。")
+    assert not registry.accepts_automatic_activation("assembly-coach", unrelated)
+    assert not registry.accepts_automatic_activation("kitchen-coach", unrelated)
+    assert registry.accepts_automatic_activation("assembly-coach", registry.route("我要组装凳子"))
+
+
 def test_registry_discovers_agent_skills_and_runtime_switches_workflow():
     registry = SkillRegistry(BUILTIN_SKILLS_ROOT)
     assert set(registry.skills) == {"assembly-coach", "kitchen-coach"}
