@@ -394,6 +394,10 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
     identity = IdentityStore(Path(memory_path).with_name("identity.sqlite3"))
     product_database = ProductDatabase(Path(memory_path).with_name("product.sqlite3"))
     product_database.create_schema()
+    # Journal projection is idempotent but still performs many SQLite reads.
+    # Cache the result by journal length/mtime so polling /api/state does not
+    # replay the entire session on every request.
+    projection_cache: dict[str, tuple[int, int, dict[str, int]]] = {}
     capability_overrides: dict[str, dict[str, Any]] = {}
     artifact_catalog = [
         {**dict(item), "root": package.root, "skill": package.name}
@@ -1215,10 +1219,18 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
         harness_snapshot = harness_override.snapshot() if harness_override else None
         product_projection = None
         if harness_override is not None:
-            product_projection = product_database.project_journal(
-                harness_override.journal,
-                user_id=user_scope,
-            )
+            journal_path = Path(harness_override.journal.path)
+            try:
+                stat = journal_path.stat()
+                marker = (int(stat.st_mtime_ns), int(stat.st_size))
+            except OSError:
+                marker = (0, 0)
+            cached = projection_cache.get(str(journal_path))
+            if cached is None or cached[:2] != marker:
+                projection_cache[str(journal_path)] = (*marker, product_database.project_journal(
+                    harness_override.journal, user_id=user_scope,
+                ))
+            product_projection = projection_cache[str(journal_path)][2]
         work_ledger_snapshot = (
             CaseWorkLedger(harness_override.journal).snapshot()
             if harness_override else {
