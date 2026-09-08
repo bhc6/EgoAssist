@@ -23,7 +23,13 @@ from uuid import uuid4
 import requests
 
 from .tools import tool_result_succeeded
-from .perception import parse_perception_hypothesis, perception_prompt
+from .ambient import AMBIENT_SCHEMA_VERSION, NONE_OBSERVED, UNKNOWN_LOCATION
+from .perception import (
+    frame_prompt,
+    parse_ambient_hypothesis,
+    parse_perception_hypothesis,
+    perception_prompt,
+)
 
 if TYPE_CHECKING:
     from .context_harness import ContextHarness
@@ -312,7 +318,7 @@ class _OmniPerceptionLane:
             self.conversation.append_audio(self._SILENT_PCM16)
             self.conversation.append_video(frame)
             self.conversation.commit()
-            instructions = perception_prompt(context) if context else self._GATE_INSTRUCTIONS
+            instructions = frame_prompt(context) if context else self._GATE_INSTRUCTIONS
             self.conversation.create_response(
                 instructions=instructions,
                 output_modalities=[self.modalities.TEXT],
@@ -321,8 +327,10 @@ class _OmniPerceptionLane:
                 "lane": "perception", "imageBase64Bytes": len(frame), "microphoneShared": False,
                 "frameId": context.get("frame_id") if context else None,
                 "contextId": context.get("context_id") if context else None,
+                "schemaVersion": context.get("schema_version") if context else None,
                 "taskId": context.get("task_id") if context else None,
                 "checkpointId": context.get("checkpoint_id") if context else None,
+                "watchlistId": context.get("watchlist_id") if context else None,
             })
             return True
         except Exception as exc:
@@ -341,7 +349,11 @@ class _OmniPerceptionLane:
         context = self.active_context
         self.active_context = None
         if context:
-            decision = OmniBrowserBridge.parse_perception_output(raw_text)
+            decision = (
+                OmniBrowserBridge.parse_ambient_output(raw_text)
+                if context.get("schema_version") == AMBIENT_SCHEMA_VERSION
+                else OmniBrowserBridge.parse_perception_output(raw_text)
+            )
             self.loop.call_soon_threadsafe(self.on_decision, decision, context)
         else:
             decision = OmniBrowserBridge.parse_proactive_gate(raw_text)
@@ -891,8 +903,11 @@ class OmniBrowserBridge:
                 })
                 return
             if context is None:
+                # Covers both "no task is active" and "ambient declined this
+                # frame" (already submitted, or ambient off), so the reason does
+                # not claim more than it knows.
                 self._trace("perception.frame.suppressed", {
-                    "frameId": frame.get("frameId"), "reason": "no-active-task-context",
+                    "frameId": frame.get("frameId"), "reason": "no-active-observation-context",
                 })
                 return
         self.perception.request(frame["image"], context)
@@ -1579,6 +1594,33 @@ class OmniBrowserBridge:
                 "visible_evidence": [],
                 "hazards": [],
                 "unrelated": True,
+            }
+
+    @staticmethod
+    def parse_ambient_output(raw_text: str) -> dict[str, Any]:
+        """Parse an ambient observation; malformed output fails closed.
+
+        The fallback is NOT a usable negative observation: callers must reject
+        on ``valid=False`` before reading any field. A parse failure means the
+        frame was never assessed, which is different from -- and must never be
+        recorded as -- evidence that nothing was happening.
+        """
+        try:
+            return {
+                "valid": True,
+                **parse_ambient_hypothesis(raw_text).model_dump(mode="json"),
+            }
+        except (TypeError, ValueError, json.JSONDecodeError) as exc:
+            return {
+                "valid": False,
+                "error": str(exc)[:240],
+                "activity_id": NONE_OBSERVED,
+                "observed": False,
+                "location_id": UNKNOWN_LOCATION,
+                "confidence": 0.0,
+                "summary": "",
+                "visible_evidence": [],
+                "hazards": [],
             }
 
     @staticmethod

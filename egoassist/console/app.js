@@ -12,6 +12,7 @@ let mediaGeneration = 0;
 let selectedEventId = null, pipelineDetails = [];
 let currentUser = null, selectedSessionId = null, authMode = "login";
 let sessionCatalog = [], memoryPolicySaving = false;
+let ambientState = null;
 let pdfjs = null, artifactDocument = null, artifactPageNumber = 1, artifactScale = 1;
 let artifactRenderGeneration = 0, artifactRenderTask = null, pendingHumanHelpPreview = null;
 let mirrorCamera = localStorage.getItem("egoassist.camera.mirror") !== "false";
@@ -197,6 +198,10 @@ async function enterConsole(user) {
 
 function renderPrivacy(payload) {
   if (!payload) return;
+  if (payload.ambient) {
+    ambientState = {...(ambientState || {}), ...payload.ambient};
+    renderAmbient();
+  }
   $("#privacyStatus").textContent = payload.transport?.transportStatus || "已加载";
   $("#privacyProviders").innerHTML = (payload.providers || []).map(item =>
     "<article class='privacy-card'><b>" + esc(item.provider) + "</b><span>数据：" + esc((item.dataCategories || []).join(", ")) + "</span><span>用途：" + esc((item.purposes || []).join(", ")) + "</span><span>保留：" + esc(item.retention) + "</span></article>"
@@ -644,7 +649,59 @@ function render(next) {
   syncWorkflowFromState(task, mechanism);
   renderTimeline(state.events || []);
   renderPerceptionEvidence(task);
+  renderAmbient();
   renderManualSteps();
+}
+
+// Ambient observation must be visible for as long as it is running. ADR 005/007:
+// a camera that watches without a task the user started is only acceptable if the
+// user can see, at a glance, that it is on and what it is watching for.
+function renderAmbient() {
+  const root = $("#ambientBanner");
+  if (!root) return;
+  const info = ambientState;
+  if (!info || !info.enabled) {
+    root.hidden = true;
+    return;
+  }
+  root.hidden = false;
+  if (!info.consented) {
+    root.className = "ambient-banner idle";
+    root.innerHTML = "<b>被动观测未授权</b><span>已启用但未获得同意，不会发送任何画面。</span>" +
+      "<button id='ambientGrant'>授权被动观测</button>";
+    $("#ambientGrant").onclick = () => setAmbientConsent(true);
+    return;
+  }
+  const watchlist = info.watchlist || {};
+  const activities = (watchlist.activities || []).map(item => item.label || item.id).join("、");
+  const places = (watchlist.locations || []).map(item => item.label || item.id).join("、");
+  const latest = info.observation;
+  root.className = "ambient-banner live";
+  root.innerHTML = "<b>被动观测已授权</b>" +
+    "<span>观察：" + esc(activities || "-") + " · 地点识别候选：" + esc(places || "-") +
+    " · 每 " + esc(String(info.intervalSeconds || "?")) + " 秒一帧</span>" +
+    "<span>" + (latest
+      ? esc((latest.observed ? "已看到 " + (latest.activityId || "") : "本帧未看到该行为") +
+          " · " + (latest.locationId || "unknown"))
+      : "尚无观测结果") + "</span>" +
+    "<span class='ambient-note'>不判断是否吞下、不判断药物种类；原始画面不留存。</span>" +
+    "<button id='ambientRevoke'>撤回授权</button>";
+  $("#ambientRevoke").onclick = () => setAmbientConsent(false);
+}
+
+async function setAmbientConsent(granted) {
+  const response = await fetch("/api/ambient/consent", {
+    method: "POST",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({granted}),
+  });
+  const payload = await response.json();
+  if (payload.error) {
+    alert(payload.error);
+    return;
+  }
+  ambientState = {...(ambientState || {}), ...payload.ambient};
+  renderAmbient();
 }
 
 function defaultToolArguments(declaration) {
@@ -1084,6 +1141,9 @@ async function connectRealtimeSession(generation) {
       $("#duplexState").textContent = "Media gap detected; live capture continues";
     } else if (message.type === "state") {
       render(message.state);
+    } else if (message.type === "ambient") {
+      ambientState = {...(ambientState || {}), ...message.ambient, observation: message.ambient?.observation};
+      renderAmbient();
     } else if (message.type === "session_stale") {
       restartAfterClose = true;
       $("#duplexState").textContent = "任务已切换，正在重建实时会话…";

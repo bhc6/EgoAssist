@@ -11,6 +11,22 @@ from typing import Any, Callable
 from uuid import uuid4
 
 
+def bounded_text(value: Any, field: str, maximum: int) -> str:
+    """Validate a required, stripped, length-bounded string field.
+
+    Shared with the ambient watchlist loader so both specification formats get
+    identical bounds-checking instead of a divergent copy.
+    """
+    if not isinstance(value, str):
+        raise ValueError(f"{field} must be a string")
+    text = value.strip()
+    if not text:
+        raise ValueError(f"{field} cannot be empty")
+    if len(text) > maximum:
+        raise ValueError(f"{field} must be at most {maximum} characters")
+    return text
+
+
 @dataclass(frozen=True)
 class TaskStep:
     id: str
@@ -103,14 +119,7 @@ class TaskSpec:
 
     @staticmethod
     def _bounded_text(value: Any, field: str, maximum: int) -> str:
-        if not isinstance(value, str):
-            raise ValueError(f"{field} must be a string")
-        text = value.strip()
-        if not text:
-            raise ValueError(f"{field} cannot be empty")
-        if len(text) > maximum:
-            raise ValueError(f"{field} must be at most {maximum} characters")
-        return text
+        return bounded_text(value, field, maximum)
 
     def realtime_instructions(self, memories: list[dict[str, Any]]) -> str:
         steps = "\n".join(

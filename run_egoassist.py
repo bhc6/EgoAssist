@@ -20,12 +20,14 @@ from pathlib import Path
 from typing import Any, Callable
 from uuid import uuid4
 
-from egoassist import BUILTIN_SKILLS_ROOT, CONSOLE_ROOT
+from egoassist import BUILTIN_SKILLS_ROOT, CONSOLE_ROOT, PACKAGE_ROOT
 from egoassist.timefmt import format_beijing_iso
 from egoassist._env import load_env
 from egoassist.memory import ClockContext, TimelineMemory, resolve_time_semantics
 from egoassist.memory.timeline import DEFAULT_RETRIEVAL_MIN_SCORE
 from egoassist.realtime import (
+    AmbientWatchList,
+    AmbientWatchSession,
     ContextHarness,
     CaseWorkLedger,
     ContextLayer,
@@ -55,12 +57,17 @@ from egoassist.realtime import (
     platform_capability_available,
     platform_capability_truth,
     public_tool_declaration,
+    validate_ambient_result,
     validate_perception_result,
 )
+from egoassist.realtime.ambient import AMBIENT_SCHEMA_VERSION
 from egoassist.realtime.media_audit import MediaAuditAccumulator
 from egoassist.realtime.locale_prompts import PROMPTS
 from egoassist.realtime.tools import tool_result_succeeded
+from egoassist.habits import ambient_reminder_decision
 from egoassist.product import (
+    AmbientFrameContext,
+    AmbientObservationHypothesis,
     HumanHelpRequest,
     LocalArtifactAdapter,
     PerceptionFrameContext,
@@ -94,6 +101,20 @@ TASK_CONTROL_LABELS = {
     "pause-task", "resume-task", "request-help",
 }
 SKILL_CONTROL_LABELS = {None, "deactivate"}
+AMBIENT_CONSENT_PURPOSE = "ambient-observation"
+
+
+def _env_flag(name: str, default: bool = False) -> bool:
+    """Parse a boolean environment flag. Anything unrecognized keeps the default."""
+    raw = os.getenv(name)
+    if raw is None or not str(raw).strip():
+        return default
+    value = str(raw).strip().casefold()
+    if value in {"1", "true", "yes", "on"}:
+        return True
+    if value in {"0", "false", "no", "off"}:
+        return False
+    return default
 
 
 class RuntimeRootLease:
@@ -311,6 +332,9 @@ class CaseRuntimeOwner:
     intent_runtimes: dict[str, SkillRuntime] = field(default_factory=dict)
     memory_bus: Any = None  # MemoryEventBus — Phase 1 observability
     background_tasks: dict[str, "TaskSlot"] = field(default_factory=dict)  # Phase 2A: fanout slots
+    # AmbientWatchSession — present only while ambient mode is on AND consent is
+    # live. Cleared on revocation, so it is never a stale authorization.
+    ambient: Any = None
 
 
 def runtime_root() -> Path:
@@ -407,6 +431,58 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
         "reason": "EGOASSIST_TEMPORAL_TARGET is not configured.",
     }
     reminder_start_tasks: set[asyncio.Task] = set()
+
+    # --- Ambient (task-free) observation -----------------------------------
+    # Off by default. ADR 007: ambient observation relaxes one ADR 005 property
+    # (a frame may reach the provider with no user-initiated task), so it must be
+    # switched on deliberately, per deployment, with a watchlist on disk.
+    ambient_settings: dict[str, Any] = {
+        "enabled": _env_flag("EGOASSIST_AMBIENT_MODE", False),
+        "watchlist_path": os.getenv("EGOASSIST_AMBIENT_WATCHLIST", "").strip(),
+        "interval_seconds": max(
+            5.0, float(os.getenv("EGOASSIST_AMBIENT_INTERVAL_SECONDS", "20") or 20)
+        ),
+        "watchlist": None,
+        "reason": "EGOASSIST_AMBIENT_MODE is off.",
+    }
+    if ambient_settings["enabled"]:
+        candidate = ambient_settings["watchlist_path"] or str(PACKAGE_ROOT / "watchlists" / "medication.json")
+        try:
+            ambient_settings["watchlist"] = AmbientWatchList.load(candidate)
+            ambient_settings["reason"] = f"Watching {Path(candidate).name}."
+        except (OSError, ValueError) as exc:
+            # Fail closed: a bad watchlist disables ambient rather than falling
+            # back to some default set of things to watch.
+            ambient_settings["enabled"] = False
+            ambient_settings["reason"] = f"Watchlist unusable ({str(exc)[:160]}); ambient disabled."
+    capability_overrides["ambient-observation"] = {
+        "status": "available" if ambient_settings["enabled"] else "unconfigured",
+        "reason": ambient_settings["reason"],
+    }
+
+    def ambient_consent(user_id: str) -> dict[str, Any] | None:
+        """The active ambient grant for one account, or None."""
+        return product_database.active_consent(user_id, purpose=AMBIENT_CONSENT_PURPOSE)
+
+    def ambient_watch_session(owner: "CaseRuntimeOwner") -> Any:
+        """Lazily create the watch session, but only while consent is live.
+
+        Re-checked on every frame rather than cached at session start, so a
+        revocation stops observation without needing a reconnect.
+        """
+        if not ambient_settings["enabled"] or ambient_settings["watchlist"] is None:
+            return None
+        grant = ambient_consent(owner.user_id)
+        if grant is None:
+            owner.ambient = None
+            return None
+        existing = owner.ambient
+        if existing is not None and existing.consent_id == grant["consent_id"]:
+            return existing
+        owner.ambient = AmbientWatchSession(
+            ambient_settings["watchlist"], consent_id=grant["consent_id"],
+        )
+        return owner.ambient
 
     def runtime_tool_declarations(package) -> list[dict]:
         declarations = []
@@ -799,7 +875,6 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                     and not candidate.mutation_lock.locked()
                 ):
                     case_owners.pop(candidate_id, None)
-                    case_memories.pop((candidate.user_id, candidate_id), None)
                     case_episodics.pop((candidate.user_id, candidate_id), None)
                     evicted = True
                     break
@@ -3729,11 +3804,69 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
 
     async def get_privacy(request):
         user_id = request[user_key]["id"]
+        grant = ambient_consent(user_id)
         return web.json_response({
-            **privacy_governance.disclosure(),
+            # The disclosure describes the running system: the ambient provider
+            # is listed only when ambient mode is on and consent is live.
+            **privacy_governance.disclosure(
+                ambient=bool(ambient_settings["enabled"] and grant is not None),
+            ),
             "retentionPolicies": product_database.retention_policies(user_id),
             "evaluation": outcome_ledger.summarize(user_id=user_id),
+            "ambient": ambient_status(user_id),
         })
+
+    def ambient_status(user_id: str) -> dict[str, Any]:
+        """Truthful ambient state for the console: enabled, consented, watching what."""
+        grant = ambient_consent(user_id) if ambient_settings["enabled"] else None
+        watchlist = ambient_settings["watchlist"]
+        return {
+            "enabled": bool(ambient_settings["enabled"]),
+            "reason": ambient_settings["reason"],
+            "consented": grant is not None,
+            "consentId": grant["consent_id"] if grant else None,
+            "expiresAt": grant.get("expires_at") if grant else None,
+            "intervalSeconds": ambient_settings["interval_seconds"],
+            "watchlist": watchlist.public_summary() if watchlist is not None else None,
+        }
+
+    async def post_ambient_consent(request):
+        """Grant or revoke consent for ambient observation.
+
+        Ambient mode observes nothing without a live grant here, and revoking
+        invalidates frames already in flight because the consent id is part of
+        every frame's binding tuple.
+        """
+        user_id = request[user_key]["id"]
+        payload = await request.json() if request.can_read_body else {}
+        if payload.get("granted") is True:
+            if not ambient_settings["enabled"]:
+                raise ValueError("ambient observation is not enabled on this deployment")
+            watchlist = ambient_settings["watchlist"]
+            product_database.record_consent_grant(
+                user_id,
+                purpose=AMBIENT_CONSENT_PURPOSE,
+                data_categories=[
+                    "periodically sampled video frames",
+                    "watchlist activity and location labels",
+                ],
+                destination="ambient-observation-model",
+            )
+            trace_event("ambient.consent.granted", "ambient-policy", {
+                "userId": user_id,
+                "watchlistId": watchlist.id if watchlist else None,
+            })
+        elif payload.get("granted") is False:
+            grant = ambient_consent(user_id)
+            if grant is not None:
+                product_database.revoke_consent(grant["consent_id"])
+            for owner in list(case_owners.values()):
+                if owner.user_id == user_id:
+                    owner.ambient = None
+            trace_event("ambient.consent.revoked", "ambient-policy", {"userId": user_id})
+        else:
+            raise ValueError("granted must be true or false")
+        return web.json_response({"ambient": ambient_status(user_id)})
 
     async def get_privacy_export(request):
         user_id = request[user_key]["id"]
@@ -3764,10 +3897,9 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
         for session_id, owner in list(case_owners.items()):
             if owner.user_id == user_id:
                 case_owners.pop(session_id, None)
-        user_memories.pop(user_id, None)
+        # user_memories / case_memories were removed when TimelineMemory replaced
+        # the per-user memory caches; only the episodic caches remain to clear.
         user_episodics.pop(user_id, None)
-        for key in [key for key in case_memories if key[0] == user_id]:
-            case_memories.pop(key, None)
         for key in [key for key in case_episodics if key[0] == user_id]:
             case_episodics.pop(key, None)
         user_runtimes.pop(user_id, None)
@@ -4161,11 +4293,146 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                 frame_id=frame_id,
                 captured_at=captured_at,
             )
-            return value.model_dump(mode="python") if value is not None else None
+            if value is not None:
+                # A live task always wins. Ambient observation only ever fills a
+                # gap; it never competes with, or preempts, task-bound perception.
+                return value.model_dump(mode="python")
+            watch = ambient_watch_session(owner)
+            if watch is None:
+                return None
+            if not watch.should_submit(frame_id):
+                return None
+            return watch.frame_context(
+                user_id=user_id,
+                session_id=session_id,
+                frame_id=frame_id,
+                captured_at=captured_at,
+            ).model_dump(mode="python")
+
+        async def session_ambient_result(
+            captured_value: dict[str, Any], raw_value: dict[str, Any],
+        ) -> dict[str, Any]:
+            """Handle one task-free ambient frame.
+
+            Rejections are journalled rather than recorded on a task, because
+            ambient mode has no task object to carry them.
+            """
+            try:
+                captured = AmbientFrameContext.model_validate(captured_value)
+            except ValueError as exc:
+                session_trace("ambient.observation.rejected", "ambient-policy", {
+                    "reason": "invalid-captured-context", "error": str(exc)[:240],
+                })
+                return {"accepted": False, "reason": "invalid-captured-context"}
+
+            def reject(reason: str, **detail: Any) -> dict[str, Any]:
+                session_trace("ambient.observation.rejected", "ambient-policy", {
+                    "reason": reason,
+                    "frameId": captured.frame_id,
+                    "contextId": captured.context_id,
+                    "watchlistId": captured.watchlist_id,
+                    **detail,
+                })
+                journal.append("ambient_observation", {
+                    "status": "rejected",
+                    "reason": reason,
+                    "frameId": captured.frame_id,
+                    "contextId": captured.context_id,
+                    "watchlistId": captured.watchlist_id,
+                    "rawMediaPersisted": False,
+                })
+                return {"accepted": False, "reason": reason}
+
+            async with owner.mutation_lock:
+                # Checked first: a parse failure means the frame was never
+                # assessed, which is not the same as "nothing was happening".
+                # Treating it as observed absence would fabricate coverage.
+                if not raw_value.get("valid"):
+                    return reject(
+                        "malformed-provider-output",
+                        error=str(raw_value.get("error", "invalid output"))[:240],
+                    )
+                watch = ambient_watch_session(owner)
+                if watch is None:
+                    return reject("ambient-not-authorized")
+                current = watch.frame_context(
+                    user_id=user_id,
+                    session_id=session_id,
+                    frame_id=captured.frame_id,
+                    captured_at=captured.frame_captured_at,
+                )
+                try:
+                    hypothesis = AmbientObservationHypothesis.model_validate({
+                        key: value for key, value in raw_value.items()
+                        if key not in {"valid", "error"}
+                    })
+                    validation = validate_ambient_result(
+                        captured, current, hypothesis, source=f"camera/{model}",
+                    )
+                except ValueError as exc:
+                    return reject("invalid-provider-schema", error=str(exc)[:240])
+                if not validation.accepted or validation.observation is None:
+                    watch.record_rejection(
+                        validation.reason,
+                        frame_id=captured.frame_id,
+                        context_id=captured.context_id,
+                    )
+                    return reject(validation.reason)
+                evidence = validation.observation
+                # ingest reads the flattened observation fields, which live under
+                # `evidence` on the ObservationEvidence contract.
+                watch.ingest(dict(evidence.evidence))
+                product_database.record_observation(evidence)
+                journal.append("ambient_observation", {
+                    **evidence.model_dump(mode="json"),
+                    "status": "accepted",
+                    "rawMediaPersisted": False,
+                })
+                policy = current_memory_policy()
+                # Only a positive sighting is an episode. An absence row is
+                # coverage evidence for the habit bridge, not a memory of an
+                # event that happened.
+                if (
+                    hypothesis.observed
+                    and policy["components"]["timeline"]["episodic_enabled"]
+                ):
+                    current_episodic_memory(policy).remember(
+                        str(evidence.evidence.get("summary", "")),
+                        kind="observation",
+                        source=evidence.source,
+                        skill=None,
+                        task=evidence.task_id,
+                        session_id=session_id,
+                        user_scope=user_id,
+                    )
+                snapshot = watch.snapshot()
+            state_payload = scoped_state_for_user(user_id, session_id)
+            if not ws.closed:
+                await ws.send_json({"type": "state", "state": state_payload})
+                await ws.send_json({"type": "ambient", "ambient": snapshot})
+            return {
+                "accepted": True,
+                "reason": validation.reason,
+                # Ambient observation never speaks on its own. Reminding is the
+                # habit bridge's decision, delivered through the reminder
+                # workflow so it stays auditable and cancellable.
+                "speech": None,
+                "origin": {
+                    "watchlistId": captured.watchlist_id,
+                    "watchlistVersion": captured.watchlist_version,
+                    "watchEpoch": captured.watch_epoch,
+                    "contextId": captured.context_id,
+                    "frameId": captured.frame_id,
+                    "observed": hypothesis.observed,
+                    "activityId": hypothesis.activity_id,
+                },
+            }
 
         async def session_perception_result(
             captured_value: dict[str, Any], raw_value: dict[str, Any],
         ) -> dict[str, Any]:
+            if captured_value.get("schema_version") == AMBIENT_SCHEMA_VERSION:
+                return await session_ambient_result(captured_value, raw_value)
             try:
                 captured = PerceptionFrameContext.model_validate(captured_value)
             except ValueError as exc:
@@ -5465,7 +5732,9 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
 
         _turn_accumulator = TurnAccumulator(
             _do_enqueue_transcript,
-            window_ms=float(os.getenv("EGOASSIST_TURN_ACCUMULATE_MS", "700")),
+            # Keep voice turns responsive while still coalescing recognition
+            # fragments. Deployments can raise this for noisy transcribers.
+            window_ms=float(os.getenv("EGOASSIST_TURN_ACCUMULATE_MS", "250")),
         )
 
         def transcript_received(text):
@@ -5481,6 +5750,19 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                 _turn_accumulator.discard()  # drop any preceding partial fragment
             _turn_accumulator.push(normalized)
 
+        def proactive_interval_for() -> float:
+            """Seconds between perception checks.
+
+            Ambient observation samples far more slowly than task coaching: it is
+            watching for a once-a-day event, not guiding a step in progress, so a
+            task cadence would burn battery and send frames for no benefit.
+            """
+            if session_runtime.skill is not None:
+                return float(session_runtime.skill.manifest.get("proactive_check_seconds", 4))
+            if session_runtime.task is None and owner.ambient is not None:
+                return float(ambient_settings["interval_seconds"])
+            return 4.0
+
         async def handle_media_payload(payload: dict, *, source: str) -> bool:
             kind = payload.get("type")
             if kind == "audio":
@@ -5488,15 +5770,13 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                 video_flushed = bridge.append_audio(audio_value)
                 media_audit.record_audio(len(audio_value), video_flushed=video_flushed)
                 if video_flushed:
-                    interval = session_runtime.skill.manifest.get("proactive_check_seconds", 4) if session_runtime.skill else 4
-                    bridge.maybe_check_proactively(float(interval))
+                    bridge.maybe_check_proactively(proactive_interval_for())
                 return True
             if kind == "video":
                 image_value = str(payload.get("image", ""))
                 media_audit.record_video(len(image_value))
                 if bridge.append_video(image_value):
-                    interval = session_runtime.skill.manifest.get("proactive_check_seconds", 4) if session_runtime.skill else 4
-                    bridge.maybe_check_proactively(float(interval))
+                    bridge.maybe_check_proactively(proactive_interval_for())
                 return True
             if kind == "media_gap":
                 media = str(payload.get("media", "unknown"))
@@ -5912,6 +6192,7 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
         web.get("/api/privacy/export", get_privacy_export),
         web.post("/api/privacy/retention", post_privacy_retention),
         web.post("/api/privacy/delete", post_privacy_delete),
+        web.post("/api/ambient/consent", post_ambient_consent),
         web.post("/api/sessions", post_session),
         web.post("/api/sessions/memory-policy", post_memory_policy),
         web.get("/api/state", get_state),

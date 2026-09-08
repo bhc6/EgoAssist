@@ -34,6 +34,7 @@ __all__ = [
     "ResultRecord", "NotificationRequest", "NotificationReceipt", "ArtifactDescriptor",
     "HumanHelpRequest", "HumanHelpReceipt", "PerceptionHazard", "PerceptionFrameContext",
     "PerceptionHypothesis", "ObservationEvidence", "ProviderDisclosure",
+    "AmbientFrameContext", "AmbientObservationHypothesis",
     "InteractionTransport", "WorkflowPort", "NotificationPort", "ArtifactPort",
     "HumanHelpPort", "PerceptionPort",
     "LocalArtifactAdapter", "WebhookHumanHelpAdapter",

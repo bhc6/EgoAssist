@@ -160,6 +160,54 @@ class PerceptionHypothesis(ProductContract):
     unrelated: bool = False
 
 
+class AmbientFrameContext(ProductContract):
+    """Immutable binding for a passively observed frame with no active task.
+
+    Deliberately a separate contract rather than a mode flag on
+    PerceptionFrameContext: a distinct ``schema_version`` Literal plus the
+    inherited ``extra="forbid"`` means feeding an ambient payload to the
+    task-mode validator fails twice over, so no ambient code path can weaken
+    the ADR 005 guarantees. See docs/ADR_007_AMBIENT_OBSERVATION.md.
+    """
+
+    schema_version: Literal["ambient-context.v1"] = "ambient-context.v1"
+    context_id: str = Field(min_length=1)
+    frame_id: str = Field(min_length=1)
+    user_id: str = Field(min_length=1)
+    session_id: str = Field(min_length=1)
+    watchlist_id: str = Field(min_length=1)
+    watchlist_version: str = Field(min_length=1)
+    watchlist_provenance: str = Field(min_length=1)
+    watchlist_checksum: str = Field(min_length=1)
+    watch_epoch: int = Field(ge=0)
+    watch_activities: list[dict[str, Any]] = Field(min_length=1, max_length=16)
+    watch_locations: list[dict[str, Any]] = Field(min_length=1, max_length=32)
+    risk: Literal["low", "medium", "high"] = "low"
+    # Required and non-empty: an ambient context cannot be constructed without
+    # a recorded consent grant. Opt-in is enforced by the type, not by a
+    # runtime check a caller could forget.
+    consent_id: str = Field(min_length=1)
+    frame_captured_at: datetime
+
+
+class AmbientObservationHypothesis(ProductContract):
+    """A passive observation. Absence is expressed positively, never as an error.
+
+    There is deliberately no ``unrelated`` field and no ``completed`` field: a
+    frame showing that no watched activity is happening *is* the observation
+    (``observed=False``, ``activity_id="none-observed"``), and ambient mode has
+    nothing to complete.
+    """
+
+    activity_id: str = Field(min_length=1)
+    observed: bool = False
+    location_id: str = Field(min_length=1, default="unknown")
+    confidence: float = Field(ge=0, le=1)
+    summary: str = Field(max_length=500)
+    visible_evidence: list[str] = Field(default_factory=list, max_length=8)
+    hazards: list[PerceptionHazard] = Field(default_factory=list, max_length=3)
+
+
 class ObservationEvidence(ProductContract):
     observation_id: str = Field(min_length=1)
     user_id: str = Field(min_length=1)

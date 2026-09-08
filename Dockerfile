@@ -5,6 +5,7 @@ WORKDIR /app
 
 COPY pyproject.toml README.md LICENSE ./
 COPY egoassist ./egoassist
+COPY watchlists ./watchlists
 COPY run_egoassist.py run_egolife_benchmark.py run_interaction_benchmark.py ./
 
 RUN pip install --no-cache-dir .

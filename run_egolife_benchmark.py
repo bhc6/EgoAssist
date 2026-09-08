@@ -129,10 +129,28 @@ def sample_rows(rows: list[dict], max_questions: int | None, seed: int) -> list[
 
 
 def split_videos(video_ids: list[str], calibration_ratio: float, seed: int):
+    """Split videos into calibration and test sets.
+
+    With fewer than two videos there is no honest way to hold out a test set, so
+    the test set is returned empty rather than silently reusing calibration rows.
+    Callers must report unmeasured metrics as null, never as zero.
+    """
     shuffled = list(video_ids)
     random.Random(seed).shuffle(shuffled)
+    if len(shuffled) < 2:
+        return set(shuffled), set()
     count = max(1, min(len(shuffled) - 1, round(len(shuffled) * calibration_ratio)))
     return set(shuffled[:count]), set(shuffled[count:])
+
+
+def mean_or_none(rows: list[dict], key: str) -> float | None:
+    """Mean over rows, or None when there is nothing to average.
+
+    Returning None keeps "not measured" distinguishable from "measured as zero".
+    """
+    if not rows:
+        return None
+    return float(np.mean([row[key] for row in rows]))
 
 
 def build_summary(rows: list[dict], alpha: float, seed: int, calibration_ratio: float):
@@ -150,6 +168,12 @@ def build_summary(rows: list[dict], alpha: float, seed: int, calibration_ratio: 
     curve = conformal.risk_coverage_curve(
         [row["score"] for row in test], test_correct
     )
+    if not video_ids:
+        split_status = "no-rows"
+    elif not test:
+        split_status = "no-test-split"
+    else:
+        split_status = "held-out-test-split"
     return {
         "scope": "downloaded_egolife_subset",
         "n_videos": len(video_ids),
@@ -158,23 +182,37 @@ def build_summary(rows: list[dict], alpha: float, seed: int, calibration_ratio: 
         "test_videos": sorted(test_videos),
         "n_calibration": len(calibration),
         "n_test": len(test),
+        "split_status": split_status,
         "alpha": alpha,
         "threshold": conformal.threshold if math.isfinite(conformal.threshold) else None,
-        "coverage": len(answered) / len(test) if test else 0.0,
-        "selective_risk": 1 - float(np.mean(answered_correct)) if answered else 0.0,
-        "all_answer_risk": 1 - float(np.mean(test_correct)) if test else 0.0,
-        "exact_match": float(np.mean([row["exact_match"] for row in test])) if test else 0.0,
-        "token_f1": float(np.mean([row["token_f1"] for row in test])) if test else 0.0,
-        "localization_miou": float(np.mean([row["temporal_iou"] for row in test])) if test else 0.0,
-        "localization_acc_05": float(np.mean([row["temporal_iou"] >= 0.5 for row in test])) if test else 0.0,
-        "invalid_generation_rate": float(np.mean([
-            row.get("invalid_generation", row.get("invalid_answer", False)) for row in test
-        ])) if test else 0.0,
-        "raw_abstention_rate": float(np.mean([
-            row.get("abstained", False) for row in test
-        ])) if test else 0.0,
-        "invalid_caption_rate": float(np.mean([row["invalid_caption"] for row in rows])) if rows else 0.0,
-        "mean_query_seconds": float(np.mean([row["query_seconds"] for row in rows])) if rows else 0.0,
+        # Held-out test metrics. null when no test split exists -- a single video
+        # cannot be both calibrated and tested on, and reporting 0.0 there would
+        # claim a measurement that was never made.
+        "coverage": len(answered) / len(test) if test else None,
+        "selective_risk": 1 - float(np.mean(answered_correct)) if answered else None,
+        "all_answer_risk": 1 - float(np.mean(test_correct)) if test else None,
+        "exact_match": mean_or_none(test, "exact_match"),
+        "token_f1": mean_or_none(test, "token_f1"),
+        "localization_miou": mean_or_none(test, "temporal_iou"),
+        "localization_acc_05": (
+            float(np.mean([row["temporal_iou"] >= 0.5 for row in test])) if test else None
+        ),
+        "invalid_generation_rate": (
+            float(np.mean([
+                row.get("invalid_generation", row.get("invalid_answer", False)) for row in test
+            ])) if test else None
+        ),
+        "raw_abstention_rate": (
+            float(np.mean([row.get("abstained", False) for row in test])) if test else None
+        ),
+        # All-sample metrics. Not a held-out measurement -- reported so a
+        # single-video smoke run still surfaces real per-question numbers
+        # instead of looking like a total failure.
+        "all_sample_exact_match": mean_or_none(rows, "exact_match"),
+        "all_sample_token_f1": mean_or_none(rows, "token_f1"),
+        "all_sample_localization_miou": mean_or_none(rows, "temporal_iou"),
+        "invalid_caption_rate": mean_or_none(rows, "invalid_caption"),
+        "mean_query_seconds": mean_or_none(rows, "query_seconds"),
         "curve": [
             {"threshold": threshold, "coverage": coverage, "risk": risk}
             for threshold, coverage, risk in curve

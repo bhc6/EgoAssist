@@ -58,8 +58,13 @@ def redact_pii(value: Any) -> Any:
     return value
 
 
-def provider_disclosures() -> list[dict[str, Any]]:
-    """Truthful, user-facing disclosure for every configured data boundary."""
+def provider_disclosures(*, ambient: bool = False) -> list[dict[str, Any]]:
+    """Truthful, user-facing disclosure for every configured data boundary.
+
+    The ambient entry is appended only when ambient observation is actually
+    active, so the disclosure describes the running system rather than a
+    capability the deployment may never use.
+    """
     values = [
         ProviderDisclosure(
             provider="realtime-model",
@@ -83,6 +88,24 @@ def provider_disclosures() -> list[dict[str, Any]]:
             user_controls=["preview", "cancel", "delete account"],
         ),
     ]
+    if ambient:
+        values.append(
+            ProviderDisclosure(
+                provider="ambient-observation-model",
+                data_categories=[
+                    "periodically sampled video frames while ambient mode is on",
+                    "watchlist activity and location labels",
+                ],
+                purposes=["passive habit observation", "observation-gated reminding"],
+                retention="frame transport only; only the derived label, time, and place are stored",
+                user_controls=[
+                    "turn off ambient mode",
+                    "revoke ambient consent",
+                    "delete account",
+                    "export account",
+                ],
+            )
+        )
     return [item.model_dump(mode="json") for item in values]
 
 
@@ -238,15 +261,17 @@ class PrivacyGovernance:
                     path.unlink(); journal_count += 1
                 except OSError:
                     pass
-        if journal_root.parent.exists():
-            for path in sorted(journal_root.parent.rglob("*"), reverse=True):
+        # Remove only this user's directory. Traversing the parent would erase
+        # journals belonging to every other account during account deletion.
+        if journal_root.exists():
+            for path in sorted(journal_root.rglob("*"), reverse=True):
                 if path.is_file():
                     try: path.unlink(); journal_count += 1
                     except OSError: pass
                 elif path.is_dir():
                     try: path.rmdir()
                     except OSError: pass
-            try: journal_root.parent.rmdir()
+            try: journal_root.rmdir()
             except OSError: pass
         evidence = {
             "schema": "egoassist.deletion-evidence.v1",
@@ -272,5 +297,5 @@ class PrivacyGovernance:
     def apply_memory_retention(self, user_id: str, cutoff: datetime) -> dict[str, int]:
         return self.timeline.apply_retention(user_id=user_id, cutoff=cutoff)
 
-    def disclosure(self) -> dict[str, Any]:
-        return {"providers": provider_disclosures(), "transport": transport_security_summary(), "memory": {"owner": "EgoAssist", "scopes": ["participant", "case"], "controls": ["export", "correct", "delete"]}}
+    def disclosure(self, *, ambient: bool = False) -> dict[str, Any]:
+        return {"providers": provider_disclosures(ambient=ambient), "transport": transport_security_summary(), "memory": {"owner": "EgoAssist", "scopes": ["participant", "case"], "controls": ["export", "correct", "delete"]}}

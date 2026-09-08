@@ -6,11 +6,24 @@ from .perception import (
     MAX_FRAME_AGE_MS,
     PerceptionValidation,
     StructuredPerceptionAdapter,
+    ambient_prompt,
+    frame_prompt,
+    parse_ambient_hypothesis,
     parse_perception_hypothesis,
     perception_prompt,
+    validate_ambient_result,
     validate_perception_result,
 )
-from .task import TaskSession, TaskSpec
+from .ambient import (
+    AMBIENT_SCHEMA_VERSION,
+    NONE_OBSERVED,
+    UNKNOWN_LOCATION,
+    AmbientWatchItem,
+    AmbientWatchList,
+    AmbientWatchLocation,
+    AmbientWatchSession,
+)
+from .task import TaskSession, TaskSpec, bounded_text
 from .skills import SkillPackage, SkillRegistry, SkillRuntime
 from .tools import SkillToolExecutor
 from .trace import EventLedger
@@ -56,7 +69,10 @@ __all__ = [
     "PreferenceMemory", "RealtimeEpisodeMemory", "StructuredPerceptionAdapter",
     "MAX_FRAME_AGE_MS", "PerceptionValidation", "parse_perception_hypothesis",
     "perception_prompt", "validate_perception_result",
-    "TaskSession", "TaskSpec", "SkillPackage", "SkillRegistry",
+    "AMBIENT_SCHEMA_VERSION", "NONE_OBSERVED", "UNKNOWN_LOCATION",
+    "AmbientWatchItem", "AmbientWatchList", "AmbientWatchLocation", "AmbientWatchSession",
+    "ambient_prompt", "frame_prompt", "parse_ambient_hypothesis", "validate_ambient_result",
+    "TaskSession", "TaskSpec", "bounded_text", "SkillPackage", "SkillRegistry",
     "SkillRuntime", "SkillToolExecutor", "EventLedger", "TurnTakingPolicy",
     "ContextHarness", "ContextLayer", "ContextSettings", "SessionJournal", "estimate_tokens",
     "IdentityStore",

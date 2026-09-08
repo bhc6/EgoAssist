@@ -54,6 +54,7 @@ include-package-data = true
 
 [tool.setuptools.package-data]
 egoassist = [
+    "watchlists/*.json",
     "console/*.html",
     "console/*.css",
     "console/*.js",

@@ -193,6 +193,72 @@ class ProductDatabase:
                 deleted[category] = deleted.get(category, 0) + int(result.rowcount or 0)
         return {"appliedAt": now.isoformat(), "deleted": deleted, "evidence": "counts-only"}
 
+    def record_consent_grant(
+        self,
+        user_id: str,
+        *,
+        purpose: str,
+        data_categories: list[str],
+        destination: str,
+        expires_at: datetime | None = None,
+        now: datetime | None = None,
+    ) -> dict[str, Any]:
+        """Record one purpose-scoped consent grant idempotently.
+
+        The consent id is deterministic, so re-granting the same purpose
+        refreshes the existing row rather than accumulating duplicates.
+        """
+        purpose_value = str(purpose).strip()
+        if not purpose_value:
+            raise ValueError("consent purpose is required")
+        if not data_categories:
+            raise ValueError("consent requires at least one data category")
+        self.ensure_user(str(user_id))
+        consent_id = f"consent:{user_id}:{purpose_value}"
+        granted = now or datetime.now(timezone.utc)
+        with self.session() as session:
+            row = session.get(ConsentGrantRow, consent_id)
+            if row is None:
+                row = ConsentGrantRow(
+                    consent_id=consent_id,
+                    user_id=str(user_id),
+                    purpose=purpose_value,
+                    data_categories=[str(item) for item in data_categories],
+                    destination=str(destination),
+                    granted_at=granted,
+                    expires_at=expires_at,
+                )
+                session.add(row)
+            else:
+                row.data_categories = [str(item) for item in data_categories]
+                row.destination = str(destination)
+                row.granted_at = granted
+                row.expires_at = expires_at
+                row.revoked_at = None
+            return self._row_payload(row)
+
+    def active_consent(
+        self, user_id: str, *, purpose: str, now: datetime | None = None
+    ) -> dict[str, Any] | None:
+        """Return the live grant for a purpose, or None when absent, revoked, or expired."""
+        moment = now or datetime.now(timezone.utc)
+        with self.session() as session:
+            row = session.get(ConsentGrantRow, f"consent:{user_id}:{str(purpose).strip()}")
+            if row is None or row.revoked_at is not None:
+                return None
+            if row.expires_at is not None and _timestamp(row.expires_at) <= moment:
+                return None
+            return self._row_payload(row)
+
+    def revoke_consent(self, consent_id: str, *, now: datetime | None = None) -> dict[str, Any] | None:
+        with self.session() as session:
+            row = session.get(ConsentGrantRow, str(consent_id))
+            if row is None:
+                return None
+            if row.revoked_at is None:
+                row.revoked_at = now or datetime.now(timezone.utc)
+            return self._row_payload(row)
+
     def record_observation(self, value: ObservationEvidence) -> None:
         """Persist one validated perception artifact idempotently."""
         self.create_schema()
@@ -218,6 +284,24 @@ class ProductDatabase:
                 source=value.source,
                 evidence=dict(value.evidence),
             ))
+
+    def observations(
+        self,
+        user_id: str,
+        *,
+        task_id: str | None = None,
+        since: datetime | None = None,
+        limit: int = 2000,
+    ) -> list[dict[str, Any]]:
+        """Read stored observations oldest-first, optionally scoped to one task id."""
+        with self.session() as session:
+            query = select(ObservationRow).where(ObservationRow.user_id == str(user_id))
+            if task_id is not None:
+                query = query.where(ObservationRow.task_id == str(task_id))
+            if since is not None:
+                query = query.where(ObservationRow.frame_captured_at >= since)
+            query = query.order_by(ObservationRow.frame_captured_at).limit(max(1, int(limit)))
+            return [self._row_payload(row) for row in session.scalars(query)]
 
     def project_journal(
         self,

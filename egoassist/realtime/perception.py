@@ -12,9 +12,16 @@ from typing import Any, Mapping
 from uuid import uuid4
 
 from egoassist.product.contracts import (
+    AmbientFrameContext,
+    AmbientObservationHypothesis,
     ObservationEvidence,
     PerceptionFrameContext,
     PerceptionHypothesis,
+)
+from egoassist.realtime.ambient import (
+    AMBIENT_SCHEMA_VERSION,
+    NONE_OBSERVED,
+    UNKNOWN_LOCATION,
 )
 
 
@@ -30,6 +37,14 @@ class PerceptionValidation:
 
 def _utc(value: datetime) -> datetime:
     return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+
+
+def _frame_age_ms(captured_at: datetime, received: datetime) -> int:
+    return int((received - _utc(captured_at)).total_seconds() * 1000)
+
+
+def _binding_mismatch(captured: Any, current: Any, fields: tuple[str, ...]) -> bool:
+    return any(getattr(captured, key) != getattr(current, key) for key in fields)
 
 
 def perception_prompt(context: PerceptionFrameContext | Mapping[str, Any]) -> str:
@@ -189,6 +204,203 @@ def validate_perception_result(
         },
     )
     return PerceptionValidation(True, "accepted-task-bound-evidence", observation)
+
+
+def ambient_prompt(context: AmbientFrameContext | Mapping[str, Any]) -> str:
+    value = (
+        context
+        if isinstance(context, AmbientFrameContext)
+        else AmbientFrameContext.model_validate(context)
+    )
+    activities = [
+        {
+            "activityId": item.get("id"),
+            "label": item.get("label"),
+            "visibleEvidence": item.get("visibleEvidence"),
+        }
+        for item in value.watch_activities
+    ]
+    locations = [
+        {"locationId": item.get("id"), "label": item.get("label")}
+        for item in value.watch_locations
+    ]
+    return (
+        "Inspect only the submitted egocentric frame against the immutable watch context below. "
+        "Return one JSON object with activity_id, observed, location_id, confidence, summary, "
+        "visible_evidence, and hazards. hazards is an array of {kind,message,confidence}. "
+        "activity_id must be one of the supplied activity candidates, or "
+        f"'{NONE_OBSERVED}' with observed=false when no watched activity is visible. "
+        "Absence is a valid and expected answer, not a failure. "
+        f"location_id must be one of the supplied location candidates, or '{UNKNOWN_LOCATION}'. "
+        "Report only what is visible in this frame. Never infer swallowing, ingestion, "
+        "consumption, dosage, identity, or intent, and never infer anything from reference "
+        "text alone. This observation carries no authority to advance or complete anything. "
+        "Use Chinese for summary and hazard messages.\n"
+        + json.dumps(
+            {
+                "schema": value.schema_version,
+                "watchlistId": value.watchlist_id,
+                "watchlistVersion": value.watchlist_version,
+                "watchlistProvenance": value.watchlist_provenance,
+                "watchEpoch": value.watch_epoch,
+                "activityCandidates": activities,
+                "noneObservedId": NONE_OBSERVED,
+                "locationCandidates": locations,
+                "unknownLocationId": UNKNOWN_LOCATION,
+                "risk": value.risk,
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+    )
+
+
+def frame_prompt(
+    context: PerceptionFrameContext | AmbientFrameContext | Mapping[str, Any],
+) -> str:
+    """Dispatch to the task or ambient prompt by schema version."""
+    if isinstance(context, AmbientFrameContext):
+        return ambient_prompt(context)
+    if isinstance(context, PerceptionFrameContext):
+        return perception_prompt(context)
+    version = str(dict(context).get("schema_version", ""))
+    return ambient_prompt(context) if version == AMBIENT_SCHEMA_VERSION else perception_prompt(context)
+
+
+def parse_ambient_hypothesis(raw: str | Mapping[str, Any]) -> AmbientObservationHypothesis:
+    value = json.loads(raw.strip()) if isinstance(raw, str) else dict(raw)
+    if not isinstance(value, dict):
+        raise ValueError("ambient output must be a JSON object")
+    hazards = []
+    for item in value.get("hazards", []):
+        if not isinstance(item, Mapping):
+            raise ValueError("ambient hazards must be objects")
+        hazards.append(
+            {
+                "kind": str(item.get("kind") or item.get("type") or "ambient-safety")[:80],
+                "message": " ".join(str(item.get("message", "")).split())[:300],
+                "confidence": item.get("confidence", 0),
+            }
+        )
+    visible = value.get("visible_evidence", value.get("visibleEvidence", []))
+    if not isinstance(visible, list):
+        raise ValueError("visible_evidence must be a list")
+    return AmbientObservationHypothesis(
+        activity_id=str(value.get("activity_id") or value.get("activityId") or NONE_OBSERVED),
+        observed=value.get("observed", False),
+        location_id=str(value.get("location_id") or value.get("locationId") or UNKNOWN_LOCATION),
+        confidence=value.get("confidence", 0),
+        summary=" ".join(str(value.get("summary") or value.get("scene_summary") or "").split())[:500],
+        visible_evidence=[" ".join(str(item).split())[:300] for item in visible[:8] if str(item).strip()],
+        hazards=hazards,
+    )
+
+
+def validate_ambient_result(
+    context: AmbientFrameContext | Mapping[str, Any],
+    current_context: AmbientFrameContext | Mapping[str, Any],
+    hypothesis: AmbientObservationHypothesis | Mapping[str, Any],
+    *,
+    received_at: datetime | None = None,
+    max_frame_age_ms: int = MAX_FRAME_AGE_MS,
+    source: str,
+) -> PerceptionValidation:
+    """Validate a task-free ambient observation.
+
+    A separate function from ``validate_perception_result`` by design: ambient
+    code paths are structurally incapable of weakening the task-mode checks,
+    which is the verification claim ADR 007 rests on.
+
+    Freshness and binding immutability are preserved unchanged. What differs is
+    that absence is accepted as evidence, and that there is no completion
+    concept at all.
+    """
+    captured = (
+        context
+        if isinstance(context, AmbientFrameContext)
+        else AmbientFrameContext.model_validate(context)
+    )
+    current = (
+        current_context
+        if isinstance(current_context, AmbientFrameContext)
+        else AmbientFrameContext.model_validate(current_context)
+    )
+    output = (
+        hypothesis
+        if isinstance(hypothesis, AmbientObservationHypothesis)
+        else AmbientObservationHypothesis.model_validate(hypothesis)
+    )
+    received = _utc(received_at or datetime.now(timezone.utc))
+    age_ms = _frame_age_ms(captured.frame_captured_at, received)
+    if age_ms < 0:
+        return PerceptionValidation(False, "frame-captured-in-future")
+    if age_ms > max_frame_age_ms:
+        return PerceptionValidation(False, "stale-frame")
+    binding_fields = (
+        "context_id",
+        "user_id",
+        "session_id",
+        "watchlist_id",
+        "watchlist_version",
+        "watchlist_checksum",
+        "watch_epoch",
+        # Consent is part of the binding, so revoking it invalidates every
+        # frame already in flight rather than only future ones.
+        "consent_id",
+    )
+    if _binding_mismatch(captured, current, binding_fields):
+        return PerceptionValidation(False, "ambient-context-changed")
+    if captured.watch_activities != current.watch_activities:
+        return PerceptionValidation(False, "watchlist-changed")
+    if captured.watch_locations != current.watch_locations:
+        return PerceptionValidation(False, "watchlist-changed")
+    allowed_activities = {
+        str(item.get("id")) for item in captured.watch_activities
+    } | {NONE_OBSERVED}
+    if output.activity_id not in allowed_activities:
+        return PerceptionValidation(False, "activity-outside-watchlist")
+    allowed_locations = {
+        str(item.get("id")) for item in captured.watch_locations
+    } | {UNKNOWN_LOCATION}
+    if output.location_id not in allowed_locations:
+        return PerceptionValidation(False, "location-outside-watchlist")
+    if output.observed and output.activity_id == NONE_OBSERVED:
+        return PerceptionValidation(False, "contradictory-absence-claim")
+    if not output.observed and output.activity_id != NONE_OBSERVED:
+        return PerceptionValidation(False, "contradictory-absence-claim")
+    observation = ObservationEvidence(
+        observation_id=f"observation-{uuid4().hex}",
+        user_id=captured.user_id,
+        session_id=captured.session_id,
+        # Namespaced so ambient rows are provably disjoint from task rows:
+        # TaskSpec ids cannot contain a colon.
+        task_id=f"ambient:{captured.watchlist_id}",
+        checkpoint_id=output.activity_id,
+        frame_captured_at=captured.frame_captured_at,
+        received_at=received,
+        frame_age_ms=age_ms,
+        allowed_transitions=[],
+        confidence=output.confidence,
+        hazards=output.hazards,
+        source=source,
+        evidence={
+            "schemaVersion": captured.schema_version,
+            "contextId": captured.context_id,
+            "frameId": captured.frame_id,
+            "watchlistId": captured.watchlist_id,
+            "watchlistVersion": captured.watchlist_version,
+            "watchlistProvenance": captured.watchlist_provenance,
+            "watchlistChecksum": captured.watchlist_checksum,
+            "watchEpoch": captured.watch_epoch,
+            "consentId": captured.consent_id,
+            "observed": output.observed,
+            "activityId": output.activity_id,
+            "locationId": output.location_id,
+            "summary": output.summary,
+            "visibleEvidence": output.visible_evidence,
+        },
+    )
+    return PerceptionValidation(True, "accepted-ambient-evidence", observation)
 
 
 class StructuredPerceptionAdapter:

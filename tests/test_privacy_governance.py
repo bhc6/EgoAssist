@@ -55,6 +55,20 @@ def test_deletion_is_complete_idempotent_and_only_leaves_bounded_evidence(tmp_pa
     assert "sensitive" not in evidence_files[0].read_text(encoding="utf-8")
 
 
+def test_delete_account_preserves_other_users_files(tmp_path):
+    user_id, _, _, _, service = _governance(tmp_path)
+    own = tmp_path / "users" / user_id / "sessions" / "own.jsonl"
+    other = tmp_path / "users" / "other-user" / "sessions" / "other.jsonl"
+    for path in (own, other):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("private journal", encoding="utf-8")
+    service.delete_account(user_id)
+    assert not own.exists()
+    assert other.read_text(encoding="utf-8") == "private journal"
+    service.delete_account(user_id)
+    assert other.exists()
+
+
 def test_retention_deletes_expired_transcripts_and_reports_counts(tmp_path):
     user_id, identity, database, timeline, service = _governance(tmp_path)
     database.ensure_user(user_id)
