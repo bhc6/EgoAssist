@@ -1,9 +1,8 @@
-# Real E2E blockers (2026-09-08)
+# Superseded: real E2E blockers (2026-09-08)
 
-- QWEN_API_KEY is configured (secret not recorded).
-- DashScope DNS resolves to public IPs after Mihomo virtual adapter shutdown.
-- Python TCP connect to DashScope:443 still fails with Windows `WinError 10013`; the created outbound firewall rule is not enforced (`EnforcementStatus: NotApplicable`).
-- Qwen Realtime therefore reaches `provider_unavailable` after the 5 second connect timeout; no token/audio latency sample exists.
-- EgoLife DashScope benchmark initialization also requires local `torch`/CLIP encoder, which is not installed in `.venv`; it exits before the first API request.
+Authorized network execution connects to official DashScope. The earlier sandbox
+WinError 10013 does not establish a Windows firewall failure. Cloud Timeline
+captioning now loads CLIP lazily, and the CUDA environment has been verified.
 
-No real-model metric is reported as successful.
+See [the current real validation report](../docs/REAL_VALIDATION_2026-09-08.md)
+for measured latency, dataset quality failures, scope and reproducible commands.

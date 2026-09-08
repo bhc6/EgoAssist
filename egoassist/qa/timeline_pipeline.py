@@ -1,13 +1,13 @@
 """EgoLife benchmark pipeline backed by TimelineMemory (the new memory system).
 
 Drop-in replacement for StreamingMemoryAssistant that stores VLM captions as
-timeline cards (kind="scene") and retrieves via BM25 + semantic text search,
+timeline cards (kind="scene") and retrieves via BM25 + lexical text overlap,
 without retaining raw frame pixels after ingest.
 
 Trade-off vs. HierarchicalMemory path:
   - temporal_iou granularity = segment boundary (≈ event_max_len seconds)
     rather than sub-second sliding-window localization.
-  - Retrieval is text-driven (timeline hybrid), not frame-embedding cosine.
+  - Retrieval is lexical, not semantic or frame-embedding cosine.
   - Faster per-question inference (no GPU call during retrieval).
 """
 

@@ -85,12 +85,20 @@ def _digits(value: str) -> str:
     return "".join(character for character in value.translate(_PHONE_DIGITS) if character.isdigit())
 
 
-def _phone_fallback_atoms(text: str) -> list[dict[str, str]]:
+def _phone_fallback_atoms(text: str, *, phone_context: bool = False) -> list[dict[str, str]]:
     atoms: list[dict[str, str]] = []
     clauses = re.split(r"[，。；,;]|然后", text)
     for index, clause in enumerate(clauses):
         phone_value = _PHONE_VALUE.search(clause)
         if not phone_value:
+            continue
+        # A numeric value alone does not identify its meaning (locker IDs,
+        # prices and dates must never be rewritten as telephone numbers).
+        nearby = "，".join(clauses[index:index + 3])
+        labelled_phone = bool(re.search(r"电话|手机|小号", clause))
+        bare_number = not clause[:phone_value.start()].strip() and not clause[phone_value.end():].strip()
+        if not (labelled_phone or (bare_number and re.search(r"电话|手机|小号", nearby))
+                or (phone_context and (bare_number or re.search(r"^(?:我的)?号码(?:是|为)", clause)))):
             continue
         number = _digits(phone_value.group(0))
         if len(number) < 3:
@@ -184,7 +192,9 @@ def explicit_memory_fallback_atoms(
     )
     if not explicit and not pending_compatible:
         return []
-    phone_atoms = _phone_fallback_atoms(normalized)
+    phone_atoms = _phone_fallback_atoms(
+        normalized, phone_context=predicate in {"phone", "telephone", "contact.phone"},
+    )
     if phone_atoms:
         return phone_atoms
 
@@ -230,8 +240,8 @@ def explicit_memory_fallback_atoms(
     return [{
         "kind": "fact",
         "text": normalized,
-        "subject": normalize_identity((pending or {}).get("subject")) or "用户显式声明",
-        "predicate": predicate or "verbatim",
+        "subject": (normalize_identity((pending or {}).get("subject")) if not explicit else None) or "用户显式声明",
+        "predicate": (predicate if not explicit else None) or "verbatim",
         "value": normalized,
         "scope": "participant",
         "consent": "explicit",
@@ -575,7 +585,7 @@ class SemanticTurnRouter:
                 {
                     "role": "system",
                     "content": (
-                        "Classify one user turn using only its semantic meaning. Return one JSON object with exactly "
+                        "Classify one user turn using only its semantic meaning. Use compact JSON without indentation. Return one JSON object with exactly "
                         "seventeen fields: speechControl, taskControl, preferenceIntent, memoryQuery, memoryKind, "
                         "memoryText, memoryKey, memoryScope, memoryConsent, skillControl, skill, memoryDraft, "
                         "memoryAtoms, memoryQuerySpec, intentKind, intents, and revision. The first eleven fields and intentKind are strings. memoryDraft, revision, and "
@@ -640,6 +650,7 @@ class SemanticTurnRouter:
             ],
             result_format="message",
             temperature=0,
+            enable_thinking=False,
             request_timeout=self.timeout_seconds,
         )
         if response.status_code != 200:

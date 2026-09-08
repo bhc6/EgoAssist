@@ -1,0 +1,23 @@
+{
+  "outputs/real-final-videos-20260908/summary.json": "5a324e13149e2121e730607179397c7be3554d0216ab7223d6fbbaf8a272bd14",
+  "outputs/real-final-videos-20260908/results.jsonl": "fda0ebf4c466e783219468a8523fa883fe370580b9575832858c912d54c0ee3c",
+  "outputs/real-final-videos-20260908/run-manifest.json": "7b5e051ef60dd894db154b77b6f9e6cb556f5abb8f0d0a7fbfb9942278bf6f84",
+  "outputs/real-final-videos-20260908/progress.jsonl": "911606256f3b87a8857fb4ff3c62bbf014b52bd76c0c9f2c386ae1c4676cdf3d",
+  "outputs/cuda-verified-20260908.json": "c26f095e6acf6ecd983eebb508b84de2c91235990c6fa382a8285d6b7bbc8f9c",
+  "outputs/browser-final-20260908/acceptance.json": "79132c4cb96015ffa1ec618589d8bce600270ec02140b1f703d655d9a62c13c4",
+  "outputs/real-greeting-final-20260908-1/acceptance.json": "b445d429b59cf56cde8dc431ec0d6b2ff0a2e74cce1ae9c028ee4d4c1bca41ed",
+  "outputs/real-greeting-final-20260908-1/users/32dcd592dfcb4590/sessions/e18a87d1edc84f62.jsonl": "97aca72ba9a416b4e5ec08e01cb4ce65f4918ff0e49c02a01f9e7f55267de24e",
+  "outputs/real-greeting-final-20260908-1/users/32dcd592dfcb4590/sessions/memory_trace.jsonl": "d2c8feadc276ffa3f22ebc6a5cbbb35207aec529d119318abb96dd272d00a6e5",
+  "outputs/real-greeting-final-20260908-2/acceptance.json": "0efb232e0590e2088a01e644a9ced38ef3ecf57e543934658515d4a40fda3b9a",
+  "outputs/real-greeting-final-20260908-2/users/a5984e8582ea41fe/sessions/53deab9234334f80.jsonl": "e7b4eae7bbe96327bd7ebc1508866b1b50b604c83c1d92582e006b5335ea21c7",
+  "outputs/real-greeting-final-20260908-2/users/a5984e8582ea41fe/sessions/memory_trace.jsonl": "dafc906e86d9d7952c4b1610fe0bdb9624c723a1f9a7d7356120b8c051a5f34b",
+  "outputs/real-greeting-final-20260908-3/acceptance.json": "8b6da1aa7fef6d165dc44fe87f6e66b2428ab203bd0177bbf0bdcad4fc36cb58",
+  "outputs/real-greeting-final-20260908-3/users/7ff718ff30814010/sessions/8dbd6910f6bb471d.jsonl": "4db86f6ac42a0dc5a1eb0c82da72a72fa81a47015b1897d7ad9f742cee235935",
+  "outputs/real-greeting-final-20260908-3/users/7ff718ff30814010/sessions/memory_trace.jsonl": "95a514528569f4d5d021e0bb0b4e8d76413eeae3c7699e308a902d57567ff603",
+  "outputs/real-memory-subject-20260908/acceptance.json": "229d4fd0c8694a1a83b65ea83c9fb4de94a3be50e10835e5f927ec7431b488cf",
+  "outputs/real-memory-subject-20260908/users/903a8772d8374985/sessions/c1834ae9d6414021.jsonl": "7db5bd93ec828e5b01293041de5578e8f1e4e61a75bb17bfd412d6f75b6d0c9b",
+  "outputs/real-memory-subject-20260908/users/903a8772d8374985/sessions/memory_trace.jsonl": "b6d28c89a0a05f4a94c2a3b189d1d2206f4317609a2636f1de5766b49188a83c",
+  "outputs/real-memory-confirm-20260908/acceptance.json": "97693dd6944a9dbf5518fb9eced30a94af2d45884446f5318ca26b290b6016ae",
+  "outputs/real-memory-confirm-20260908/users/c7054ad708fe4609/sessions/e26a11202cc246e4.jsonl": "7551393f0a9d15b3b5c7e07157eccebb22c516bdcaeaabf3f4db2895570644d3",
+  "outputs/real-memory-confirm-20260908/users/c7054ad708fe4609/sessions/memory_trace.jsonl": "b046e22c19544c569aa39ba71c4fea7baa60cf43fc1a78dc8e3444b9ac4c755f"
+}

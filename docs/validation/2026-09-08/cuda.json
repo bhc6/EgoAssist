@@ -1,0 +1,25 @@
+{
+  "passed": true,
+  "torch": "2.8.0+cu128",
+  "torchvision": "0.23.0+cu128",
+  "cudaRuntime": "12.8",
+  "cudaAvailable": true,
+  "device": "NVIDIA GeForce RTX 5070 Laptop GPU",
+  "capability": [
+    12,
+    0
+  ],
+  "compiledArchitectures": [
+    "sm_61",
+    "sm_70",
+    "sm_75",
+    "sm_80",
+    "sm_86",
+    "sm_90",
+    "sm_100",
+    "sm_120"
+  ],
+  "matmulMs": 0.456,
+  "matmulVerified": true,
+  "torchvisionCudaNmsVerified": true
+}

@@ -1,0 +1,225 @@
+[
+  {
+    "source": "outputs/real-greeting-final-20260908-1/acceptance.json",
+    "passed": true,
+    "model": "qwen3.5-omni-flash-realtime",
+    "mock": false,
+    "input": "text-control",
+    "microphoneAsrMeasured": false,
+    "scenario": "greeting",
+    "connectMs": 600.8,
+    "firstTextMs": 1447.9,
+    "firstAudioMs": 1662.8,
+    "finishedMs": 3321.6,
+    "routingLatencyMs": [
+      1067.8
+    ],
+    "routingStatuses": [
+      "classified"
+    ],
+    "providerLatencyMs": {
+      "response.first_transcript": 213.1800999995903,
+      "response.first_audio": 427.12069999834057
+    },
+    "audioPackets": 27,
+    "responseFinished": {
+      "sequence": 1,
+      "status": "response.done",
+      "usage": {
+        "inputTokens": 1060,
+        "outputTokens": 136,
+        "totalTokens": 1196,
+        "inputTokenDetails": {
+          "text_tokens": 1060
+        },
+        "outputTokenDetails": {
+          "text_tokens": 29,
+          "audio_tokens": 107
+        }
+      },
+      "fragmentCommitted": true,
+      "interrupted": false,
+      "localCancelRequested": false
+    }
+  },
+  {
+    "source": "outputs/real-greeting-final-20260908-2/acceptance.json",
+    "passed": true,
+    "model": "qwen3.5-omni-flash-realtime",
+    "mock": false,
+    "input": "text-control",
+    "microphoneAsrMeasured": false,
+    "scenario": "greeting",
+    "connectMs": 892.0,
+    "firstTextMs": 1331.0,
+    "firstAudioMs": 1548.7,
+    "finishedMs": 3002.9,
+    "routingLatencyMs": [
+      1010.8
+    ],
+    "routingStatuses": [
+      "classified"
+    ],
+    "providerLatencyMs": {
+      "response.first_transcript": 163.13320000335807,
+      "response.first_audio": 380.865500002983
+    },
+    "audioPackets": 22,
+    "responseFinished": {
+      "sequence": 1,
+      "status": "response.done",
+      "usage": {
+        "inputTokens": 1060,
+        "outputTokens": 118,
+        "totalTokens": 1178,
+        "inputTokenDetails": {
+          "text_tokens": 1060
+        },
+        "outputTokenDetails": {
+          "text_tokens": 30,
+          "audio_tokens": 88
+        }
+      },
+      "fragmentCommitted": true,
+      "interrupted": false,
+      "localCancelRequested": false
+    }
+  },
+  {
+    "source": "outputs/real-greeting-final-20260908-3/acceptance.json",
+    "passed": true,
+    "model": "qwen3.5-omni-flash-realtime",
+    "mock": false,
+    "input": "text-control",
+    "microphoneAsrMeasured": false,
+    "scenario": "greeting",
+    "connectMs": 392.2,
+    "firstTextMs": 1851.3,
+    "firstAudioMs": 2064.6,
+    "finishedMs": 3407.4,
+    "routingLatencyMs": [
+      1509.8
+    ],
+    "routingStatuses": [
+      "classified"
+    ],
+    "providerLatencyMs": {
+      "response.first_transcript": 158.235800001421,
+      "response.first_audio": 370.8872999995947
+    },
+    "audioPackets": 19,
+    "responseFinished": {
+      "sequence": 1,
+      "status": "response.done",
+      "usage": {
+        "inputTokens": 1060,
+        "outputTokens": 100,
+        "totalTokens": 1160,
+        "inputTokenDetails": {
+          "text_tokens": 1060
+        },
+        "outputTokenDetails": {
+          "text_tokens": 25,
+          "audio_tokens": 75
+        }
+      },
+      "fragmentCommitted": true,
+      "interrupted": false,
+      "localCancelRequested": false
+    }
+  },
+  {
+    "source": "outputs/real-memory-subject-20260908/acceptance.json",
+    "passed": true,
+    "model": "qwen3.5-omni-flash-realtime",
+    "mock": false,
+    "input": "text-control",
+    "microphoneAsrMeasured": false,
+    "scenario": "memory",
+    "connectMs": 608.3,
+    "firstTextMs": 3362.6,
+    "firstAudioMs": 3608.9,
+    "finishedMs": 4192.0,
+    "routingLatencyMs": [
+      2371.6,
+      2718.4
+    ],
+    "routingStatuses": [
+      "classified",
+      "classified"
+    ],
+    "providerLatencyMs": {
+      "response.first_transcript": 453.6309999966761,
+      "response.first_audio": 699.576300001354
+    },
+    "audioPackets": 9,
+    "responseFinished": {
+      "sequence": 1,
+      "status": "response.done",
+      "usage": {
+        "inputTokens": 1323,
+        "outputTokens": 46,
+        "totalTokens": 1369,
+        "inputTokenDetails": {
+          "text_tokens": 1323
+        },
+        "outputTokenDetails": {
+          "text_tokens": 12,
+          "audio_tokens": 34
+        }
+      },
+      "fragmentCommitted": true,
+      "interrupted": false,
+      "localCancelRequested": false
+    },
+    "memoryAnswerCorrect": true,
+    "memoryRetrieved": true
+  },
+  {
+    "source": "outputs/real-memory-confirm-20260908/acceptance.json",
+    "passed": true,
+    "model": "qwen3.5-omni-flash-realtime",
+    "mock": false,
+    "input": "text-control",
+    "microphoneAsrMeasured": false,
+    "scenario": "memory",
+    "connectMs": 394.9,
+    "firstTextMs": 3682.0,
+    "firstAudioMs": 3933.5,
+    "finishedMs": 4537.8,
+    "routingLatencyMs": [
+      3011.9,
+      3009.6
+    ],
+    "routingStatuses": [
+      "unavailable",
+      "unavailable"
+    ],
+    "providerLatencyMs": {
+      "response.first_transcript": 485.9123999995063,
+      "response.first_audio": 736.8461000005482
+    },
+    "audioPackets": 9,
+    "responseFinished": {
+      "sequence": 1,
+      "status": "response.done",
+      "usage": {
+        "inputTokens": 1309,
+        "outputTokens": 46,
+        "totalTokens": 1355,
+        "inputTokenDetails": {
+          "text_tokens": 1309
+        },
+        "outputTokenDetails": {
+          "text_tokens": 12,
+          "audio_tokens": 34
+        }
+      },
+      "fragmentCommitted": true,
+      "interrupted": false,
+      "localCancelRequested": false
+    },
+    "memoryAnswerCorrect": true,
+    "memoryRetrieved": true
+  }
+]

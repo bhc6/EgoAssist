@@ -1,0 +1,70 @@
+{
+  "schemaVersion": 1,
+  "backend": "dashscope",
+  "model": "qwen3-vl-plus",
+  "precision": "fp16",
+  "encoderDevice": "cpu",
+  "sampleFps": 0.5,
+  "sampling": {
+    "seed": 17,
+    "maxVideos": null,
+    "maxQuestionsPerVideo": 2,
+    "alpha": 0.1,
+    "calibrationRatio": 0.5
+  },
+  "memoryBackend": "timeline",
+  "qaSha256": "675ff0f6513e45588be260ba79145a643964a58e4d9906368d445679d3876f20",
+  "videos": [
+    {
+      "id": "DAY1_A1_JAKE_11094208",
+      "name": "DAY1_A1_JAKE_11094208.mp4",
+      "sha256": "8d20da0a3385f2f8d870c24c8638852dda14380cefb88ce2dd012677bbd0f2da"
+    },
+    {
+      "id": "DAY1_A1_JAKE_11100000",
+      "name": "DAY1_A1_JAKE_11100000.mp4",
+      "sha256": "446d280080cff7aa6a4c7feb84abeebc4868478310c18ad60f20242d63d774c3"
+    },
+    {
+      "id": "DAY1_A1_JAKE_11103000",
+      "name": "DAY1_A1_JAKE_11103000.mp4",
+      "sha256": "799166ede3009e21b2218aad99a5d55dae496f40623460a5d05c6d09440f9c35"
+    },
+    {
+      "id": "DAY1_A1_JAKE_11110000",
+      "name": "DAY1_A1_JAKE_11110000.mp4",
+      "sha256": "66af91472083b0b861a719479025fe2faa98dfd5cb63829fd2d015cfa8f8916e"
+    },
+    {
+      "id": "DAY1_A1_JAKE_11113000",
+      "name": "DAY1_A1_JAKE_11113000.mp4",
+      "sha256": "f355218bbf0946915f0f32eadec19b55c7991c2ffe40b84df3db879f64543cf0"
+    },
+    {
+      "id": "DAY1_A1_JAKE_11120000",
+      "name": "DAY1_A1_JAKE_11120000.mp4",
+      "sha256": "f8c14fcecc8f925b972df48d1f62ad4c9f172302f6e5af5f17610bcdebf3f469"
+    },
+    {
+      "id": "DAY1_A1_JAKE_11123000",
+      "name": "DAY1_A1_JAKE_11123000.mp4",
+      "sha256": "30c8e851c7b91855465e09039e96fc8433d07628c3e1c2c3d9b3bb71f5df61e8"
+    },
+    {
+      "id": "DAY1_A1_JAKE_11130000",
+      "name": "DAY1_A1_JAKE_11130000.mp4",
+      "sha256": "257c4a3e9958fd7bb9192c9a41bbd754cf67061d8f1f4158de7999be5a0318ed"
+    },
+    {
+      "id": "DAY1_A1_JAKE_11133000",
+      "name": "DAY1_A1_JAKE_11133000.mp4",
+      "sha256": "70216e091e5bd061b40f36b2d84ea4317441dcd66fca309a05bd86e06a3b542f"
+    },
+    {
+      "id": "DAY1_A1_JAKE_11140000",
+      "name": "DAY1_A1_JAKE_11140000.mp4",
+      "sha256": "a02668c6d8ea0ea894037b105d3d8575b5e0e4fb13cad1cc0bcd90818e90bbe3"
+    }
+  ],
+  "fingerprint": "f257ac0f234cc23fa08f5f60d61af61eb2290f3a6527d9905534d5c54418c39a"
+}

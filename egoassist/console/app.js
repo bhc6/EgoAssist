@@ -1123,10 +1123,14 @@ async function connectRealtimeSession(generation) {
       $("#duplexState").textContent = message.status === "committed"
         ? "记忆已提交 · 正在听"
         : message.status === "needs-input" ? "等待补充要记住的内容" : "记忆未提交 · 正在听";
+      setWorkflowStage("reasoning", "complete", "记忆事务处理结束");
+      setWorkflowStage("action", message.status === "committed" ? "complete" : "skipped", message.message);
+      setWorkflowStage("delivery", "complete", "服务端记忆回执已交付（文字）");
+      workflow.active = false;
     } else if (message.type === "memory_trace") {
       if (message.op === "retrieve") {
         setWorkflowStage("memory", "complete", "检索完成：候选 " + (message.candidate_count || 0) + "，选中 " + (message.selected_count || 0));
-        setWorkflowStage("reasoning", "active", "正在基于检索证据与当前状态形成可交付决策");
+        if (workflow.active) setWorkflowStage("reasoning", "active", "正在基于检索证据与当前状态形成可交付决策");
       } else if (message.op === "working_memory_push") {
         setWorkflowStage("memory", "complete", "检索证据已注入当前工作上下文");
       }

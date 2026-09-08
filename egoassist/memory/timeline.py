@@ -159,6 +159,14 @@ def normalize_identity(value: str | None) -> str | None:
     return normalized or None
 
 
+def _subject_identity(value: str | None) -> str | None:
+    """Compare a user's first-person possessive without dropping named owners."""
+    normalized = normalize_identity(value)
+    if not normalized:
+        return None
+    return re.sub(r"^(?:我的|my\s+)", "", normalized).strip() or normalized
+
+
 def memory_key_for(subject: str | None, predicate: str | None) -> str | None:
     """Generate entity-qualified keys at the trusted storage boundary."""
 
@@ -970,8 +978,15 @@ class TimelineMemory:
                     if card_end is not None
                     else range_start <= card_start < upper
                 )
-            subject_eligible = not query_subject or normalize_identity(card.get("subject")) == query_subject
+            subject_eligible = not query_subject or _subject_identity(card.get("subject")) == _subject_identity(query_subject)
             predicate_eligible = not query_predicate or normalize_identity(card.get("predicate")) == query_predicate
+            # Verbatim fallback cards have no extracted entity/relation. Treat
+            # their placeholder as unknown, allowing only constraints actually
+            # present in the saved text; never relax a known structured mismatch.
+            if normalize_identity(card.get("predicate")) == "verbatim":
+                verbatim = normalize_identity(card["text"])
+                subject_eligible = not query_subject or query_subject in verbatim
+                predicate_eligible = not query_predicate or query_predicate in verbatim
             card_terms = self._tokenize(card["text"])
             overlap = len(query_terms & card_terms)
             union = max(1, len(query_terms | card_terms))

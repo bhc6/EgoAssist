@@ -32,6 +32,7 @@ async def check(
     events = []
     errors = []
     event_counts: Counter[str] = Counter()
+    provider_connected = False
     parts = urlsplit(url)
     auth_scheme = "https" if parts.scheme in {"https", "wss"} else "http"
     auth_root = f"{auth_scheme}://{parts.netloc}"
@@ -69,6 +70,7 @@ async def check(
             ))
         latest_state = {}
         assistant_transcript = ""
+        transcript_done = False
         async with session.ws_connect(url, timeout=45) as websocket:
             for _ in range(6):
                 message = await asyncio.wait_for(websocket.receive(), 45)
@@ -78,13 +80,19 @@ async def check(
                 payload = json.loads(message.data)
                 events.append(payload.get("type"))
                 event_counts[payload.get("type", "unknown")] += 1
+                if payload.get("type") == "ready":
+                    provider_connected = bool((payload.get("lanes") or {}).get("dialogue", {}).get("connected"))
+                    if not provider_connected:
+                        errors.append("ready received without a connected dialogue provider")
+                if payload.get("type") == "provider_unavailable":
+                    errors.append(str(payload.get("reason", "provider unavailable"))[:500])
                 if payload.get("type") == "error":
                     errors.append(str(payload.get("message", ""))[:500])
                 if payload.get("type") == "state":
                     latest_state = payload.get("state") or {}
                 if payload.get("type") in {"ready", "error"}:
                     break
-            if "ready" in events and transcript:
+            if provider_connected and transcript:
                 await websocket.send_json({"type": "control", "transcript": transcript})
                 loop = asyncio.get_running_loop()
                 deadline = loop.time() + result_timeout
@@ -107,6 +115,7 @@ async def check(
                         errors.append(str(payload.get("message", ""))[:500])
                         break
                     if event_type == "assistant_transcript":
+                        transcript_done = bool(payload.get("done") and payload.get("text"))
                         assistant_transcript = (
                             str(payload.get("text", ""))
                             if payload.get("done")
@@ -114,9 +123,10 @@ async def check(
                         )
                     if event_type == "state":
                         latest_state = payload.get("state") or {}
-                        active_name = (latest_state.get("activeSkill") or {}).get("name")
-                        if expected_skill and active_name == expected_skill:
-                            break
+                    active_name = (latest_state.get("activeSkill") or {}).get("name")
+                    if (transcript_done and (not expected_skill or active_name == expected_skill)
+                            and (not interrupt_transcript or interrupt_sent)):
+                        break
             if "ready" in events and exercise_seconds > 0:
                 await websocket.send_json({
                     "type": "media_config",
@@ -175,7 +185,7 @@ async def check(
                     event_counts[event_type] += 1
                     if event_type == "error":
                         errors.append(str(payload.get("message", ""))[:500])
-    connected = "ready" in events
+    connected = provider_connected
     active_skill = (latest_state.get("activeSkill") or {}).get("name")
     routing = latest_state.get("intentRouting") or {}
     print(json.dumps({
@@ -198,7 +208,8 @@ async def check(
         "errors": errors,
     }, ensure_ascii=False))
     skill_ok = not expected_skill or active_skill == expected_skill
-    return connected and not errors and skill_ok
+    output_ok = not transcript or transcript_done
+    return connected and not errors and skill_ok and output_ok
 
 
 def main() -> None:

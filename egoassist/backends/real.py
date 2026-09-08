@@ -75,9 +75,21 @@ class _ClipEmbedBackend(VLMBackend):
 
     def __init__(self, encoder: ClipEncoder | None = None, device: str = "auto",
                  max_frames: int = 4):
-        self.encoder = encoder or ClipEncoder(device=device)
-        self.dim = self.encoder.dim
+        # Timeline captioning/QA does not use visual embeddings. Load CLIP only
+        # when embedding is actually requested, not for every cloud API client.
+        self._encoder = encoder
+        self._encoder_device = device
         self.max_frames = max_frames
+
+    @property
+    def encoder(self) -> ClipEncoder:
+        if self._encoder is None:
+            self._encoder = ClipEncoder(device=self._encoder_device)
+        return self._encoder
+
+    @property
+    def dim(self) -> int:
+        return self.encoder.dim
 
     def embed_frames(self, frames: Sequence[np.ndarray]) -> np.ndarray:
         return self.encoder.embed_image(self._few(frames))

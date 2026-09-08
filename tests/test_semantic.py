@@ -430,6 +430,14 @@ def test_explicit_memory_fallback_keeps_location_and_schedule_separate():
     }
 
 
+def test_explicit_numeric_memory_does_not_invent_phone_relation():
+    for text in ("记住：我的储物柜编号是7429。", "记住：预算是1200元。"):
+        for pending in (None, {"predicate": "phone", "subject": None}):
+            atoms = explicit_memory_fallback_atoms(text, pending)
+            assert atoms[0]["text"] == text
+            assert atoms[0]["predicate"] != "phone"
+
+
 def test_explicit_memory_fallback_associates_number_before_subject():
     atoms = explicit_memory_fallback_atoms(
         "幺二三四五六七，记住这个号码，这是小陈的小号。",

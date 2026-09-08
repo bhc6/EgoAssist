@@ -44,6 +44,30 @@ def test_timeline_persists_and_retrieves_declarative_fact_after_restart(tmp_path
     assert "_embedding" not in result["selected"][0]["card"]
 
 
+def test_verbatim_memory_resolves_only_constraints_present_in_saved_text(tmp_path):
+    path = tmp_path / "timeline.sqlite3"
+    memory = TimelineMemory(path)
+    saved = remember(memory, "记住：我的储物柜编号是7429。",
+                     subject="用户显式声明", predicate="verbatim")
+    restored = TimelineMemory(path)
+    for subject, predicate, expected in (("储物柜", "编号", True),
+                                         ("保险柜", "编号", False),
+                                         ("储物柜", "位置", False)):
+        result = restored.retrieve("我的储物柜编号是什么？", user_id="user-a",
+                                   case_id="case-a", scope="case",
+                                   query_spec={"subject": subject, "predicate": predicate})
+        assert (saved["id"] in [r["cardId"] for r in result['selected']]) == expected
+
+
+def test_subject_possessive_does_not_hide_user_memory_or_merge_named_owners(tmp_path):
+    memory = TimelineMemory(tmp_path / "timeline.sqlite3")
+    saved = remember(memory, "我的储物柜编号是7429。", subject="储物柜", predicate="编号")
+    for subject, expected in (("我的储物柜", True), ("小李的储物柜", False), ("保险柜", False)):
+        result = memory.retrieve("我的储物柜编号是什么？", user_id="user-a", case_id="case-a",
+                                 scope="case", query_spec={"subject": subject, "predicate": "编号"})
+        assert (saved['id'] in [r['cardId'] for r in result['selected']]) == expected
+
+
 def test_timeline_today_filter_prefers_today_event(tmp_path):
     memory = TimelineMemory(tmp_path / "timeline.sqlite3")
     now = datetime.now(timezone.utc)

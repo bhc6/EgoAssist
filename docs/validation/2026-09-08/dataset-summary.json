@@ -1,0 +1,77 @@
+{
+  "scope": "downloaded_egolife_subset",
+  "n_videos": 10,
+  "n_questions": 20,
+  "calibration_videos": [
+    "DAY1_A1_JAKE_11094208",
+    "DAY1_A1_JAKE_11100000",
+    "DAY1_A1_JAKE_11110000",
+    "DAY1_A1_JAKE_11120000",
+    "DAY1_A1_JAKE_11130000"
+  ],
+  "test_videos": [
+    "DAY1_A1_JAKE_11103000",
+    "DAY1_A1_JAKE_11113000",
+    "DAY1_A1_JAKE_11123000",
+    "DAY1_A1_JAKE_11133000",
+    "DAY1_A1_JAKE_11140000"
+  ],
+  "n_calibration": 10,
+  "n_test": 10,
+  "split_status": "held-out-test-split",
+  "alpha": 0.1,
+  "threshold": null,
+  "coverage": 0.0,
+  "selective_risk": null,
+  "all_answer_risk": 1.0,
+  "exact_match": 0.0,
+  "token_f1": 0.060096886481773845,
+  "localization_miou": 0.07126190476190478,
+  "localization_acc_05": 0.0,
+  "invalid_generation_rate": 0.0,
+  "raw_abstention_rate": 0.7,
+  "all_sample_exact_match": 0.0,
+  "all_sample_token_f1": 0.0832628790782736,
+  "all_sample_localization_miou": 0.0869702380952381,
+  "invalid_caption_rate": 0.0,
+  "mean_query_seconds": 0.9330494200010435,
+  "n_queries_with_evidence": 7,
+  "n_queries_without_evidence": 13,
+  "mean_query_with_evidence_seconds": 2.6446588857153466,
+  "mean_query_without_evidence_seconds": 0.01141355384718806,
+  "curve": [
+    {
+      "threshold": 0.0,
+      "coverage": 1.0,
+      "risk": 1.0
+    },
+    {
+      "threshold": 0.12667,
+      "coverage": 0.3,
+      "risk": 1.0
+    },
+    {
+      "threshold": 0.27666999999999997,
+      "coverage": 0.2,
+      "risk": 1.0
+    },
+    {
+      "threshold": 0.29539000000000004,
+      "coverage": 0.1,
+      "risk": 1.0
+    }
+  ],
+  "model": "qwen3-vl-plus",
+  "backend_class": "DashScopeQwenBackend",
+  "encoder_backend": "not-used",
+  "sample_fps": 0.5,
+  "precision": "fp16",
+  "encoder_device": "cpu",
+  "api_usage": {
+    "input_tokens": 79096,
+    "output_tokens": 1045,
+    "image_tokens": 77520
+  },
+  "results_path": "outputs\\real-final-videos-20260908\\results.jsonl",
+  "run_fingerprint": "f257ac0f234cc23fa08f5f60d61af61eb2290f3a6527d9905534d5c54418c39a"
+}

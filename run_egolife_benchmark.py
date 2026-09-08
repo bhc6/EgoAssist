@@ -213,6 +213,14 @@ def build_summary(rows: list[dict], alpha: float, seed: int, calibration_ratio: 
         "all_sample_localization_miou": mean_or_none(rows, "temporal_iou"),
         "invalid_caption_rate": mean_or_none(rows, "invalid_caption"),
         "mean_query_seconds": mean_or_none(rows, "query_seconds"),
+        "n_queries_with_evidence": sum(bool(row.get("candidate_memory_ids")) for row in rows),
+        "n_queries_without_evidence": sum(not row.get("candidate_memory_ids") for row in rows),
+        "mean_query_with_evidence_seconds": mean_or_none(
+            [row for row in rows if row.get("candidate_memory_ids")], "query_seconds"
+        ),
+        "mean_query_without_evidence_seconds": mean_or_none(
+            [row for row in rows if not row.get("candidate_memory_ids")], "query_seconds"
+        ),
         "curve": [
             {"threshold": threshold, "coverage": coverage, "risk": risk}
             for threshold, coverage, risk in curve
@@ -424,7 +432,8 @@ def main():
             gt_end = row["end_frame"] / fps
             invalid_generation = "response was invalid" in result.answered_text
             abstained = result.answered_text.strip().lower() in {
-                "i am not sure", "i'm not sure", "evidence is insufficient"
+                "i am not sure", "i'm not sure", "evidence is insufficient",
+                "i don't have any relevant memory.",
             }
             output = {
                 "key": row["key"], "video_id": video.stem, "video": video.name,
@@ -476,7 +485,7 @@ def main():
     summary.update({
         "model": evaluated_model,
         "backend_class": type(backend).__name__,
-        "encoder_backend": getattr(backend.encoder, "_backend", "unknown"),
+        "encoder_backend": getattr(getattr(backend, "_encoder", None), "_backend", "not-used"),
         "sample_fps": args.fps,
         "precision": args.precision,
         "encoder_device": args.encoder_device,
