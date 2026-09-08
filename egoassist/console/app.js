@@ -279,8 +279,10 @@ function renderPipeline(task, mechanism, step) {
     {stage: "scheduler", title: "响应调度与打断", status: scheduler.pending || scheduler.activeResponseIds?.length ? "live" : "idle", summary: (lanes.dialogue?.turnDetection || "unknown") + " · " + (scheduler.activePolicies?.[0]?.speechPolicy || state.turnTakingPolicy.currentSelection.policy), claim: "转写后先检索与更新上下文，再显式创建唯一回答；Skill 可配置：" + state.turnTakingPolicy.currentSelection.basis},
     {stage: "output", title: "语音与字幕输出", status: scheduler.activeResponseIds?.length ? "live" : "idle", summary: scheduler.activeResponseIds?.join(", ") || "等待输出", claim: "只展示可验证输出和结构化中间产物，不声称访问隐藏思维链"}
   ];
-  $("#pipeline").innerHTML = pipelineDetails.map((item, index) => "<article class='pipeline-node " + esc(item.status) + "' data-pipeline='" + index + "'><div><h3>" + esc(item.title) + "</h3><p>" + esc(item.summary) + "</p></div><b>" + esc(item.stage) + "</b></article>").join("");
-  $$('[data-pipeline]').forEach(node => node.onclick = () => inspect(pipelineDetails[Number(node.dataset.pipeline)]));
+  // liveWorkflow is the only visible workflow renderer. Keep pipelineDetails
+  // as the inspector source so old deep links and tests remain compatible.
+  const legacyPipeline = $("#pipeline");
+  if (legacyPipeline) legacyPipeline.innerHTML = "";
   renderLiveWorkflow();
 }
 

@@ -79,7 +79,9 @@
       <section class="pipeline-panel panel">
         <div class="panel-head"><div><span>02 / EXECUTION GRAPH</span><h1>可解释 Pipeline</h1></div><b>可观测状态，不是思维链</b></div>
         <div id="liveWorkflow" class="live-workflow" aria-live="polite"></div>
-        <div id="pipeline" class="pipeline"></div>
+        <!-- Kept as a compatibility target for deep links; liveWorkflow is the
+             single rendered workflow surface. -->
+        <div id="pipeline" class="pipeline compatibility-surface" hidden></div>
         <div class="decision-block"><span>INTERVENTION OUTPUT</span><div id="decision"></div></div>
         <div id="memoryCandidate"></div>
       </section>
@@ -123,12 +125,12 @@
       <details><summary>保留期限</summary><div id="privacyRetention" class="privacy-retention"></div></details>
     </section>
 
-    <section class="timeline-panel panel">
+    <section class="timeline-panel panel audit-timeline">
       <div class="panel-head"><div><span>04 / CAUSAL TIMELINE</span><h1>统一事件时间线</h1></div><div class="legend"><i class="input"></i>输入 <i class="decision"></i>决策 <i class="response"></i>响应 <i class="memory"></i>记忆</div></div>
       <div id="timeline" class="timeline"></div>
     </section>
 
-    <section class="analysis-grid">
+    <section class="analysis-grid supporting-evidence">
       <section class="panel">
         <div class="panel-head">
           <div><span>TIMELINE MEMORY SYSTEM</span><h2>TimelineMemory 统一记忆</h2></div>
