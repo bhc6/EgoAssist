@@ -1,0 +1,20 @@
+{
+  "before": {
+    "source": "outputs/router-before-20260908/results.jsonl",
+    "n": 16,
+    "passed": 12,
+    "unavailable": 0,
+    "medianMs": 1302.55,
+    "p95NearestRankMs": 2327.0,
+    "maxMs": 2327.0
+  },
+  "after": {
+    "source": "outputs/router-final-20260908/results.jsonl",
+    "n": 40,
+    "passed": 40,
+    "unavailable": 0,
+    "medianMs": 397.6,
+    "p95NearestRankMs": 869.2,
+    "maxMs": 2050.5
+  }
+}

@@ -1,0 +1,220 @@
+[
+  {
+    "case": "greeting",
+    "repeat": 0,
+    "passed": true,
+    "checks": {
+      "selectedSkill": true,
+      "memoryKind": true
+    },
+    "status": "classified",
+    "latencyMs": 1300.0,
+    "policyVersion": "semantic-turn-router-v6",
+    "timedOut": null,
+    "requestMetrics": null
+  },
+  {
+    "case": "save",
+    "repeat": 0,
+    "passed": false,
+    "checks": {
+      "memoryKind": true,
+      "memoryConsent": false,
+      "value": true
+    },
+    "status": "classified",
+    "latencyMs": 2327.0,
+    "policyVersion": "semantic-turn-router-v6",
+    "timedOut": null,
+    "requestMetrics": null
+  },
+  {
+    "case": "query",
+    "repeat": 0,
+    "passed": true,
+    "checks": {
+      "memoryQuery": true,
+      "memoryKind": true
+    },
+    "status": "classified",
+    "latencyMs": 2284.2,
+    "policyVersion": "semantic-turn-router-v6",
+    "timedOut": null,
+    "requestMetrics": null
+  },
+  {
+    "case": "stop",
+    "repeat": 0,
+    "passed": false,
+    "checks": {
+      "speechControl": false
+    },
+    "status": "invalid",
+    "latencyMs": 1912.7,
+    "policyVersion": "semantic-turn-router-v6",
+    "timedOut": null,
+    "requestMetrics": null
+  },
+  {
+    "case": "negated-stop",
+    "repeat": 0,
+    "passed": true,
+    "checks": {
+      "speechControl": true
+    },
+    "status": "classified",
+    "latencyMs": 1472.5,
+    "policyVersion": "semantic-turn-router-v6",
+    "timedOut": null,
+    "requestMetrics": null
+  },
+  {
+    "case": "skill",
+    "repeat": 0,
+    "passed": true,
+    "checks": {
+      "selectedSkill": true
+    },
+    "status": "classified",
+    "latencyMs": 1562.8,
+    "policyVersion": "semantic-turn-router-v6",
+    "timedOut": null,
+    "requestMetrics": null
+  },
+  {
+    "case": "compound",
+    "repeat": 0,
+    "passed": true,
+    "checks": {
+      "decomposed": true,
+      "delay": true
+    },
+    "status": "classified",
+    "latencyMs": 1297.2,
+    "policyVersion": "semantic-turn-router-v6",
+    "timedOut": null,
+    "requestMetrics": null
+  },
+  {
+    "case": "draft",
+    "repeat": 0,
+    "passed": true,
+    "checks": {
+      "memoryKind": true
+    },
+    "status": "classified",
+    "latencyMs": 1121.7,
+    "policyVersion": "semantic-turn-router-v6",
+    "timedOut": null,
+    "requestMetrics": null
+  },
+  {
+    "case": "greeting",
+    "repeat": 1,
+    "passed": true,
+    "checks": {
+      "selectedSkill": true,
+      "memoryKind": true
+    },
+    "status": "classified",
+    "latencyMs": 1129.4,
+    "policyVersion": "semantic-turn-router-v6",
+    "timedOut": null,
+    "requestMetrics": null
+  },
+  {
+    "case": "save",
+    "repeat": 1,
+    "passed": false,
+    "checks": {
+      "memoryKind": true,
+      "memoryConsent": false,
+      "value": true
+    },
+    "status": "classified",
+    "latencyMs": 1521.3,
+    "policyVersion": "semantic-turn-router-v6",
+    "timedOut": null,
+    "requestMetrics": null
+  },
+  {
+    "case": "query",
+    "repeat": 1,
+    "passed": true,
+    "checks": {
+      "memoryQuery": true,
+      "memoryKind": true
+    },
+    "status": "classified",
+    "latencyMs": 1188.1,
+    "policyVersion": "semantic-turn-router-v6",
+    "timedOut": null,
+    "requestMetrics": null
+  },
+  {
+    "case": "stop",
+    "repeat": 1,
+    "passed": false,
+    "checks": {
+      "speechControl": false
+    },
+    "status": "invalid",
+    "latencyMs": 1031.3,
+    "policyVersion": "semantic-turn-router-v6",
+    "timedOut": null,
+    "requestMetrics": null
+  },
+  {
+    "case": "negated-stop",
+    "repeat": 1,
+    "passed": true,
+    "checks": {
+      "speechControl": true
+    },
+    "status": "classified",
+    "latencyMs": 1043.6,
+    "policyVersion": "semantic-turn-router-v6",
+    "timedOut": null,
+    "requestMetrics": null
+  },
+  {
+    "case": "skill",
+    "repeat": 1,
+    "passed": true,
+    "checks": {
+      "selectedSkill": true
+    },
+    "status": "classified",
+    "latencyMs": 1666.7,
+    "policyVersion": "semantic-turn-router-v6",
+    "timedOut": null,
+    "requestMetrics": null
+  },
+  {
+    "case": "compound",
+    "repeat": 1,
+    "passed": true,
+    "checks": {
+      "decomposed": true,
+      "delay": true
+    },
+    "status": "classified",
+    "latencyMs": 1305.1,
+    "policyVersion": "semantic-turn-router-v6",
+    "timedOut": null,
+    "requestMetrics": null
+  },
+  {
+    "case": "draft",
+    "repeat": 1,
+    "passed": true,
+    "checks": {
+      "memoryKind": true
+    },
+    "status": "classified",
+    "latencyMs": 1279.2,
+    "policyVersion": "semantic-turn-router-v6",
+    "timedOut": null,
+    "requestMetrics": null
+  }
+]

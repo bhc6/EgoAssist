@@ -1,0 +1,987 @@
+[
+  {
+    "case": "greeting",
+    "repeat": 0,
+    "passed": true,
+    "checks": {
+      "selectedSkill": true,
+      "memoryKind": true
+    },
+    "status": "classified",
+    "latencyMs": 405.1,
+    "policyVersion": "semantic-turn-router-v7",
+    "timedOut": null,
+    "requestMetrics": {
+      "httpStatus": 200,
+      "usage": {
+        "input_tokens": 1379,
+        "output_tokens": 5,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        },
+        "total_tokens": 1384
+      },
+      "requestId": "768744ae-c619-9e91-ae15-5767c6bedede"
+    }
+  },
+  {
+    "case": "save",
+    "repeat": 0,
+    "passed": true,
+    "checks": {
+      "memoryKind": true,
+      "memoryConsent": true,
+      "value": true
+    },
+    "status": "classified",
+    "latencyMs": 530.4,
+    "policyVersion": "semantic-turn-router-v7",
+    "timedOut": null,
+    "requestMetrics": {
+      "httpStatus": 200,
+      "usage": {
+        "input_tokens": 1385,
+        "output_tokens": 53,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        },
+        "total_tokens": 1438
+      },
+      "requestId": "7a79cede-3dc8-98f3-9a15-8bbfd79377a8"
+    }
+  },
+  {
+    "case": "query",
+    "repeat": 0,
+    "passed": true,
+    "checks": {
+      "memoryQuery": true,
+      "memoryKind": true
+    },
+    "status": "classified",
+    "latencyMs": 374.9,
+    "policyVersion": "semantic-turn-router-v7",
+    "timedOut": null,
+    "requestMetrics": {
+      "httpStatus": 200,
+      "usage": {
+        "input_tokens": 1379,
+        "output_tokens": 19,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        },
+        "total_tokens": 1398
+      },
+      "requestId": "3a405dd3-05e0-992b-a398-b1cb99ea0c78"
+    }
+  },
+  {
+    "case": "stop",
+    "repeat": 0,
+    "passed": true,
+    "checks": {
+      "speechControl": true
+    },
+    "status": "classified",
+    "latencyMs": 328.2,
+    "policyVersion": "semantic-turn-router-v7",
+    "timedOut": null,
+    "requestMetrics": {
+      "httpStatus": 200,
+      "usage": {
+        "input_tokens": 1376,
+        "output_tokens": 11,
+        "prompt_tokens_details": {
+          "cached_tokens": 1152
+        },
+        "total_tokens": 1387
+      },
+      "requestId": "223c2b2a-350a-9614-9352-128f66f16904"
+    }
+  },
+  {
+    "case": "negated-stop",
+    "repeat": 0,
+    "passed": true,
+    "checks": {
+      "speechControl": true
+    },
+    "status": "classified",
+    "latencyMs": 360.8,
+    "policyVersion": "semantic-turn-router-v7",
+    "timedOut": null,
+    "requestMetrics": {
+      "httpStatus": 200,
+      "usage": {
+        "input_tokens": 1379,
+        "output_tokens": 5,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        },
+        "total_tokens": 1384
+      },
+      "requestId": "90a48dc6-ed6c-9753-ad81-40b2f91e9c4d"
+    }
+  },
+  {
+    "case": "skill",
+    "repeat": 0,
+    "passed": true,
+    "checks": {
+      "selectedSkill": true
+    },
+    "status": "classified",
+    "latencyMs": 257.8,
+    "policyVersion": "semantic-turn-router-v7",
+    "timedOut": null,
+    "requestMetrics": {
+      "httpStatus": 200,
+      "usage": {
+        "input_tokens": 1382,
+        "output_tokens": 12,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        },
+        "total_tokens": 1394
+      },
+      "requestId": "c7d89195-a1df-9028-be17-eff17a8a37ad"
+    }
+  },
+  {
+    "case": "compound",
+    "repeat": 0,
+    "passed": true,
+    "checks": {
+      "decomposed": true,
+      "delay": true
+    },
+    "status": "classified",
+    "latencyMs": 1831.1,
+    "policyVersion": "semantic-turn-router-v7",
+    "timedOut": null,
+    "requestMetrics": {
+      "httpStatus": 200,
+      "usage": {
+        "input_tokens": 1389,
+        "output_tokens": 62,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        },
+        "total_tokens": 1451
+      },
+      "requestId": "8c96dc8e-126c-9a57-ab0e-9c2ddf38eecd"
+    }
+  },
+  {
+    "case": "draft",
+    "repeat": 0,
+    "passed": true,
+    "checks": {
+      "memoryKind": true
+    },
+    "status": "classified",
+    "latencyMs": 453.9,
+    "policyVersion": "semantic-turn-router-v7",
+    "timedOut": null,
+    "requestMetrics": {
+      "httpStatus": 200,
+      "usage": {
+        "input_tokens": 1380,
+        "output_tokens": 31,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        },
+        "total_tokens": 1411
+      },
+      "requestId": "3d335051-1526-9a08-ae7f-8eec43f0633d"
+    }
+  },
+  {
+    "case": "greeting",
+    "repeat": 1,
+    "passed": true,
+    "checks": {
+      "selectedSkill": true,
+      "memoryKind": true
+    },
+    "status": "classified",
+    "latencyMs": 259.1,
+    "policyVersion": "semantic-turn-router-v7",
+    "timedOut": null,
+    "requestMetrics": {
+      "httpStatus": 200,
+      "usage": {
+        "input_tokens": 1379,
+        "output_tokens": 5,
+        "prompt_tokens_details": {
+          "cached_tokens": 1280
+        },
+        "total_tokens": 1384
+      },
+      "requestId": "85f36f2d-950a-93fd-852c-795f0fc42982"
+    }
+  },
+  {
+    "case": "save",
+    "repeat": 1,
+    "passed": true,
+    "checks": {
+      "memoryKind": true,
+      "memoryConsent": true,
+      "value": true
+    },
+    "status": "classified",
+    "latencyMs": 869.2,
+    "policyVersion": "semantic-turn-router-v7",
+    "timedOut": null,
+    "requestMetrics": {
+      "httpStatus": 200,
+      "usage": {
+        "input_tokens": 1385,
+        "output_tokens": 53,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        },
+        "total_tokens": 1438
+      },
+      "requestId": "fc6b4047-9f56-9e5d-a01d-7d78469bc461"
+    }
+  },
+  {
+    "case": "query",
+    "repeat": 1,
+    "passed": true,
+    "checks": {
+      "memoryQuery": true,
+      "memoryKind": true
+    },
+    "status": "classified",
+    "latencyMs": 329.6,
+    "policyVersion": "semantic-turn-router-v7",
+    "timedOut": null,
+    "requestMetrics": {
+      "httpStatus": 200,
+      "usage": {
+        "input_tokens": 1379,
+        "output_tokens": 19,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        },
+        "total_tokens": 1398
+      },
+      "requestId": "04ac3595-c43a-9143-a78a-410f9ec3f310"
+    }
+  },
+  {
+    "case": "stop",
+    "repeat": 1,
+    "passed": true,
+    "checks": {
+      "speechControl": true
+    },
+    "status": "classified",
+    "latencyMs": 410.4,
+    "policyVersion": "semantic-turn-router-v7",
+    "timedOut": null,
+    "requestMetrics": {
+      "httpStatus": 200,
+      "usage": {
+        "input_tokens": 1376,
+        "output_tokens": 11,
+        "prompt_tokens_details": {
+          "cached_tokens": 1280
+        },
+        "total_tokens": 1387
+      },
+      "requestId": "6daf0cf7-89df-9464-9e58-12b1215e98b0"
+    }
+  },
+  {
+    "case": "negated-stop",
+    "repeat": 1,
+    "passed": true,
+    "checks": {
+      "speechControl": true
+    },
+    "status": "classified",
+    "latencyMs": 283.6,
+    "policyVersion": "semantic-turn-router-v7",
+    "timedOut": null,
+    "requestMetrics": {
+      "httpStatus": 200,
+      "usage": {
+        "input_tokens": 1379,
+        "output_tokens": 5,
+        "prompt_tokens_details": {
+          "cached_tokens": 1280
+        },
+        "total_tokens": 1384
+      },
+      "requestId": "16d8403b-35d4-935a-92ad-5b69daca607d"
+    }
+  },
+  {
+    "case": "skill",
+    "repeat": 1,
+    "passed": true,
+    "checks": {
+      "selectedSkill": true
+    },
+    "status": "classified",
+    "latencyMs": 238.9,
+    "policyVersion": "semantic-turn-router-v7",
+    "timedOut": null,
+    "requestMetrics": {
+      "httpStatus": 200,
+      "usage": {
+        "input_tokens": 1382,
+        "output_tokens": 12,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        },
+        "total_tokens": 1394
+      },
+      "requestId": "b6e98340-db5c-976c-9688-7e0f34e5af90"
+    }
+  },
+  {
+    "case": "compound",
+    "repeat": 1,
+    "passed": true,
+    "checks": {
+      "decomposed": true,
+      "delay": true
+    },
+    "status": "classified",
+    "latencyMs": 635.2,
+    "policyVersion": "semantic-turn-router-v7",
+    "timedOut": null,
+    "requestMetrics": {
+      "httpStatus": 200,
+      "usage": {
+        "input_tokens": 1389,
+        "output_tokens": 62,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        },
+        "total_tokens": 1451
+      },
+      "requestId": "8e5a44fb-5010-9353-bf4d-79e6b78963cf"
+    }
+  },
+  {
+    "case": "draft",
+    "repeat": 1,
+    "passed": true,
+    "checks": {
+      "memoryKind": true
+    },
+    "status": "classified",
+    "latencyMs": 469.1,
+    "policyVersion": "semantic-turn-router-v7",
+    "timedOut": null,
+    "requestMetrics": {
+      "httpStatus": 200,
+      "usage": {
+        "input_tokens": 1380,
+        "output_tokens": 31,
+        "prompt_tokens_details": {
+          "cached_tokens": 1280
+        },
+        "total_tokens": 1411
+      },
+      "requestId": "08e30590-366e-9846-abd0-9762bc6e0e20"
+    }
+  },
+  {
+    "case": "greeting",
+    "repeat": 2,
+    "passed": true,
+    "checks": {
+      "selectedSkill": true,
+      "memoryKind": true
+    },
+    "status": "classified",
+    "latencyMs": 307.9,
+    "policyVersion": "semantic-turn-router-v7",
+    "timedOut": null,
+    "requestMetrics": {
+      "httpStatus": 200,
+      "usage": {
+        "input_tokens": 1379,
+        "output_tokens": 5,
+        "prompt_tokens_details": {
+          "cached_tokens": 1280
+        },
+        "total_tokens": 1384
+      },
+      "requestId": "e5102636-7d13-95d5-8ce5-802c0598b2ab"
+    }
+  },
+  {
+    "case": "save",
+    "repeat": 2,
+    "passed": true,
+    "checks": {
+      "memoryKind": true,
+      "memoryConsent": true,
+      "value": true
+    },
+    "status": "classified",
+    "latencyMs": 689.7,
+    "policyVersion": "semantic-turn-router-v7",
+    "timedOut": null,
+    "requestMetrics": {
+      "httpStatus": 200,
+      "usage": {
+        "input_tokens": 1385,
+        "output_tokens": 53,
+        "prompt_tokens_details": {
+          "cached_tokens": 1280
+        },
+        "total_tokens": 1438
+      },
+      "requestId": "357ac6bb-8a53-9fe1-b67f-4782a61040d0"
+    }
+  },
+  {
+    "case": "query",
+    "repeat": 2,
+    "passed": true,
+    "checks": {
+      "memoryQuery": true,
+      "memoryKind": true
+    },
+    "status": "classified",
+    "latencyMs": 397.8,
+    "policyVersion": "semantic-turn-router-v7",
+    "timedOut": null,
+    "requestMetrics": {
+      "httpStatus": 200,
+      "usage": {
+        "input_tokens": 1379,
+        "output_tokens": 19,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        },
+        "total_tokens": 1398
+      },
+      "requestId": "bd22f929-8e56-9b8d-8bdb-b1ea56f60546"
+    }
+  },
+  {
+    "case": "stop",
+    "repeat": 2,
+    "passed": true,
+    "checks": {
+      "speechControl": true
+    },
+    "status": "classified",
+    "latencyMs": 364.6,
+    "policyVersion": "semantic-turn-router-v7",
+    "timedOut": null,
+    "requestMetrics": {
+      "httpStatus": 200,
+      "usage": {
+        "input_tokens": 1376,
+        "output_tokens": 11,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        },
+        "total_tokens": 1387
+      },
+      "requestId": "3fc31e9e-84dc-9313-9a67-81a5713a3ed4"
+    }
+  },
+  {
+    "case": "negated-stop",
+    "repeat": 2,
+    "passed": true,
+    "checks": {
+      "speechControl": true
+    },
+    "status": "classified",
+    "latencyMs": 241.4,
+    "policyVersion": "semantic-turn-router-v7",
+    "timedOut": null,
+    "requestMetrics": {
+      "httpStatus": 200,
+      "usage": {
+        "input_tokens": 1379,
+        "output_tokens": 5,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        },
+        "total_tokens": 1384
+      },
+      "requestId": "3f40e72a-dfa8-936a-b8f8-106a65ce908e"
+    }
+  },
+  {
+    "case": "skill",
+    "repeat": 2,
+    "passed": true,
+    "checks": {
+      "selectedSkill": true
+    },
+    "status": "classified",
+    "latencyMs": 374.0,
+    "policyVersion": "semantic-turn-router-v7",
+    "timedOut": null,
+    "requestMetrics": {
+      "httpStatus": 200,
+      "usage": {
+        "input_tokens": 1382,
+        "output_tokens": 12,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        },
+        "total_tokens": 1394
+      },
+      "requestId": "af8deacd-2b74-98ce-9ca8-1a7ece2245a7"
+    }
+  },
+  {
+    "case": "compound",
+    "repeat": 2,
+    "passed": true,
+    "checks": {
+      "decomposed": true,
+      "delay": true
+    },
+    "status": "classified",
+    "latencyMs": 652.3,
+    "policyVersion": "semantic-turn-router-v7",
+    "timedOut": null,
+    "requestMetrics": {
+      "httpStatus": 200,
+      "usage": {
+        "input_tokens": 1389,
+        "output_tokens": 62,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        },
+        "total_tokens": 1451
+      },
+      "requestId": "33122a4d-4335-9e3c-affd-9744471002d2"
+    }
+  },
+  {
+    "case": "draft",
+    "repeat": 2,
+    "passed": true,
+    "checks": {
+      "memoryKind": true
+    },
+    "status": "classified",
+    "latencyMs": 2050.5,
+    "policyVersion": "semantic-turn-router-v7",
+    "timedOut": null,
+    "requestMetrics": {
+      "httpStatus": 200,
+      "usage": {
+        "input_tokens": 1380,
+        "output_tokens": 31,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        },
+        "total_tokens": 1411
+      },
+      "requestId": "1df914ab-cc04-9afd-bb5c-118d9820cb55"
+    }
+  },
+  {
+    "case": "greeting",
+    "repeat": 3,
+    "passed": true,
+    "checks": {
+      "selectedSkill": true,
+      "memoryKind": true
+    },
+    "status": "classified",
+    "latencyMs": 335.9,
+    "policyVersion": "semantic-turn-router-v7",
+    "timedOut": null,
+    "requestMetrics": {
+      "httpStatus": 200,
+      "usage": {
+        "input_tokens": 1379,
+        "output_tokens": 5,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        },
+        "total_tokens": 1384
+      },
+      "requestId": "06a9b98a-94c8-9320-afa6-a0d2ec4831f8"
+    }
+  },
+  {
+    "case": "save",
+    "repeat": 3,
+    "passed": true,
+    "checks": {
+      "memoryKind": true,
+      "memoryConsent": true,
+      "value": true
+    },
+    "status": "classified",
+    "latencyMs": 678.3,
+    "policyVersion": "semantic-turn-router-v7",
+    "timedOut": null,
+    "requestMetrics": {
+      "httpStatus": 200,
+      "usage": {
+        "input_tokens": 1385,
+        "output_tokens": 53,
+        "prompt_tokens_details": {
+          "cached_tokens": 1280
+        },
+        "total_tokens": 1438
+      },
+      "requestId": "765c11f0-761f-9f94-bc51-0a7aa2fc2d3f"
+    }
+  },
+  {
+    "case": "query",
+    "repeat": 3,
+    "passed": true,
+    "checks": {
+      "memoryQuery": true,
+      "memoryKind": true
+    },
+    "status": "classified",
+    "latencyMs": 283.7,
+    "policyVersion": "semantic-turn-router-v7",
+    "timedOut": null,
+    "requestMetrics": {
+      "httpStatus": 200,
+      "usage": {
+        "input_tokens": 1379,
+        "output_tokens": 19,
+        "prompt_tokens_details": {
+          "cached_tokens": 1280
+        },
+        "total_tokens": 1398
+      },
+      "requestId": "2c77a010-5382-91e5-8987-112cd22ca337"
+    }
+  },
+  {
+    "case": "stop",
+    "repeat": 3,
+    "passed": true,
+    "checks": {
+      "speechControl": true
+    },
+    "status": "classified",
+    "latencyMs": 297.3,
+    "policyVersion": "semantic-turn-router-v7",
+    "timedOut": null,
+    "requestMetrics": {
+      "httpStatus": 200,
+      "usage": {
+        "input_tokens": 1376,
+        "output_tokens": 11,
+        "prompt_tokens_details": {
+          "cached_tokens": 1280
+        },
+        "total_tokens": 1387
+      },
+      "requestId": "d197af78-339d-9083-92d7-14d5a9b3117f"
+    }
+  },
+  {
+    "case": "negated-stop",
+    "repeat": 3,
+    "passed": true,
+    "checks": {
+      "speechControl": true
+    },
+    "status": "classified",
+    "latencyMs": 607.1,
+    "policyVersion": "semantic-turn-router-v7",
+    "timedOut": null,
+    "requestMetrics": {
+      "httpStatus": 200,
+      "usage": {
+        "input_tokens": 1379,
+        "output_tokens": 5,
+        "prompt_tokens_details": {
+          "cached_tokens": 1280
+        },
+        "total_tokens": 1384
+      },
+      "requestId": "58393a3f-ac8b-979f-ba7c-86f7000e2b5e"
+    }
+  },
+  {
+    "case": "skill",
+    "repeat": 3,
+    "passed": true,
+    "checks": {
+      "selectedSkill": true
+    },
+    "status": "classified",
+    "latencyMs": 275.4,
+    "policyVersion": "semantic-turn-router-v7",
+    "timedOut": null,
+    "requestMetrics": {
+      "httpStatus": 200,
+      "usage": {
+        "input_tokens": 1382,
+        "output_tokens": 12,
+        "prompt_tokens_details": {
+          "cached_tokens": 1280
+        },
+        "total_tokens": 1394
+      },
+      "requestId": "91b43e6a-9cd4-91f6-85b7-414351892105"
+    }
+  },
+  {
+    "case": "compound",
+    "repeat": 3,
+    "passed": true,
+    "checks": {
+      "decomposed": true,
+      "delay": true
+    },
+    "status": "classified",
+    "latencyMs": 573.8,
+    "policyVersion": "semantic-turn-router-v7",
+    "timedOut": null,
+    "requestMetrics": {
+      "httpStatus": 200,
+      "usage": {
+        "input_tokens": 1389,
+        "output_tokens": 62,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        },
+        "total_tokens": 1451
+      },
+      "requestId": "14d3b595-8259-9a2f-ae2e-804e6049df04"
+    }
+  },
+  {
+    "case": "draft",
+    "repeat": 3,
+    "passed": true,
+    "checks": {
+      "memoryKind": true
+    },
+    "status": "classified",
+    "latencyMs": 648.7,
+    "policyVersion": "semantic-turn-router-v7",
+    "timedOut": null,
+    "requestMetrics": {
+      "httpStatus": 200,
+      "usage": {
+        "input_tokens": 1380,
+        "output_tokens": 31,
+        "prompt_tokens_details": {
+          "cached_tokens": 1280
+        },
+        "total_tokens": 1411
+      },
+      "requestId": "1e829846-007c-9046-a79f-7f2b146e62ce"
+    }
+  },
+  {
+    "case": "greeting",
+    "repeat": 4,
+    "passed": true,
+    "checks": {
+      "selectedSkill": true,
+      "memoryKind": true
+    },
+    "status": "classified",
+    "latencyMs": 196.2,
+    "policyVersion": "semantic-turn-router-v7",
+    "timedOut": null,
+    "requestMetrics": {
+      "httpStatus": 200,
+      "usage": {
+        "input_tokens": 1379,
+        "output_tokens": 5,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        },
+        "total_tokens": 1384
+      },
+      "requestId": "2416ac9f-0c4d-922b-8ce0-4b8ed55e3aec"
+    }
+  },
+  {
+    "case": "save",
+    "repeat": 4,
+    "passed": true,
+    "checks": {
+      "memoryKind": true,
+      "memoryConsent": true,
+      "value": true
+    },
+    "status": "classified",
+    "latencyMs": 599.2,
+    "policyVersion": "semantic-turn-router-v7",
+    "timedOut": null,
+    "requestMetrics": {
+      "httpStatus": 200,
+      "usage": {
+        "input_tokens": 1385,
+        "output_tokens": 53,
+        "prompt_tokens_details": {
+          "cached_tokens": 1280
+        },
+        "total_tokens": 1438
+      },
+      "requestId": "1b2cf010-b893-9d6e-abe6-2b8be82f5330"
+    }
+  },
+  {
+    "case": "query",
+    "repeat": 4,
+    "passed": true,
+    "checks": {
+      "memoryQuery": true,
+      "memoryKind": true
+    },
+    "status": "classified",
+    "latencyMs": 426.9,
+    "policyVersion": "semantic-turn-router-v7",
+    "timedOut": null,
+    "requestMetrics": {
+      "httpStatus": 200,
+      "usage": {
+        "input_tokens": 1379,
+        "output_tokens": 19,
+        "prompt_tokens_details": {
+          "cached_tokens": 1280
+        },
+        "total_tokens": 1398
+      },
+      "requestId": "31407cc1-8cd2-9643-b2b5-6647767fdb71"
+    }
+  },
+  {
+    "case": "stop",
+    "repeat": 4,
+    "passed": true,
+    "checks": {
+      "speechControl": true
+    },
+    "status": "classified",
+    "latencyMs": 397.4,
+    "policyVersion": "semantic-turn-router-v7",
+    "timedOut": null,
+    "requestMetrics": {
+      "httpStatus": 200,
+      "usage": {
+        "input_tokens": 1376,
+        "output_tokens": 11,
+        "prompt_tokens_details": {
+          "cached_tokens": 1280
+        },
+        "total_tokens": 1387
+      },
+      "requestId": "99f4260b-91a3-9d37-b59b-1abe935db0cd"
+    }
+  },
+  {
+    "case": "negated-stop",
+    "repeat": 4,
+    "passed": true,
+    "checks": {
+      "speechControl": true
+    },
+    "status": "classified",
+    "latencyMs": 287.2,
+    "policyVersion": "semantic-turn-router-v7",
+    "timedOut": null,
+    "requestMetrics": {
+      "httpStatus": 200,
+      "usage": {
+        "input_tokens": 1379,
+        "output_tokens": 5,
+        "prompt_tokens_details": {
+          "cached_tokens": 1280
+        },
+        "total_tokens": 1384
+      },
+      "requestId": "455ad8fe-37d3-9de6-a130-59cf68561c80"
+    }
+  },
+  {
+    "case": "skill",
+    "repeat": 4,
+    "passed": true,
+    "checks": {
+      "selectedSkill": true
+    },
+    "status": "classified",
+    "latencyMs": 309.0,
+    "policyVersion": "semantic-turn-router-v7",
+    "timedOut": null,
+    "requestMetrics": {
+      "httpStatus": 200,
+      "usage": {
+        "input_tokens": 1382,
+        "output_tokens": 12,
+        "prompt_tokens_details": {
+          "cached_tokens": 1280
+        },
+        "total_tokens": 1394
+      },
+      "requestId": "4d0493bc-9c6f-97b1-9d0a-32f65de7c2ff"
+    }
+  },
+  {
+    "case": "compound",
+    "repeat": 4,
+    "passed": true,
+    "checks": {
+      "decomposed": true,
+      "delay": true
+    },
+    "status": "classified",
+    "latencyMs": 549.3,
+    "policyVersion": "semantic-turn-router-v7",
+    "timedOut": null,
+    "requestMetrics": {
+      "httpStatus": 200,
+      "usage": {
+        "input_tokens": 1389,
+        "output_tokens": 62,
+        "prompt_tokens_details": {
+          "cached_tokens": 1280
+        },
+        "total_tokens": 1451
+      },
+      "requestId": "089cc7de-d3a5-9064-a7c0-4f7bdb8d8935"
+    }
+  },
+  {
+    "case": "draft",
+    "repeat": 4,
+    "passed": true,
+    "checks": {
+      "memoryKind": true
+    },
+    "status": "classified",
+    "latencyMs": 435.3,
+    "policyVersion": "semantic-turn-router-v7",
+    "timedOut": null,
+    "requestMetrics": {
+      "httpStatus": 200,
+      "usage": {
+        "input_tokens": 1380,
+        "output_tokens": 31,
+        "prompt_tokens_details": {
+          "cached_tokens": 1280
+        },
+        "total_tokens": 1411
+      },
+      "requestId": "8d75cc47-83db-9eeb-a2fe-930e146b69a3"
+    }
+  }
+]

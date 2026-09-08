@@ -321,8 +321,8 @@ def test_structured_router_supplies_clock_and_pending_draft_to_provider():
         memory_draft={"subject": "小李", "predicate": "phone", "missingFields": ["value"]},
     )
     asyncio.run(router.classify("是13659892706", []))
-    supplied = json.loads(calls[0]["messages"][1]["content"])
-    assert supplied["transcript"] == "是13659892706"
+    supplied = json.loads(calls[0]["messages"][0]["content"].split('current transcript): ', 1)[1])
+    assert calls[0]["messages"][1]["content"] == "是13659892706"
     assert supplied["clock"]["timezone"] == "Asia/Shanghai"
     assert supplied["pendingMemoryDraft"]["subject"] == "小李"
 
@@ -350,8 +350,8 @@ def test_router_turn_context_is_isolated_between_concurrent_classifications():
     supplied = {}
 
     def generation_call(**kwargs):
-        payload = json.loads(kwargs["messages"][1]["content"])
-        supplied[payload["transcript"]] = payload["previousTurn"]["turnId"]
+        payload = json.loads(kwargs["messages"][0]["content"].split('current transcript): ', 1)[1])
+        supplied[kwargs["messages"][1]["content"]] = payload["previousTurn"]["turnId"]
         return provider_response(decision())
 
     router = SemanticTurnRouter("test-key", generation_call=generation_call)

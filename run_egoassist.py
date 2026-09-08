@@ -6039,6 +6039,7 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                     live_bridges.discard(bridge)
                     await bridge.close()
             finally:
+                await semantic_router.aclose()
                 live_sockets.discard(ws)
                 live_sockets_by_user.get(user_id, set()).discard(ws)
                 live_sockets_by_session.get(session_id, set()).discard(ws)

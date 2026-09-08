@@ -1,0 +1,132 @@
+{
+  "passed": true,
+  "mock": false,
+  "input": "text-control",
+  "microphoneAsrMeasured": false,
+  "runs": [
+    {
+      "connectMs": 721.0,
+      "firstTextMs": 643.2,
+      "firstAudioMs": 855.1,
+      "finishedMs": 2712.0,
+      "routingLatencyMs": [
+        433.0
+      ],
+      "routingStatuses": [
+        "classified"
+      ],
+      "memoryRetrieved": null,
+      "memoryAnswerCorrect": null,
+      "error": null,
+      "scenario": "greeting",
+      "source": "outputs\\realtime-latency-final-20260908\\greeting-1\\acceptance.json",
+      "passed": true
+    },
+    {
+      "connectMs": 239.6,
+      "firstTextMs": 964.0,
+      "firstAudioMs": 1210.3,
+      "finishedMs": 1794.2,
+      "routingLatencyMs": [
+        792.7,
+        449.5
+      ],
+      "routingStatuses": [
+        "classified",
+        "classified"
+      ],
+      "memoryRetrieved": true,
+      "memoryAnswerCorrect": true,
+      "error": null,
+      "scenario": "memory",
+      "source": "outputs\\realtime-latency-final-20260908\\memory-1\\acceptance.json",
+      "passed": true
+    },
+    {
+      "connectMs": 308.1,
+      "firstTextMs": 556.0,
+      "firstAudioMs": 784.2,
+      "finishedMs": 1939.6,
+      "routingLatencyMs": [
+        337.0
+      ],
+      "routingStatuses": [
+        "classified"
+      ],
+      "memoryRetrieved": null,
+      "memoryAnswerCorrect": null,
+      "error": null,
+      "scenario": "greeting",
+      "source": "outputs\\realtime-latency-final-20260908\\greeting-2\\acceptance.json",
+      "passed": true
+    },
+    {
+      "connectMs": 240.8,
+      "firstTextMs": 920.9,
+      "firstAudioMs": 1174.4,
+      "finishedMs": 1673.8,
+      "routingLatencyMs": [
+        805.6,
+        389.7
+      ],
+      "routingStatuses": [
+        "classified",
+        "classified"
+      ],
+      "memoryRetrieved": true,
+      "memoryAnswerCorrect": true,
+      "error": null,
+      "scenario": "memory",
+      "source": "outputs\\realtime-latency-final-20260908\\memory-2\\acceptance.json",
+      "passed": true
+    },
+    {
+      "connectMs": 3262.8,
+      "firstTextMs": 764.9,
+      "firstAudioMs": 984.8,
+      "finishedMs": 2551.0,
+      "routingLatencyMs": [
+        546.8
+      ],
+      "routingStatuses": [
+        "classified"
+      ],
+      "memoryRetrieved": null,
+      "memoryAnswerCorrect": null,
+      "error": null,
+      "scenario": "greeting",
+      "source": "outputs\\realtime-latency-final-20260908\\greeting-3\\acceptance.json",
+      "passed": true
+    },
+    {
+      "connectMs": 240.8,
+      "firstTextMs": 1018.6,
+      "firstAudioMs": 1249.6,
+      "finishedMs": 1824.2,
+      "routingLatencyMs": [
+        1171.7,
+        440.5
+      ],
+      "routingStatuses": [
+        "classified",
+        "classified"
+      ],
+      "memoryRetrieved": true,
+      "memoryAnswerCorrect": true,
+      "error": null,
+      "scenario": "memory",
+      "source": "outputs\\realtime-latency-final-20260908\\memory-3\\acceptance.json",
+      "passed": true
+    }
+  ],
+  "greeting": {
+    "n": 3,
+    "medianFirstAudioMs": 855.1,
+    "maxFirstAudioMs": 984.8
+  },
+  "memory": {
+    "n": 3,
+    "medianFirstAudioMs": 1210.3,
+    "maxFirstAudioMs": 1249.6
+  }
+}
