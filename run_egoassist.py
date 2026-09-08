@@ -1226,6 +1226,14 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                 "jobs": [], "resultInbox": [],
             }
         )
+        # The live state endpoint is polled by the glasses UI. Keep it a small
+        # control-plane snapshot; full history remains available through the
+        # dedicated artifacts/timeline endpoints.
+        if harness_override:
+            for key in ("turnInbox", "intents", "jobs", "resultInbox"):
+                value = work_ledger_snapshot.get(key)
+                if isinstance(value, list):
+                    work_ledger_snapshot[key] = value[-20:]
         visible_artifacts = artifacts_for_runtime(active_runtime, user_scope)
         human_help_summary = (
             human_help_port.public_summary()
