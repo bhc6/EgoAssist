@@ -65,7 +65,7 @@ function renderTurnWorkflow() {
     (answer?.error ? row("失败原因", answer.error) : "") +
     (semantic ? "<details data-disclosure='semantic'><summary>分类结果与依据</summary><pre>" + esc(JSON.stringify(semantic, null, 2)) + "</pre></details>" : "") +
     "<details data-disclosure='events'><summary>本问题运行记录（" + events.length + "）</summary><ol class='workflow-event-list'>" +
-    events.map(e => "<li><time>" + esc(eventTime(e)) + "</time> <button type='button' data-workflow-event='" + esc(e.eventId) + "'>" + esc(e.type) +
+    events.map(e => "<li><time>" + esc(eventTime(e)) + "</time> <button type='button' data-workflow-event='" + esc(e.eventId) + "'>" + esc(e.eventType || e.payload?.eventType || e.type) +
       "</button>" + (e.latencyMs != null ? " · " + esc(e.latencyMs) + " ms" : "") + "</li>").join("") +
     "</ol></details>";
   updateDisclosureHTML(root, html, selectedSessionId + ":" + turn.turnId);

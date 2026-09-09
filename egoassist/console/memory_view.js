@@ -51,7 +51,7 @@ function renderMemoryActivity() {
   const status = document.querySelector("#memoryActivityStatus");
   if (!root) return;
   const events = (state?.events || []).filter(event => {
-    const type = event.type || event.eventType || event.payload?.type;
+    const type = event.eventType || event.payload?.eventType || event.type || event.payload?.type;
     return type && (memoryEventLabels[type] || type.includes("memory"));
   }).slice(-12).reverse();
   if (state?.memory?.candidate) {
@@ -62,7 +62,7 @@ function renderMemoryActivity() {
   }
   if (status) status.textContent = events.length ? "最近 " + events.length + " 个事件" : "暂无记忆事件";
   const html = events.length ? events.map(event => {
-    const type = event.type || event.eventType || event.payload?.type;
+    const type = event.eventType || event.payload?.eventType || event.type || event.payload?.type;
     const payload = event.payload || event;
     const turnId = payload.turnId || payload.origin?.turnId;
     const detail = payload.status || payload.reason || payload.storageScope || payload.method || "已记录";
