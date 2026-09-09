@@ -1,0 +1,105 @@
+{
+  "passed": true,
+  "pageErrors": [],
+  "failedRequests": [],
+  "viewports": [
+    {
+      "width": 1440,
+      "scrollWidth": 1440,
+      "workflowVisible": true
+    },
+    {
+      "width": 390,
+      "scrollWidth": 390,
+      "workflowVisible": true
+    }
+  ],
+  "mock": false,
+  "hardwareMeasured": false,
+  "sessionCreated": true,
+  "proceduralSkillSelected": true,
+  "conversationalSkillReady": true,
+  "assistantCaption": "助手语音字幕 · provider output channel · 已完成样机今天已确认收到，验收尚未完成。",
+  "performance": {
+    "metrics": {
+      "retrievalMs": {
+        "name": "retrievalMs",
+        "value": 4.122,
+        "eventId": "c4c06321b1b84ac7",
+        "responseId": null,
+        "timestamp": "2026-09-09T02:03:34.385+00:00",
+        "samples": 1,
+        "median": 4.122,
+        "minimum": 4.122,
+        "maximum": 4.122
+      },
+      "writePolicyMs": {
+        "name": "writePolicyMs",
+        "value": 6.72,
+        "eventId": "61e92abd23274e04",
+        "responseId": null,
+        "timestamp": "2026-09-09T02:03:34.393+00:00",
+        "samples": 1,
+        "median": 6.72,
+        "minimum": 6.72,
+        "maximum": 6.72
+      },
+      "routerMs": {
+        "name": "routerMs",
+        "value": 1279.2,
+        "eventId": "063a9f2ab3614205",
+        "responseId": null,
+        "timestamp": "2026-09-09T02:03:34.395+00:00",
+        "samples": 1,
+        "median": 1279.2,
+        "minimum": 1279.2,
+        "maximum": 1279.2
+      },
+      "responseFirstTextMs": {
+        "name": "responseFirstTextMs",
+        "value": 453.786,
+        "eventId": "df7052dfa3194460",
+        "responseId": "resp_JC8sZSc6amTHitdJNVvRW",
+        "timestamp": "2026-09-09T02:03:34.897+00:00",
+        "samples": 1,
+        "median": 453.786,
+        "minimum": 453.786,
+        "maximum": 453.786
+      },
+      "responseFirstAudioMs": {
+        "name": "responseFirstAudioMs",
+        "value": 738.149,
+        "eventId": "65c5f3d2194c449e",
+        "responseId": "resp_JC8sZSc6amTHitdJNVvRW",
+        "timestamp": "2026-09-09T02:03:35.181+00:00",
+        "samples": 1,
+        "median": 738.149,
+        "minimum": 738.149,
+        "maximum": 738.149
+      }
+    },
+    "latestUsage": {
+      "responseId": "resp_JC8sZSc6amTHitdJNVvRW",
+      "eventId": "c6ca1963fcc54d61",
+      "status": "response.done",
+      "inputTokens": 1510,
+      "outputTokens": 50,
+      "totalTokens": 1560,
+      "inputTokenDetails": {
+        "text_tokens": 1510
+      },
+      "outputTokenDetails": {
+        "text_tokens": 13,
+        "audio_tokens": 37
+      }
+    },
+    "timeouts": 0,
+    "windowEvents": 45,
+    "windowLimit": 160,
+    "claimBoundary": "Measured stages from the current session's latest 160 events. Response first output starts at response request, excluding routing, microphone endpointing and playback. Separate stages may belong to different turns; do not sum them."
+  },
+  "realTextTurn": true,
+  "sessionRestoredAfterLogin": true,
+  "performanceRestoredAfterLogin": true,
+  "sourceReport": "outputs/social-memory-browser-release-20260909/acceptance.json"
+}

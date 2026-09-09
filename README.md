@@ -5,7 +5,12 @@ explicit Skill/task state, scoped memory and an auditable browser console.
 The current validation covers software workflows; physical glasses, continuous
 visual task verification and production reliability require separate evaluation.
 
-Latest review: [Skill architecture, product boundaries and real-provider validation
+Latest memory audit: [social interaction, civil time, data ownership and live performance
+(2026-09-09)](docs/SOCIAL_TEMPORAL_MEMORY_2026-09-09.md), including real-provider failures and final validation.
+The console includes cited daily/weekly/monthly reports and optional online suggestions.
+[Prompt assets and tuning](egoassist/prompts/README.md) document the editable policies and actual-request audit.
+
+Skill review: [Skill architecture, product boundaries and real-provider validation
 (2026-09-09)](docs/SKILLS_ARCHITECTURE_2026-09-09.md). It includes failed trials,
 fixes, latency measurements and the distinction between model proposals and
 executed actions. Earlier [memory latency analysis](docs/MEMORY_SKILLS_VALIDATION_2026-09-09.md)

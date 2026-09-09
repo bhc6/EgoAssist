@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from egoassist.prompts import prompt_text
+
 import json
 import re
 from dataclasses import asdict, dataclass
@@ -123,7 +125,7 @@ class TaskSpec:
 
     def realtime_instructions(self, memories: list[dict[str, Any]]) -> str:
         steps = "\n".join(
-            f"{index + 1}. [{step.id}] {step.title}: {step.instruction}; 完成证据: {step.completion}; 风险: {step.risk}; 来源: {step.source}"
+            prompt_text('task/realtime_instructions.1', v0=index + 1, v1=step.id, v2=step.title, v3=step.instruction, v4=step.completion, v5=step.risk, v6=step.source)
             for index, step in enumerate(self.steps)
         )
         memory = "\n".join(
@@ -132,14 +134,7 @@ class TaskSpec:
         ) or "- 暂无用户确认的长期偏好"
         safety = "\n".join(f"- {item}" for item in self.safety_policy)
         return (
-            f"你是{self.role}。当前任务是《{self.title}》，流程版本 {self.version}，来源 {self.provenance}。\n"
-            "你会持续收到第一视角视频和用户语音。自然交流，可被用户随时打断。"
-            "只依据当前可见证据、任务规范和已确认记忆；看不清就询问，不猜测。"
-            "任务步骤是可解释的目标与前置证据地图，不是必须逐字播放的说明书。现场路径偏离时先判断安全和依赖关系，"
-            "允许回退、澄清、恢复或用户确认后的顺序调整，不得为追赶步骤而忽略现场证据。"
-            "不要逐帧播报，也不要每步都打断；仅在用户请求、明显风险、需要确认的偏离或下一条短提示确有帮助时说话。"
-            "每次最多给一个动作。看到可能完成时先请用户确认，只有用户明确确认后结构化状态才推进。\n"
-            f"任务步骤：\n{steps}\n安全策略：\n{safety}\n长期个人记忆：\n{memory}"
+            prompt_text('task/realtime_instructions.2', v0=self.role, v1=self.title, v2=self.version, v3=self.provenance, v4=steps, v5=safety, v6=memory)
         )
 
     def to_dict(self) -> dict[str, Any]:

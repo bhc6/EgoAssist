@@ -220,16 +220,32 @@ class PrivacyGovernance:
             "product": self.product_database.export_user(user_id),
             "timelineMemory": self.timeline.export_user(user_id),
             "journals": [],
+            "complete": True,
+            "exportErrors": [],
             "evaluationOutcomes": self.outcome_ledger.records_for_user(user_id) if self.outcome_ledger else [],
         }
         journal_root = self.user_memory_root / user_id / "sessions"
         if journal_root.exists():
             for path in sorted(journal_root.glob("*.jsonl")):
                 try:
-                    entries = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
-                except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+                    raw = path.read_text(encoding="utf-8")
+                except (OSError, UnicodeDecodeError) as exc:
+                    result["complete"] = False
+                    result["exportErrors"].append({"sessionId": path.stem, "error": type(exc).__name__})
                     continue
-                result["journals"].append({"sessionId": path.stem, "entries": entries})
+                entries, invalid_lines = [], []
+                for number, line in enumerate(raw.splitlines(), 1):
+                    if not line.strip():
+                        continue
+                    try:
+                        entries.append(json.loads(line))
+                    except json.JSONDecodeError:
+                        invalid_lines.append({"line": number, "raw": line})
+                if invalid_lines:
+                    result["complete"] = False
+                    result["exportErrors"].append({"sessionId": path.stem, "error": "invalid-journal-lines",
+                                                   "lines": [item["line"] for item in invalid_lines]})
+                result["journals"].append({"sessionId": path.stem, "entries": entries, "invalidLines": invalid_lines})
         legacy_root = self.user_memory_root / user_id
         for path in sorted(legacy_root.rglob("*")) if legacy_root.exists() else []:
             if not path.is_file() or path.parent == journal_root:
@@ -242,6 +258,7 @@ class PrivacyGovernance:
                     content = raw
                 result.setdefault("legacyFiles", []).append({"path": str(path.relative_to(legacy_root)), "content": content})
             except (OSError, UnicodeDecodeError):
+                result["complete"] = False
                 result.setdefault("legacyFiles", []).append({"path": str(path.relative_to(legacy_root)), "unreadable": True})
         return result
 

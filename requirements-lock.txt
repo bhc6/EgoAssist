@@ -47,6 +47,7 @@ pydantic-core==2.46.4
 Pygments==2.20.0
 python-dotenv==1.2.2
 PyYAML==6.0.3
+tzdata==2026.3
 requests==2.34.2
 SQLAlchemy==2.0.51
 temporalio==1.31.0

@@ -10,6 +10,8 @@
 
 from __future__ import annotations
 
+from egoassist.prompts import prompt_text
+
 import base64
 import io
 import re
@@ -22,12 +24,9 @@ from .devices import preferred_dtype, resolve_device
 from .encoders import ClipEncoder, _to_pil
 
 _SYS = (
-    "You answer questions about a user's egocentric (first-person) day, using ONLY the "
-    "provided memory evidence (images + captions). If the evidence is insufficient to "
-    "answer confidently, say you are not sure rather than guessing. "
-    "Always end with a separate line exactly like 'CONFIDENCE: 0.NN' giving your certainty in [0,1]."
+    prompt_text('real/_SYS.1')
 )
-_CAP = "Describe this first-person moment in one short sentence: key objects, people, and action."
+_CAP = prompt_text('real/_CAP.1')
 
 
 def _build_prompt(query: str, evidence_texts: list[str],
@@ -35,7 +34,7 @@ def _build_prompt(query: str, evidence_texts: list[str],
     """把时间上下文、证据 caption、问题拼成最终 prompt。"""
     ev = "\n".join(f"- {c}" for c in evidence_texts[:5])
     time_line = (f"[Memory evidence from {event_time}]\n" if event_time else "")
-    return f"{time_line}Memory captions:\n{ev}\n\nQuestion: {query}"
+    return prompt_text('real/_build_prompt.1', v0=time_line, v1=ev, v2=query)
 
 
 def _parse_conf(text: str, default: float = 0.5) -> float:

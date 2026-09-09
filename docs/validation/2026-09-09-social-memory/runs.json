@@ -1,0 +1,1324 @@
+[
+  {
+    "source": "outputs/social-memory-20260909-1/acceptance.json",
+    "passed": false,
+    "error": "AssertionError: {'input': '张岚和李宁昨天在咖啡馆讨论的前天的约定是什么？请简短回答。', 'audioPackets': 26, 'firstTextMs': 1601.7, 'firstAudioMs': 1891.5, 'transcript': '前天也就是2026年9月7日，张岚和李宁在咖啡馆讨论的约定是：由张岚把红色文件交给赵宇。', 'terminal': {'sequence': 1, 'status': 'response.done', 'usage': {'inputTokens': 2693, 'outputTokens': 139, 'totalTokens': 2832, 'inputTokenDetails': {'text_tokens': 2693}, 'outputTokenDetails': {'text_tokens': 35, 'audio_tokens': 104}}, 'fragmentCommitted': True, 'interrupted': False, 'localCancelRequested': False}, 'finishedMs': 3499.3}",
+    "routerVersions": [
+      "semantic-turn-router-v10"
+    ],
+    "routerMs": [
+      2281.7,
+      1799.9,
+      1017.2
+    ],
+    "writes": [
+      {
+        "input": "请记住：2026-09-08张岚和李宁在咖啡馆讨论了2026-09-07的约定：由李宁把编号QA3477E的青色样机交给王梅。",
+        "receipt": {
+          "type": "memory_status",
+          "status": "committed",
+          "message": "已保存：2026-09-08张岚和李宁在咖啡馆讨论了2026-09-07的约定：由李宁把编号QA3477E的青色样机交给王梅。",
+          "committedCardIds": [
+            "ffef6b828b914856"
+          ]
+        },
+        "receiptMs": 2361.4
+      },
+      {
+        "input": "请记住：2026-09-07张岚和李宁在咖啡馆讨论了2026-09-08的约定：由张岚把红色文件交给赵宇。",
+        "receipt": {
+          "type": "memory_status",
+          "status": "committed",
+          "message": "已保存：2026-09-07张岚和李宁在咖啡馆讨论了2026-09-08的约定：由张岚把红色文件交给赵宇。",
+          "committedCardIds": [
+            "8fa1ec5a9f12441d"
+          ]
+        },
+        "receiptMs": 1870.8
+      }
+    ],
+    "turns": [
+      {
+        "input": "张岚和李宁昨天在咖啡馆讨论的前天的约定是什么？请简短回答。",
+        "audioPackets": 26,
+        "firstTextMs": 1601.7,
+        "firstAudioMs": 1891.5,
+        "transcript": "前天也就是2026年9月7日，张岚和李宁在咖啡馆讨论的约定是：由张岚把红色文件交给赵宇。",
+        "terminal": {
+          "sequence": 1,
+          "status": "response.done",
+          "usage": {
+            "inputTokens": 2693,
+            "outputTokens": 139,
+            "totalTokens": 2832,
+            "inputTokenDetails": {
+              "text_tokens": 2693
+            },
+            "outputTokenDetails": {
+              "text_tokens": 35,
+              "audio_tokens": 104
+            }
+          },
+          "fragmentCommitted": true,
+          "interrupted": false,
+          "localCancelRequested": false
+        },
+        "finishedMs": 3499.3
+      }
+    ]
+  },
+  {
+    "source": "outputs/social-memory-20260909-2/acceptance.json",
+    "passed": false,
+    "error": "KeyError: 'evidence'",
+    "routerVersions": [
+      "semantic-turn-router-v10"
+    ],
+    "routerMs": [
+      2546.6,
+      2207,
+      889.3
+    ],
+    "writes": [
+      {
+        "input": "请记住：2026-09-08张岚和李宁在咖啡馆讨论了2026-09-07的约定：由李宁把编号Q61DD04的青色样机交给王梅。",
+        "receipt": {
+          "type": "memory_status",
+          "status": "committed",
+          "message": "已保存：2026-09-08张岚和李宁在咖啡馆讨论了2026-09-07的约定：由李宁把编号Q61DD04的青色样机交给王梅。",
+          "committedCardIds": [
+            "7578135be47e46ad"
+          ]
+        },
+        "receiptMs": 2617.7
+      },
+      {
+        "input": "请记住：2026-09-07张岚和李宁在咖啡馆讨论了2026-09-08的约定：由张岚把红色文件交给赵宇。",
+        "receipt": {
+          "type": "memory_status",
+          "status": "committed",
+          "message": "已保存：2026-09-07张岚和李宁在咖啡馆讨论了2026-09-08的约定：由张岚把红色文件交给赵宇。",
+          "committedCardIds": [
+            "a68c2e29d3104ba2"
+          ]
+        },
+        "receiptMs": 2274.4
+      }
+    ],
+    "turns": [
+      {
+        "input": "张岚和李宁昨天在咖啡馆讨论的前天的约定是什么？请简短回答。",
+        "audioPackets": 29,
+        "firstTextMs": 1422.5,
+        "firstAudioMs": 1683.1,
+        "transcript": "前天的约定是：由李宁把编号Q61DD04的青色样机交给王梅。",
+        "terminal": {
+          "sequence": 1,
+          "status": "response.done",
+          "usage": {
+            "inputTokens": 1931,
+            "outputTokens": 139,
+            "totalTokens": 2070,
+            "inputTokenDetails": {
+              "text_tokens": 1931
+            },
+            "outputTokenDetails": {
+              "text_tokens": 25,
+              "audio_tokens": 114
+            }
+          },
+          "fragmentCommitted": true,
+          "interrupted": false,
+          "localCancelRequested": false
+        },
+        "finishedMs": 3331.8
+      }
+    ],
+    "performance": {
+      "metrics": {
+        "retrievalMs": {
+          "name": "retrievalMs",
+          "value": 5.076,
+          "eventId": "629443c4602a4b20",
+          "responseId": null,
+          "timestamp": "2026-09-09T01:28:37.584+00:00",
+          "samples": 1,
+          "median": 5.076,
+          "minimum": 5.076,
+          "maximum": 5.076
+        },
+        "routerMs": {
+          "name": "routerMs",
+          "value": 889.3,
+          "eventId": "bffeb635d019435a",
+          "responseId": null,
+          "timestamp": "2026-09-09T01:28:37.589+00:00",
+          "samples": 1,
+          "median": 889.3,
+          "minimum": 889.3,
+          "maximum": 889.3
+        },
+        "responseFirstTextMs": {
+          "name": "responseFirstTextMs",
+          "value": 472.982,
+          "eventId": "09346b4229db4ff2",
+          "responseId": "resp_GedGWyiM6IxkDmE2tV4m3",
+          "timestamp": "2026-09-09T01:28:38.098+00:00",
+          "samples": 1,
+          "median": 472.982,
+          "minimum": 472.982,
+          "maximum": 472.982
+        },
+        "responseFirstAudioMs": {
+          "name": "responseFirstAudioMs",
+          "value": 733.18,
+          "eventId": "c39cbcfad70642e7",
+          "responseId": "resp_GedGWyiM6IxkDmE2tV4m3",
+          "timestamp": "2026-09-09T01:28:38.358+00:00",
+          "samples": 1,
+          "median": 733.18,
+          "minimum": 733.18,
+          "maximum": 733.18
+        }
+      },
+      "latestUsage": {
+        "responseId": "resp_GedGWyiM6IxkDmE2tV4m3",
+        "eventId": "a22e674bd2834520",
+        "status": "response.done",
+        "inputTokens": 1931,
+        "outputTokens": 139,
+        "totalTokens": 2070,
+        "inputTokenDetails": {
+          "text_tokens": 1931
+        },
+        "outputTokenDetails": {
+          "text_tokens": 25,
+          "audio_tokens": 114
+        }
+      },
+      "timeouts": 0,
+      "windowEvents": 34,
+      "windowLimit": 160,
+      "claimBoundary": "Measured stages from the current session's latest 160 events. Response first output starts at response request, excluding routing, microphone endpointing and playback. Separate stages may belong to different turns; do not sum them."
+    }
+  },
+  {
+    "source": "outputs/social-memory-20260909-3/acceptance.json",
+    "passed": false,
+    "error": "AssertionError: {'input': '张岚和李宁昨天在咖啡馆讨论的前天的约定是什么？请简短回答。', 'audioPackets': 25, 'firstTextMs': 1418.6, 'firstAudioMs': 1705.1, 'transcript': '前天是2026年9月7日，张岚和李宁在咖啡馆讨论了由张岚把红色文件交给赵宇的约定。', 'terminal': {'sequence': 1, 'status': 'response.done', 'usage': {'inputTokens': 2483, 'outputTokens': 130, 'totalTokens': 2613, 'inputTokenDetails': {'text_tokens': 2483}, 'outputTokenDetails': {'text_tokens': 33, 'audio_tokens': 97}}, 'fragmentCommitted': True, 'interrupted': False, 'localCancelRequested': False}, 'finishedMs': 3202.6}",
+    "routerVersions": [
+      "semantic-turn-router-v10"
+    ],
+    "routerMs": [
+      3004.7,
+      1514.9,
+      880.1
+    ],
+    "writes": [
+      {
+        "input": "请记住：2026-09-08张岚和李宁在咖啡馆讨论了2026-09-07的约定：由李宁把编号QFF06B1的青色样机交给王梅。",
+        "receipt": {
+          "type": "memory_status",
+          "status": "committed",
+          "message": "已保存：请记住：2026-09-08张岚和李宁在咖啡馆讨论了2026-09-07的约定：由李宁把编号QFF06B1的青色样机交给王梅。",
+          "committedCardIds": [
+            "d7d82b34794c43ae"
+          ]
+        },
+        "receiptMs": 3078
+      },
+      {
+        "input": "请记住：2026-09-07张岚和李宁在咖啡馆讨论了2026-09-08的约定：由张岚把红色文件交给赵宇。",
+        "receipt": {
+          "type": "memory_status",
+          "status": "committed",
+          "message": "已保存：2026-09-07张岚和李宁在咖啡馆讨论了2026-09-08的约定：由张岚把红色文件交给赵宇。",
+          "committedCardIds": [
+            "7fa32aa7b11b4738"
+          ]
+        },
+        "receiptMs": 1580.8
+      }
+    ],
+    "turns": [
+      {
+        "input": "张岚和李宁昨天在咖啡馆讨论的前天的约定是什么？请简短回答。",
+        "audioPackets": 25,
+        "firstTextMs": 1418.6,
+        "firstAudioMs": 1705.1,
+        "transcript": "前天是2026年9月7日，张岚和李宁在咖啡馆讨论了由张岚把红色文件交给赵宇的约定。",
+        "terminal": {
+          "sequence": 1,
+          "status": "response.done",
+          "usage": {
+            "inputTokens": 2483,
+            "outputTokens": 130,
+            "totalTokens": 2613,
+            "inputTokenDetails": {
+              "text_tokens": 2483
+            },
+            "outputTokenDetails": {
+              "text_tokens": 33,
+              "audio_tokens": 97
+            }
+          },
+          "fragmentCommitted": true,
+          "interrupted": false,
+          "localCancelRequested": false
+        },
+        "finishedMs": 3202.6
+      }
+    ]
+  },
+  {
+    "source": "outputs/social-memory-20260909-4/acceptance.json",
+    "passed": true,
+    "routerVersions": [
+      "semantic-turn-router-v11"
+    ],
+    "routerMs": [
+      2194.6,
+      1885.3,
+      1153.6
+    ],
+    "writes": [
+      {
+        "input": "请记住：2026-09-08张岚和李宁在咖啡馆讨论了2026-09-07的约定：由李宁把编号Q221DC1的青色样机交给王梅。",
+        "receipt": {
+          "type": "memory_status",
+          "status": "committed",
+          "message": "已保存：2026-09-08张岚和李宁在咖啡馆讨论了2026-09-07的约定：由李宁把编号Q221DC1的青色样机交给王梅。",
+          "committedCardIds": [
+            "38f8cfd90fad4262"
+          ]
+        },
+        "receiptMs": 2265
+      },
+      {
+        "input": "请记住：2026-09-07张岚和李宁在咖啡馆讨论了2026-09-08的约定：由张岚把红色文件交给赵宇。",
+        "receipt": {
+          "type": "memory_status",
+          "status": "committed",
+          "message": "已保存：2026-09-07张岚和李宁在咖啡馆讨论了2026-09-08的约定：由张岚把红色文件交给赵宇。",
+          "committedCardIds": [
+            "7ff7c490f76e4865"
+          ]
+        },
+        "receiptMs": 1952.5
+      }
+    ],
+    "turns": [
+      {
+        "input": "张岚和李宁昨天在咖啡馆讨论的前天的约定是什么？请简短回答。",
+        "audioPackets": 22,
+        "firstTextMs": 1671.3,
+        "firstAudioMs": 1930,
+        "transcript": "前天的约定是，由李宁把编号Q221DC1的青色样机交给王梅。",
+        "terminal": {
+          "sequence": 1,
+          "status": "response.done",
+          "usage": {
+            "inputTokens": 2025,
+            "outputTokens": 110,
+            "totalTokens": 2135,
+            "inputTokenDetails": {
+              "text_tokens": 2025
+            },
+            "outputTokenDetails": {
+              "text_tokens": 25,
+              "audio_tokens": 85
+            }
+          },
+          "fragmentCommitted": true,
+          "interrupted": false,
+          "localCancelRequested": false
+        },
+        "finishedMs": 3230.6
+      }
+    ],
+    "performance": {
+      "metrics": {
+        "retrievalMs": {
+          "name": "retrievalMs",
+          "value": 7.618,
+          "eventId": "f88ce5aaa0d84b80",
+          "responseId": null,
+          "timestamp": "2026-09-09T01:37:16.266+00:00",
+          "samples": 1,
+          "median": 7.618,
+          "minimum": 7.618,
+          "maximum": 7.618
+        },
+        "routerMs": {
+          "name": "routerMs",
+          "value": 1153.6,
+          "eventId": "b766783dd7014ef6",
+          "responseId": null,
+          "timestamp": "2026-09-09T01:37:16.272+00:00",
+          "samples": 1,
+          "median": 1153.6,
+          "minimum": 1153.6,
+          "maximum": 1153.6
+        },
+        "responseFirstTextMs": {
+          "name": "responseFirstTextMs",
+          "value": 448.354,
+          "eventId": "35b2acb9084a47d6",
+          "responseId": "resp_TgK8Icqr7hgEDWso2cNFU",
+          "timestamp": "2026-09-09T01:37:16.760+00:00",
+          "samples": 1,
+          "median": 448.354,
+          "minimum": 448.354,
+          "maximum": 448.354
+        },
+        "responseFirstAudioMs": {
+          "name": "responseFirstAudioMs",
+          "value": 706.866,
+          "eventId": "ad7cc6f71a584f8a",
+          "responseId": "resp_TgK8Icqr7hgEDWso2cNFU",
+          "timestamp": "2026-09-09T01:37:17.019+00:00",
+          "samples": 1,
+          "median": 706.866,
+          "minimum": 706.866,
+          "maximum": 706.866
+        }
+      },
+      "latestUsage": {
+        "responseId": "resp_TgK8Icqr7hgEDWso2cNFU",
+        "eventId": "05a821f72abd451b",
+        "status": "response.done",
+        "inputTokens": 2025,
+        "outputTokens": 110,
+        "totalTokens": 2135,
+        "inputTokenDetails": {
+          "text_tokens": 2025
+        },
+        "outputTokenDetails": {
+          "text_tokens": 25,
+          "audio_tokens": 85
+        }
+      },
+      "timeouts": 0,
+      "windowEvents": 34,
+      "windowLimit": 160,
+      "claimBoundary": "Measured stages from the current session's latest 160 events. Response first output starts at response request, excluding routing, microphone endpointing and playback. Separate stages may belong to different turns; do not sum them."
+    }
+  },
+  {
+    "source": "outputs/social-memory-20260909-5/acceptance.json",
+    "passed": true,
+    "routerVersions": [
+      "semantic-turn-router-v12"
+    ],
+    "routerMs": [
+      1687.7,
+      2322.1,
+      862.1
+    ],
+    "writes": [
+      {
+        "input": "请记住：2026-09-08张岚和李宁在咖啡馆讨论了2026-09-07的约定：由李宁把编号Q3A18F0的青色样机交给王梅。",
+        "receipt": {
+          "type": "memory_status",
+          "status": "committed",
+          "message": "已保存：张岚和李宁在咖啡馆讨论了2026-09-07的约定：由李宁把编号Q3A18F0的青色样机交给王梅。",
+          "committedCardIds": [
+            "0967c33660634f83"
+          ]
+        },
+        "receiptMs": 1762.1
+      },
+      {
+        "input": "请记住：2026-09-07张岚和李宁在咖啡馆讨论了2026-09-08的约定：由张岚把红色文件交给赵宇。",
+        "receipt": {
+          "type": "memory_status",
+          "status": "committed",
+          "message": "已保存：2026-09-07张岚和李宁在咖啡馆讨论了2026-09-08的约定：由张岚把红色文件交给赵宇。",
+          "committedCardIds": [
+            "d790f325fd2745d9"
+          ]
+        },
+        "receiptMs": 2388.4
+      }
+    ],
+    "turns": [
+      {
+        "input": "张岚和李宁昨天在咖啡馆讨论的前天的约定是什么？请简短回答。",
+        "audioPackets": 18,
+        "firstTextMs": 1375.3,
+        "firstAudioMs": 1622.6,
+        "transcript": "前天的约定是，由李宁把编号Q3A18F0的青色样机交给王梅。",
+        "terminal": {
+          "sequence": 1,
+          "status": "response.done",
+          "usage": {
+            "inputTokens": 2085,
+            "outputTokens": 97,
+            "totalTokens": 2182,
+            "inputTokenDetails": {
+              "text_tokens": 2085
+            },
+            "outputTokenDetails": {
+              "text_tokens": 26,
+              "audio_tokens": 71
+            }
+          },
+          "fragmentCommitted": true,
+          "interrupted": false,
+          "localCancelRequested": false
+        },
+        "finishedMs": 2795.7
+      }
+    ],
+    "performance": {
+      "metrics": {
+        "retrievalMs": {
+          "name": "retrievalMs",
+          "value": 4.803,
+          "eventId": "5191f8e1066c49ed",
+          "responseId": null,
+          "timestamp": "2026-09-09T01:40:06.168+00:00",
+          "samples": 1,
+          "median": 4.803,
+          "minimum": 4.803,
+          "maximum": 4.803
+        },
+        "routerMs": {
+          "name": "routerMs",
+          "value": 862.1,
+          "eventId": "5c8f6cee796b4e73",
+          "responseId": null,
+          "timestamp": "2026-09-09T01:40:06.173+00:00",
+          "samples": 1,
+          "median": 862.1,
+          "minimum": 862.1,
+          "maximum": 862.1
+        },
+        "responseFirstTextMs": {
+          "name": "responseFirstTextMs",
+          "value": 456.942,
+          "eventId": "d65b7be795324cbd",
+          "responseId": "resp_OGJ1MjmPBbUmwPLIh7xax",
+          "timestamp": "2026-09-09T01:40:06.662+00:00",
+          "samples": 1,
+          "median": 456.942,
+          "minimum": 456.942,
+          "maximum": 456.942
+        },
+        "responseFirstAudioMs": {
+          "name": "responseFirstAudioMs",
+          "value": 703.93,
+          "eventId": "9bbc903b6011412e",
+          "responseId": "resp_OGJ1MjmPBbUmwPLIh7xax",
+          "timestamp": "2026-09-09T01:40:06.909+00:00",
+          "samples": 1,
+          "median": 703.93,
+          "minimum": 703.93,
+          "maximum": 703.93
+        }
+      },
+      "latestUsage": {
+        "responseId": "resp_OGJ1MjmPBbUmwPLIh7xax",
+        "eventId": "b2346d610a4a476c",
+        "status": "response.done",
+        "inputTokens": 2085,
+        "outputTokens": 97,
+        "totalTokens": 2182,
+        "inputTokenDetails": {
+          "text_tokens": 2085
+        },
+        "outputTokenDetails": {
+          "text_tokens": 26,
+          "audio_tokens": 71
+        }
+      },
+      "timeouts": 0,
+      "windowEvents": 34,
+      "windowLimit": 160,
+      "claimBoundary": "Measured stages from the current session's latest 160 events. Response first output starts at response request, excluding routing, microphone endpointing and playback. Separate stages may belong to different turns; do not sum them."
+    }
+  },
+  {
+    "source": "outputs/social-memory-20260909-final/acceptance.json",
+    "passed": true,
+    "routerVersions": [
+      "semantic-turn-router-v12"
+    ],
+    "routerMs": [
+      1493.7,
+      1820.9,
+      1066.8
+    ],
+    "writes": [
+      {
+        "input": "请记住：2026-09-08张岚和李宁在咖啡馆讨论了2026-09-07的约定：由李宁把编号QDC4430的青色样机交给王梅。",
+        "receipt": {
+          "type": "memory_status",
+          "status": "committed",
+          "message": "已保存：请记住：2026-09-08张岚和李宁在咖啡馆讨论了2026-09-07的约定：由李宁把编号QDC4430的青色样机交给王梅。",
+          "committedCardIds": [
+            "3c5f72b01be34397"
+          ]
+        },
+        "receiptMs": 1574.4
+      },
+      {
+        "input": "请记住：2026-09-07张岚和李宁在咖啡馆讨论了2026-09-08的约定：由张岚把红色文件交给赵宇。",
+        "receipt": {
+          "type": "memory_status",
+          "status": "committed",
+          "message": "已保存：请记住：2026-09-07张岚和李宁在咖啡馆讨论了2026-09-08的约定：由张岚把红色文件交给赵宇。",
+          "committedCardIds": [
+            "8a1d7c3f1a434707"
+          ]
+        },
+        "receiptMs": 1898.2
+      }
+    ],
+    "turns": [
+      {
+        "input": "张岚和李宁昨天在咖啡馆讨论的前天的约定是什么？请简短回答。",
+        "audioPackets": 19,
+        "firstTextMs": 1581.4,
+        "firstAudioMs": 1853.3,
+        "transcript": "前天的约定是，李宁把编号QDC4430的青色样机交给王梅。",
+        "terminal": {
+          "sequence": 1,
+          "status": "response.done",
+          "usage": {
+            "inputTokens": 2034,
+            "outputTokens": 99,
+            "totalTokens": 2133,
+            "inputTokenDetails": {
+              "text_tokens": 2034
+            },
+            "outputTokenDetails": {
+              "text_tokens": 24,
+              "audio_tokens": 75
+            }
+          },
+          "fragmentCommitted": true,
+          "interrupted": false,
+          "localCancelRequested": false
+        },
+        "finishedMs": 3151.6
+      }
+    ],
+    "performance": {
+      "metrics": {
+        "retrievalMs": {
+          "name": "retrievalMs",
+          "value": 7.143,
+          "eventId": "006619dfebad4f58",
+          "responseId": null,
+          "timestamp": "2026-09-09T01:45:02.481+00:00",
+          "samples": 1,
+          "median": 7.143,
+          "minimum": 7.143,
+          "maximum": 7.143
+        },
+        "routerMs": {
+          "name": "routerMs",
+          "value": 1066.8,
+          "eventId": "6636b637ed9149fd",
+          "responseId": null,
+          "timestamp": "2026-09-09T01:45:02.487+00:00",
+          "samples": 1,
+          "median": 1066.8,
+          "minimum": 1066.8,
+          "maximum": 1066.8
+        },
+        "responseFirstTextMs": {
+          "name": "responseFirstTextMs",
+          "value": 448.971,
+          "eventId": "729de3d7950e4e07",
+          "responseId": "resp_B4g4Ac9HZ6TjBkXkmrFcH",
+          "timestamp": "2026-09-09T01:45:02.972+00:00",
+          "samples": 1,
+          "median": 448.971,
+          "minimum": 448.971,
+          "maximum": 448.971
+        },
+        "responseFirstAudioMs": {
+          "name": "responseFirstAudioMs",
+          "value": 720.543,
+          "eventId": "df2968dc5eb34d43",
+          "responseId": "resp_B4g4Ac9HZ6TjBkXkmrFcH",
+          "timestamp": "2026-09-09T01:45:03.244+00:00",
+          "samples": 1,
+          "median": 720.543,
+          "minimum": 720.543,
+          "maximum": 720.543
+        }
+      },
+      "latestUsage": {
+        "responseId": "resp_B4g4Ac9HZ6TjBkXkmrFcH",
+        "eventId": "90ee125dadb64f0b",
+        "status": "response.done",
+        "inputTokens": 2034,
+        "outputTokens": 99,
+        "totalTokens": 2133,
+        "inputTokenDetails": {
+          "text_tokens": 2034
+        },
+        "outputTokenDetails": {
+          "text_tokens": 24,
+          "audio_tokens": 75
+        }
+      },
+      "timeouts": 0,
+      "windowEvents": 34,
+      "windowLimit": 160,
+      "claimBoundary": "Measured stages from the current session's latest 160 events. Response first output starts at response request, excluding routing, microphone endpointing and playback. Separate stages may belong to different turns; do not sum them."
+    }
+  },
+  {
+    "source": "outputs/social-memory-anchor-20260909/acceptance.json",
+    "passed": false,
+    "error": "AssertionError: {'input': '陈澄和周岳昨天在实验室讨论的、以那次讨论为参照的前天的约定是什么？请简短回答。', 'audioPackets': 26, 'firstTextMs': 1453.0, 'firstAudioMs': 1717.4, 'transcript': '抱歉，我没有找到关于陈澄和周岳昨天在实验室讨论的前天约定的相关信息。如果您能提供更多细节，我会尽力帮助您。', 'terminal': {'sequence': 1, 'status': 'response.done', 'usage': {'inputTokens': 1330, 'outputTokens': 133, 'totalTokens': 1463, 'inputTokenDetails': {'text_tokens': 1330}, 'outputTokenDetails': {'text_tokens': 30, 'audio_tokens': 103}}, 'fragmentCommitted': True, 'interrupted': False, 'localCancelRequested': False}, 'finishedMs': 3337.9}",
+    "routerVersions": [
+      "semantic-turn-router-v12"
+    ],
+    "routerMs": [
+      1560.9,
+      2505.6,
+      948.2
+    ],
+    "writes": [
+      {
+        "input": "请记住：2026-09-08陈澄和周岳在实验室讨论了2026-09-06的约定：由周岳把编号QD1990C的青色样机交给苏岩。",
+        "receipt": {
+          "type": "memory_status",
+          "status": "committed",
+          "message": "已保存：请记住：2026-09-08陈澄和周岳在实验室讨论了2026-09-06的约定：由周岳把编号QD1990C的青色样机交给苏岩。",
+          "committedCardIds": [
+            "01b74c09e1344351"
+          ]
+        },
+        "receiptMs": 1635.9
+      },
+      {
+        "input": "请记住：2026-09-06陈澄和周岳在实验室讨论了2026-09-08的约定：由陈澄把红色文件交给赵宇。",
+        "receipt": {
+          "type": "memory_status",
+          "status": "committed",
+          "message": "已保存：请记住：2026-09-06陈澄和周岳在实验室讨论了2026-09-08的约定：由陈澄把红色文件交给赵宇。",
+          "committedCardIds": [
+            "dfde3edda7c448cc"
+          ]
+        },
+        "receiptMs": 2573
+      }
+    ],
+    "turns": [
+      {
+        "input": "陈澄和周岳昨天在实验室讨论的、以那次讨论为参照的前天的约定是什么？请简短回答。",
+        "audioPackets": 26,
+        "firstTextMs": 1453,
+        "firstAudioMs": 1717.4,
+        "transcript": "抱歉，我没有找到关于陈澄和周岳昨天在实验室讨论的前天约定的相关信息。如果您能提供更多细节，我会尽力帮助您。",
+        "terminal": {
+          "sequence": 1,
+          "status": "response.done",
+          "usage": {
+            "inputTokens": 1330,
+            "outputTokens": 133,
+            "totalTokens": 1463,
+            "inputTokenDetails": {
+              "text_tokens": 1330
+            },
+            "outputTokenDetails": {
+              "text_tokens": 30,
+              "audio_tokens": 103
+            }
+          },
+          "fragmentCommitted": true,
+          "interrupted": false,
+          "localCancelRequested": false
+        },
+        "finishedMs": 3337.9
+      }
+    ]
+  },
+  {
+    "source": "outputs/social-memory-anchor-20260909-2/acceptance.json",
+    "passed": false,
+    "error": "AssertionError: ",
+    "routerVersions": [
+      "semantic-turn-router-v12"
+    ],
+    "routerMs": [
+      2719,
+      1816.8,
+      686.2
+    ],
+    "writes": [
+      {
+        "input": "请记住：2026-09-08陈澄和周岳在实验室讨论了2026-09-06的约定：由周岳把编号Q63597D的青色样机交给苏岩。",
+        "receipt": {
+          "type": "memory_status",
+          "status": "committed",
+          "message": "已保存：请记住：2026-09-08陈澄和周岳在实验室讨论了2026-09-06的约定：由周岳把编号Q63597D的青色样机交给苏岩。",
+          "committedCardIds": [
+            "44cfe0d79ed9450b"
+          ]
+        },
+        "receiptMs": 2791.9
+      },
+      {
+        "input": "请记住：2026-09-06陈澄和周岳在实验室讨论了2026-09-08的约定：由陈澄把红色文件交给赵宇。",
+        "receipt": {
+          "type": "memory_status",
+          "status": "committed",
+          "message": "已保存：请记住：2026-09-06陈澄和周岳在实验室讨论了2026-09-08的约定：由陈澄把红色文件交给赵宇。",
+          "committedCardIds": [
+            "93cbd84a7c1e4ff1"
+          ]
+        },
+        "receiptMs": 1888.2
+      }
+    ],
+    "turns": [
+      {
+        "input": "陈澄和周岳昨天在实验室讨论的、以那次讨论为参照的前天的约定是什么？请简短回答。",
+        "audioPackets": 19,
+        "firstTextMs": 1202.1,
+        "firstAudioMs": 1476.7,
+        "transcript": "前天的约定是，由周岳把编号Q63597D的青色样机交给苏岩。",
+        "terminal": {
+          "sequence": 1,
+          "status": "response.done",
+          "usage": {
+            "inputTokens": 1843,
+            "outputTokens": 101,
+            "totalTokens": 1944,
+            "inputTokenDetails": {
+              "text_tokens": 1843
+            },
+            "outputTokenDetails": {
+              "text_tokens": 27,
+              "audio_tokens": 74
+            }
+          },
+          "fragmentCommitted": true,
+          "interrupted": false,
+          "localCancelRequested": false
+        },
+        "finishedMs": 2842.5
+      }
+    ],
+    "performance": {
+      "metrics": {
+        "retrievalMs": {
+          "name": "retrievalMs",
+          "value": 4.898,
+          "eventId": "6b9889d0e23840f1",
+          "responseId": null,
+          "timestamp": "2026-09-09T01:50:54.485+00:00",
+          "samples": 1,
+          "median": 4.898,
+          "minimum": 4.898,
+          "maximum": 4.898
+        },
+        "routerMs": {
+          "name": "routerMs",
+          "value": 686.2,
+          "eventId": "6e4a18d9b34f4994",
+          "responseId": null,
+          "timestamp": "2026-09-09T01:50:54.491+00:00",
+          "samples": 1,
+          "median": 686.2,
+          "minimum": 686.2,
+          "maximum": 686.2
+        },
+        "responseFirstTextMs": {
+          "name": "responseFirstTextMs",
+          "value": 452.953,
+          "eventId": "7a65e407b79d432a",
+          "responseId": "resp_PM7K5fnozPY2IHjVacTli",
+          "timestamp": "2026-09-09T01:50:54.981+00:00",
+          "samples": 1,
+          "median": 452.953,
+          "minimum": 452.953,
+          "maximum": 452.953
+        },
+        "responseFirstAudioMs": {
+          "name": "responseFirstAudioMs",
+          "value": 727.168,
+          "eventId": "94c867f738a1486f",
+          "responseId": "resp_PM7K5fnozPY2IHjVacTli",
+          "timestamp": "2026-09-09T01:50:55.255+00:00",
+          "samples": 1,
+          "median": 727.168,
+          "minimum": 727.168,
+          "maximum": 727.168
+        }
+      },
+      "latestUsage": {
+        "responseId": "resp_PM7K5fnozPY2IHjVacTli",
+        "eventId": "6ce4bed35c614b5f",
+        "status": "response.done",
+        "inputTokens": 1843,
+        "outputTokens": 101,
+        "totalTokens": 1944,
+        "inputTokenDetails": {
+          "text_tokens": 1843
+        },
+        "outputTokenDetails": {
+          "text_tokens": 27,
+          "audio_tokens": 74
+        }
+      },
+      "timeouts": 0,
+      "windowEvents": 34,
+      "windowLimit": 160,
+      "claimBoundary": "Measured stages from the current session's latest 160 events. Response first output starts at response request, excluding routing, microphone endpointing and playback. Separate stages may belong to different turns; do not sum them."
+    }
+  },
+  {
+    "source": "outputs/social-memory-anchor-20260909-3/acceptance.json",
+    "passed": true,
+    "routerVersions": [
+      "semantic-turn-router-v13"
+    ],
+    "routerMs": [
+      1801.9,
+      1880.8,
+      957.2
+    ],
+    "writes": [
+      {
+        "input": "请记住：2026-09-08陈澄和周岳在实验室讨论了2026-09-06的约定：由周岳把编号Q03CDA9的青色样机交给苏岩。",
+        "receipt": {
+          "type": "memory_status",
+          "status": "committed",
+          "message": "已保存：请记住：2026-09-08陈澄和周岳在实验室讨论了2026-09-06的约定：由周岳把编号Q03CDA9的青色样机交给苏岩。",
+          "committedCardIds": [
+            "c5f153e1fda04368"
+          ]
+        },
+        "receiptMs": 1879.6
+      },
+      {
+        "input": "请记住：2026-09-06陈澄和周岳在实验室讨论了2026-09-08的约定：由陈澄把红色文件交给赵宇。",
+        "receipt": {
+          "type": "memory_status",
+          "status": "committed",
+          "message": "已保存：请记住：2026-09-06陈澄和周岳在实验室讨论了2026-09-08的约定：由陈澄把红色文件交给赵宇。",
+          "committedCardIds": [
+            "ded84af1bdc94b9e"
+          ]
+        },
+        "receiptMs": 1951
+      }
+    ],
+    "turns": [
+      {
+        "input": "陈澄和周岳昨天在实验室讨论的、以那次讨论为参照的前天的约定是什么？请简短回答。",
+        "audioPackets": 20,
+        "firstTextMs": 1461.3,
+        "firstAudioMs": 1727.3,
+        "transcript": "前天的约定是周岳把编号Q03CDA9的青色样机交给苏岩。",
+        "terminal": {
+          "sequence": 1,
+          "status": "response.done",
+          "usage": {
+            "inputTokens": 2053,
+            "outputTokens": 103,
+            "totalTokens": 2156,
+            "inputTokenDetails": {
+              "text_tokens": 2053
+            },
+            "outputTokenDetails": {
+              "text_tokens": 24,
+              "audio_tokens": 79
+            }
+          },
+          "fragmentCommitted": true,
+          "interrupted": false,
+          "localCancelRequested": false
+        },
+        "finishedMs": 3256
+      }
+    ],
+    "performance": {
+      "metrics": {
+        "retrievalMs": {
+          "name": "retrievalMs",
+          "value": 4.881,
+          "eventId": "8e2e105a6f9e499f",
+          "responseId": null,
+          "timestamp": "2026-09-09T01:53:39.904+00:00",
+          "samples": 1,
+          "median": 4.881,
+          "minimum": 4.881,
+          "maximum": 4.881
+        },
+        "routerMs": {
+          "name": "routerMs",
+          "value": 957.2,
+          "eventId": "1ab08d83b60f49c4",
+          "responseId": null,
+          "timestamp": "2026-09-09T01:53:39.908+00:00",
+          "samples": 1,
+          "median": 957.2,
+          "minimum": 957.2,
+          "maximum": 957.2
+        },
+        "responseFirstTextMs": {
+          "name": "responseFirstTextMs",
+          "value": 447.036,
+          "eventId": "c3c0595fab584c23",
+          "responseId": "resp_BrwfIwETpw79PUPJfUKSh",
+          "timestamp": "2026-09-09T01:53:40.388+00:00",
+          "samples": 1,
+          "median": 447.036,
+          "minimum": 447.036,
+          "maximum": 447.036
+        },
+        "responseFirstAudioMs": {
+          "name": "responseFirstAudioMs",
+          "value": 712.617,
+          "eventId": "8084ad3b2efa490f",
+          "responseId": "resp_BrwfIwETpw79PUPJfUKSh",
+          "timestamp": "2026-09-09T01:53:40.654+00:00",
+          "samples": 1,
+          "median": 712.617,
+          "minimum": 712.617,
+          "maximum": 712.617
+        }
+      },
+      "latestUsage": {
+        "responseId": "resp_BrwfIwETpw79PUPJfUKSh",
+        "eventId": "eabc2d7baa264832",
+        "status": "response.done",
+        "inputTokens": 2053,
+        "outputTokens": 103,
+        "totalTokens": 2156,
+        "inputTokenDetails": {
+          "text_tokens": 2053
+        },
+        "outputTokenDetails": {
+          "text_tokens": 24,
+          "audio_tokens": 79
+        }
+      },
+      "timeouts": 0,
+      "windowEvents": 34,
+      "windowLimit": 160,
+      "claimBoundary": "Measured stages from the current session's latest 160 events. Response first output starts at response request, excluding routing, microphone endpointing and playback. Separate stages may belong to different turns; do not sum them."
+    }
+  },
+  {
+    "source": "outputs/social-memory-basic-20260909/acceptance.json",
+    "passed": true,
+    "routerVersions": [
+      "semantic-turn-router-v12"
+    ],
+    "routerMs": [
+      965.1,
+      613.9,
+      492.5
+    ],
+    "turns": [
+      {
+        "input": "我的储物柜编号是什么？",
+        "audioPackets": 10,
+        "firstTextMs": 1112.2,
+        "firstAudioMs": 1394.9,
+        "transcript": "你的储物柜编号是157251。",
+        "terminal": {
+          "sequence": 1,
+          "status": "response.done",
+          "usage": {
+            "inputTokens": 1722,
+            "outputTokens": 51,
+            "totalTokens": 1773,
+            "inputTokenDetails": {
+              "text_tokens": 1722
+            },
+            "outputTokenDetails": {
+              "text_tokens": 14,
+              "audio_tokens": 37
+            }
+          },
+          "fragmentCommitted": true,
+          "interrupted": false,
+          "localCancelRequested": false
+        },
+        "finishedMs": 2031.5
+      },
+      {
+        "input": "请用刚才查到的编号，写一句我可以发给前台的取物说明。",
+        "audioPackets": 19,
+        "firstTextMs": 982,
+        "firstAudioMs": 1316.2,
+        "transcript": "你好，我是来取储物柜157251中物品的，麻烦帮我确认一下，谢谢。",
+        "terminal": {
+          "sequence": 2,
+          "status": "response.done",
+          "usage": {
+            "inputTokens": 2146,
+            "outputTokens": 98,
+            "totalTokens": 2244,
+            "inputTokenDetails": {
+              "text_tokens": 2146
+            },
+            "outputTokenDetails": {
+              "text_tokens": 25,
+              "audio_tokens": 73
+            }
+          },
+          "fragmentCommitted": true,
+          "interrupted": false,
+          "localCancelRequested": false
+        },
+        "finishedMs": 2530.4
+      }
+    ]
+  },
+  {
+    "source": "outputs/social-memory-browser-20260909/acceptance.json",
+    "passed": true,
+    "routerVersions": [],
+    "performance": {
+      "metrics": {
+        "retrievalMs": {
+          "name": "retrievalMs",
+          "value": 4.161,
+          "eventId": "e4a4049a5c2446eb",
+          "responseId": null,
+          "timestamp": "2026-09-09T01:38:14.627+00:00",
+          "samples": 1,
+          "median": 4.161,
+          "minimum": 4.161,
+          "maximum": 4.161
+        },
+        "routerMs": {
+          "name": "routerMs",
+          "value": 3007,
+          "eventId": "ad7b6e76f3844d08",
+          "responseId": null,
+          "timestamp": "2026-09-09T01:38:14.633+00:00",
+          "samples": 1,
+          "median": 3007,
+          "minimum": 3007,
+          "maximum": 3007
+        },
+        "responseFirstTextMs": {
+          "name": "responseFirstTextMs",
+          "value": 456.409,
+          "eventId": "3915c9bcbe7940b7",
+          "responseId": "resp_Rhz2tqnaoLxPoc1aQ6vYw",
+          "timestamp": "2026-09-09T01:38:15.135+00:00",
+          "samples": 1,
+          "median": 456.409,
+          "minimum": 456.409,
+          "maximum": 456.409
+        },
+        "responseFirstAudioMs": {
+          "name": "responseFirstAudioMs",
+          "value": 781.578,
+          "eventId": "e214bdd5cdce4e22",
+          "responseId": "resp_Rhz2tqnaoLxPoc1aQ6vYw",
+          "timestamp": "2026-09-09T01:38:15.460+00:00",
+          "samples": 1,
+          "median": 781.578,
+          "minimum": 781.578,
+          "maximum": 781.578
+        }
+      },
+      "latestUsage": {
+        "responseId": "resp_Rhz2tqnaoLxPoc1aQ6vYw",
+        "eventId": "7012a9f4035c478a",
+        "status": "response.done",
+        "inputTokens": 1496,
+        "outputTokens": 82,
+        "totalTokens": 1578,
+        "inputTokenDetails": {
+          "text_tokens": 1496
+        },
+        "outputTokenDetails": {
+          "text_tokens": 17,
+          "audio_tokens": 65
+        }
+      },
+      "timeouts": 1,
+      "windowEvents": 44,
+      "windowLimit": 160,
+      "claimBoundary": "Measured stages from the current session's latest 160 events. Response first output starts at response request, excluding routing, microphone endpointing and playback. Separate stages may belong to different turns; do not sum them."
+    }
+  },
+  {
+    "source": "outputs/social-memory-browser-final-20260909/acceptance.json",
+    "passed": true,
+    "routerVersions": [],
+    "performance": {
+      "metrics": {
+        "retrievalMs": {
+          "name": "retrievalMs",
+          "value": 4.379,
+          "eventId": "f22433573d9748a7",
+          "responseId": null,
+          "timestamp": "2026-09-09T01:55:57.128+00:00",
+          "samples": 1,
+          "median": 4.379,
+          "minimum": 4.379,
+          "maximum": 4.379
+        },
+        "writePolicyMs": {
+          "name": "writePolicyMs",
+          "value": 7.549,
+          "eventId": "625baec696ae427d",
+          "responseId": null,
+          "timestamp": "2026-09-09T01:55:57.138+00:00",
+          "samples": 1,
+          "median": 7.549,
+          "minimum": 7.549,
+          "maximum": 7.549
+        },
+        "routerMs": {
+          "name": "routerMs",
+          "value": 1189.4,
+          "eventId": "89477b849bf2400b",
+          "responseId": null,
+          "timestamp": "2026-09-09T01:55:57.140+00:00",
+          "samples": 1,
+          "median": 1189.4,
+          "minimum": 1189.4,
+          "maximum": 1189.4
+        },
+        "responseFirstTextMs": {
+          "name": "responseFirstTextMs",
+          "value": 446.772,
+          "eventId": "7de7e7d85b5e4406",
+          "responseId": "resp_Iq5dzvQC4bXJRl4cwdDCB",
+          "timestamp": "2026-09-09T01:55:57.636+00:00",
+          "samples": 1,
+          "median": 446.772,
+          "minimum": 446.772,
+          "maximum": 446.772
+        },
+        "responseFirstAudioMs": {
+          "name": "responseFirstAudioMs",
+          "value": 710.096,
+          "eventId": "6f526a21d5a84655",
+          "responseId": "resp_Iq5dzvQC4bXJRl4cwdDCB",
+          "timestamp": "2026-09-09T01:55:57.900+00:00",
+          "samples": 1,
+          "median": 710.096,
+          "minimum": 710.096,
+          "maximum": 710.096
+        }
+      },
+      "latestUsage": {
+        "responseId": "resp_Iq5dzvQC4bXJRl4cwdDCB",
+        "eventId": "7104f952c1a549b7",
+        "status": "response.done",
+        "inputTokens": 1510,
+        "outputTokens": 66,
+        "totalTokens": 1576,
+        "inputTokenDetails": {
+          "text_tokens": 1510
+        },
+        "outputTokenDetails": {
+          "text_tokens": 16,
+          "audio_tokens": 50
+        }
+      },
+      "timeouts": 0,
+      "windowEvents": 45,
+      "windowLimit": 160,
+      "claimBoundary": "Measured stages from the current session's latest 160 events. Response first output starts at response request, excluding routing, microphone endpointing and playback. Separate stages may belong to different turns; do not sum them."
+    }
+  },
+  {
+    "source": "outputs/social-memory-browser-consent-20260909/acceptance.json",
+    "passed": false,
+    "error": "AssertionError: ",
+    "routerVersions": []
+  },
+  {
+    "source": "outputs/social-memory-browser-release-20260909/acceptance.json",
+    "passed": true,
+    "routerVersions": [],
+    "performance": {
+      "metrics": {
+        "retrievalMs": {
+          "name": "retrievalMs",
+          "value": 4.122,
+          "eventId": "c4c06321b1b84ac7",
+          "responseId": null,
+          "timestamp": "2026-09-09T02:03:34.385+00:00",
+          "samples": 1,
+          "median": 4.122,
+          "minimum": 4.122,
+          "maximum": 4.122
+        },
+        "writePolicyMs": {
+          "name": "writePolicyMs",
+          "value": 6.72,
+          "eventId": "61e92abd23274e04",
+          "responseId": null,
+          "timestamp": "2026-09-09T02:03:34.393+00:00",
+          "samples": 1,
+          "median": 6.72,
+          "minimum": 6.72,
+          "maximum": 6.72
+        },
+        "routerMs": {
+          "name": "routerMs",
+          "value": 1279.2,
+          "eventId": "063a9f2ab3614205",
+          "responseId": null,
+          "timestamp": "2026-09-09T02:03:34.395+00:00",
+          "samples": 1,
+          "median": 1279.2,
+          "minimum": 1279.2,
+          "maximum": 1279.2
+        },
+        "responseFirstTextMs": {
+          "name": "responseFirstTextMs",
+          "value": 453.786,
+          "eventId": "df7052dfa3194460",
+          "responseId": "resp_JC8sZSc6amTHitdJNVvRW",
+          "timestamp": "2026-09-09T02:03:34.897+00:00",
+          "samples": 1,
+          "median": 453.786,
+          "minimum": 453.786,
+          "maximum": 453.786
+        },
+        "responseFirstAudioMs": {
+          "name": "responseFirstAudioMs",
+          "value": 738.149,
+          "eventId": "65c5f3d2194c449e",
+          "responseId": "resp_JC8sZSc6amTHitdJNVvRW",
+          "timestamp": "2026-09-09T02:03:35.181+00:00",
+          "samples": 1,
+          "median": 738.149,
+          "minimum": 738.149,
+          "maximum": 738.149
+        }
+      },
+      "latestUsage": {
+        "responseId": "resp_JC8sZSc6amTHitdJNVvRW",
+        "eventId": "c6ca1963fcc54d61",
+        "status": "response.done",
+        "inputTokens": 1510,
+        "outputTokens": 50,
+        "totalTokens": 1560,
+        "inputTokenDetails": {
+          "text_tokens": 1510
+        },
+        "outputTokenDetails": {
+          "text_tokens": 13,
+          "audio_tokens": 37
+        }
+      },
+      "timeouts": 0,
+      "windowEvents": 45,
+      "windowLimit": 160,
+      "claimBoundary": "Measured stages from the current session's latest 160 events. Response first output starts at response request, excluding routing, microphone endpointing and playback. Separate stages may belong to different turns; do not sum them."
+    }
+  }
+]

@@ -1,0 +1,342 @@
+{
+  "passed": true,
+  "pageErrors": [],
+  "failedRequests": [],
+  "viewports": [
+    {
+      "width": 1440,
+      "scrollWidth": 1440,
+      "workflowVisible": true
+    },
+    {
+      "width": 390,
+      "scrollWidth": 390,
+      "workflowVisible": true
+    }
+  ],
+  "mock": false,
+  "hardwareMeasured": false,
+  "sessionCreated": true,
+  "proceduralSkillSelected": true,
+  "conversationalSkillReady": true,
+  "assistantCaption": "助手语音字幕 · provider output channel · 已完成样机已由张岚在会议室确认收到，验收尚未完成。",
+  "performance": {
+    "metrics": {
+      "retrievalMs": {
+        "name": "retrievalMs",
+        "value": 15.148,
+        "eventId": "eb62edd4908246f7",
+        "responseId": null,
+        "timestamp": "2026-09-09T02:34:49.805+00:00",
+        "samples": 1,
+        "median": 15.148,
+        "minimum": 15.148,
+        "maximum": 15.148
+      },
+      "writePolicyMs": {
+        "name": "writePolicyMs",
+        "value": 23.994,
+        "eventId": "1e01eaab40a24e1c",
+        "responseId": null,
+        "timestamp": "2026-09-09T02:34:49.839+00:00",
+        "samples": 1,
+        "median": 23.994,
+        "minimum": 23.994,
+        "maximum": 23.994
+      },
+      "routerMs": {
+        "name": "routerMs",
+        "value": 1074.3,
+        "eventId": "2e9676ddb77c45b4",
+        "responseId": null,
+        "timestamp": "2026-09-09T02:34:49.851+00:00",
+        "samples": 1,
+        "median": 1074.3,
+        "minimum": 1074.3,
+        "maximum": 1074.3
+      },
+      "responseFirstTextMs": {
+        "name": "responseFirstTextMs",
+        "value": 446.042,
+        "eventId": "ea21c3b075ec4018",
+        "responseId": "resp_A3MDYNCQ9FX8iAy3tSgn9",
+        "timestamp": "2026-09-09T02:34:50.488+00:00",
+        "samples": 1,
+        "median": 446.042,
+        "minimum": 446.042,
+        "maximum": 446.042
+      },
+      "responseFirstAudioMs": {
+        "name": "responseFirstAudioMs",
+        "value": 714.911,
+        "eventId": "cb8a33f36d0b4ac3",
+        "responseId": "resp_A3MDYNCQ9FX8iAy3tSgn9",
+        "timestamp": "2026-09-09T02:34:50.757+00:00",
+        "samples": 1,
+        "median": 714.911,
+        "minimum": 714.911,
+        "maximum": 714.911
+      }
+    },
+    "latestUsage": {
+      "responseId": "resp_A3MDYNCQ9FX8iAy3tSgn9",
+      "eventId": "ad196f06232145b4",
+      "status": "response.done",
+      "inputTokens": 1510,
+      "outputTokens": 68,
+      "totalTokens": 1578,
+      "inputTokenDetails": {
+        "text_tokens": 1510
+      },
+      "outputTokenDetails": {
+        "text_tokens": 16,
+        "audio_tokens": 52
+      }
+    },
+    "timeouts": 0,
+    "windowEvents": 46,
+    "windowLimit": 160,
+    "claimBoundary": "Measured stages from the current session's latest 160 events. Response first output starts at response request, excluding routing, microphone endpointing and playback. Separate stages may belong to different turns; do not sum them."
+  },
+  "realTextTurn": true,
+  "insights": [
+    {
+      "type": "insight.result",
+      "id": "cf2c958b5677461d",
+      "parentId": "feb7de010b79477c",
+      "timestamp": "2026-09-09T02:34:53.046+00:00",
+      "fingerprint": "199bd7c98acf6081807bd4cd5295a75c76734c6210608532a21e1bea7f5e0f4f",
+      "requestEventId": "feb7de010b79477c",
+      "period": {
+        "kind": "daily",
+        "anchor": "2026-09-09",
+        "timezone": "Asia/Shanghai",
+        "start": "2026-09-09T00:00:00+08:00",
+        "end": "2026-09-10T00:00:00+08:00",
+        "basis": "recorded-time",
+        "endExclusive": true
+      },
+      "model": "qwen-flash",
+      "coverage": {
+        "totalRecords": 1,
+        "includedRecords": 1,
+        "omittedRecords": 0,
+        "errors": [],
+        "complete": true
+      },
+      "sources": [
+        {
+          "sourceId": "0e09085169e84740:24954220426a47c9",
+          "sessionId": "0e09085169e84740",
+          "eventId": "24954220426a47c9",
+          "recordedAt": "2026-09-09T02:34:48.675+00:00",
+          "text": "请整理现场记录：今天张岚在会议室确认样机已经收到，验收尚未完成。"
+        }
+      ],
+      "summary": [
+        {
+          "text": "今天张岚在会议室确认样机已经收到，但验收尚未完成。",
+          "sourceIds": [
+            "0e09085169e84740:24954220426a47c9"
+          ]
+        }
+      ],
+      "suggestions": [],
+      "cached": false,
+      "calibratedProbability": null,
+      "rawOutput": "{\n  \"summary\": [\n    {\n      \"text\": \"今天张岚在会议室确认样机已经收到，但验收尚未完成。\",\n      \"sourceIds\": [\n        \"0e09085169e84740:24954220426a47c9\"\n      ]\n    }\n  ],\n  \"suggestions\": []\n}",
+      "providerRequestId": "a4755c7c-5647-9466-80ac-b8c06e42f3d5",
+      "usage": {
+        "input_tokens": 658,
+        "output_tokens": 84,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        },
+        "total_tokens": 742
+      },
+      "status": "completed",
+      "latencyMs": 1280.022
+    },
+    {
+      "type": "insight.result",
+      "id": "b98f716fd00c4c02",
+      "parentId": "dbbfc75075b04e79",
+      "timestamp": "2026-09-09T02:34:54.253+00:00",
+      "fingerprint": "c24e18a753ab20efb255519da2134872ab69ad96fbf5edb4e5327c549c65ccb5",
+      "requestEventId": "dbbfc75075b04e79",
+      "period": {
+        "kind": "weekly",
+        "anchor": "2026-09-09",
+        "timezone": "Asia/Shanghai",
+        "start": "2026-09-07T00:00:00+08:00",
+        "end": "2026-09-14T00:00:00+08:00",
+        "basis": "recorded-time",
+        "endExclusive": true
+      },
+      "model": "qwen-flash",
+      "coverage": {
+        "totalRecords": 1,
+        "includedRecords": 1,
+        "omittedRecords": 0,
+        "errors": [],
+        "complete": true
+      },
+      "sources": [
+        {
+          "sourceId": "0e09085169e84740:24954220426a47c9",
+          "sessionId": "0e09085169e84740",
+          "eventId": "24954220426a47c9",
+          "recordedAt": "2026-09-09T02:34:48.675+00:00",
+          "text": "请整理现场记录：今天张岚在会议室确认样机已经收到，验收尚未完成。"
+        }
+      ],
+      "summary": [
+        {
+          "text": "张岚于2026年9月9日在会议室确认样机已收到，但验收工作尚未完成。",
+          "sourceIds": [
+            "0e09085169e84740:24954220426a47c9"
+          ]
+        }
+      ],
+      "suggestions": [],
+      "cached": false,
+      "calibratedProbability": null,
+      "rawOutput": "{\n  \"summary\": [\n    {\n      \"text\": \"张岚于2026年9月9日在会议室确认样机已收到，但验收工作尚未完成。\",\n      \"sourceIds\": [\n        \"0e09085169e84740:24954220426a47c9\"\n      ]\n    }\n  ],\n  \"suggestions\": []\n}",
+      "providerRequestId": "5872b0c3-8403-935c-987e-84713cba3045",
+      "usage": {
+        "input_tokens": 658,
+        "output_tokens": 93,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        },
+        "total_tokens": 751
+      },
+      "status": "completed",
+      "latencyMs": 1119.208
+    },
+    {
+      "type": "insight.result",
+      "id": "f232c9f0d8ae46c3",
+      "parentId": "5ccba4570f114908",
+      "timestamp": "2026-09-09T02:34:55.266+00:00",
+      "fingerprint": "229e8813a077a62c957657d38e8d3bb22fdabf46fa69ee19e561bee10a019bc6",
+      "requestEventId": "5ccba4570f114908",
+      "period": {
+        "kind": "monthly",
+        "anchor": "2026-09-09",
+        "timezone": "Asia/Shanghai",
+        "start": "2026-09-01T00:00:00+08:00",
+        "end": "2026-10-01T00:00:00+08:00",
+        "basis": "recorded-time",
+        "endExclusive": true
+      },
+      "model": "qwen-flash",
+      "coverage": {
+        "totalRecords": 1,
+        "includedRecords": 1,
+        "omittedRecords": 0,
+        "errors": [],
+        "complete": true
+      },
+      "sources": [
+        {
+          "sourceId": "0e09085169e84740:24954220426a47c9",
+          "sessionId": "0e09085169e84740",
+          "eventId": "24954220426a47c9",
+          "recordedAt": "2026-09-09T02:34:48.675+00:00",
+          "text": "请整理现场记录：今天张岚在会议室确认样机已经收到，验收尚未完成。"
+        }
+      ],
+      "summary": [
+        {
+          "text": "张岚于2026年9月9日在会议室确认样机已收到，但验收工作尚未完成。",
+          "sourceIds": [
+            "0e09085169e84740:24954220426a47c9"
+          ]
+        }
+      ],
+      "suggestions": [],
+      "cached": false,
+      "calibratedProbability": null,
+      "rawOutput": "{\n  \"summary\": [\n    {\n      \"text\": \"张岚于2026年9月9日在会议室确认样机已收到，但验收工作尚未完成。\",\n      \"sourceIds\": [\n        \"0e09085169e84740:24954220426a47c9\"\n      ]\n    }\n  ],\n  \"suggestions\": []\n}",
+      "providerRequestId": "05db52da-d389-984f-bc16-6f99a77c5a00",
+      "usage": {
+        "input_tokens": 658,
+        "output_tokens": 93,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        },
+        "total_tokens": 751
+      },
+      "status": "completed",
+      "latencyMs": 926.237
+    }
+  ],
+  "automaticSuggestions": {
+    "type": "insight.result",
+    "id": "35bc809ddaf248c3",
+    "parentId": "3d51a47a0a8947dc",
+    "timestamp": "2026-09-09T02:35:28.232+00:00",
+    "fingerprint": "81b57810704394ae7b6fde5bad781f45236e8bdb5b961018eed135e7b48e3a30",
+    "requestEventId": "3d51a47a0a8947dc",
+    "period": {
+      "kind": "suggestions",
+      "anchor": "2026-09-09",
+      "timezone": "Asia/Shanghai",
+      "start": "2026-09-09T00:00:00+08:00",
+      "end": "2026-09-10T00:00:00+08:00",
+      "basis": "recorded-time",
+      "endExclusive": true
+    },
+    "model": "qwen-flash",
+    "coverage": {
+      "totalRecords": 1,
+      "includedRecords": 1,
+      "omittedRecords": 0,
+      "errors": [],
+      "complete": true
+    },
+    "sources": [
+      {
+        "sourceId": "0e09085169e84740:24954220426a47c9",
+        "sessionId": "0e09085169e84740",
+        "eventId": "24954220426a47c9",
+        "recordedAt": "2026-09-09T02:34:48.675+00:00",
+        "text": "请整理现场记录：今天张岚在会议室确认样机已经收到，验收尚未完成。"
+      }
+    ],
+    "summary": [
+      {
+        "text": "张岚于2026年9月9日确认样机已收到，但验收工作尚未完成。",
+        "sourceIds": [
+          "0e09085169e84740:24954220426a47c9"
+        ]
+      }
+    ],
+    "suggestions": [
+      {
+        "text": "建议跟进样机验收进度，确认具体完成时间或下一步安排。",
+        "sourceIds": [
+          "0e09085169e84740:24954220426a47c9"
+        ]
+      }
+    ],
+    "cached": false,
+    "calibratedProbability": null,
+    "rawOutput": "{\n  \"summary\": [\n    {\n      \"text\": \"张岚于2026年9月9日确认样机已收到，但验收工作尚未完成。\",\n      \"sourceIds\": [\n        \"0e09085169e84740:24954220426a47c9\"\n      ]\n    }\n  ],\n  \"suggestions\": [\n    {\n      \"text\": \"建议跟进样机验收进度，确认具体完成时间或下一步安排。\",\n      \"sourceIds\": [\n        \"0e09085169e84740:24954220426a47c9\"\n      ]\n    }\n  ]\n}",
+    "providerRequestId": "0b3c9c2d-dd98-93f2-a16e-7aff2c4f163c",
+    "usage": {
+      "input_tokens": 659,
+      "output_tokens": 162,
+      "prompt_tokens_details": {
+        "cached_tokens": 0
+      },
+      "total_tokens": 821
+    },
+    "status": "completed",
+    "latencyMs": 3003.989
+  },
+  "realPromptAuditVisible": true,
+  "sessionRestoredAfterLogin": true,
+  "performanceRestoredAfterLogin": true
+}

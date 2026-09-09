@@ -18,6 +18,43 @@ def provider_response(content, status_code=200):
     )
 
 
+def test_read_only_query_envelope_keeps_source_time_context_and_audits_normalization():
+    payload = {"v": 1, "memoryQuery": {"referential": True, "context": {
+        "entities": ["张岚"], "times": [
+            {"relation": "讨论", "expression": "昨天", "anchor": "turn"},
+            {"relation": "约定", "expression": "前天", "anchor": "turn"},
+        ],
+    }}}
+    router = SemanticTurnRouter("test-key", generation_call=lambda **_: provider_response(json.dumps(payload)))
+    result = asyncio.run(router.classify("张岚昨天讨论的前天的约定是什么", []))
+    assert result["status"] == "classified"
+    assert result["memoryQuery"] == "referential"
+    assert len(result["memoryQuerySpec"]["context"]["times"]) == 2
+    assert result["protocolNormalizations"] == ["memoryQuery-object-to-spec"]
+    assert result["memoryAtoms"] == []
+    payload["memoryQuery"]["delete"] = "all"
+    rejected = asyncio.run(router.classify("张岚昨天讨论的前天的约定是什么", []))
+    assert rejected["status"] == "invalid"
+
+
+def test_compact_event_atom_preserves_source_without_forcing_one_relation():
+    payload = {"v": 1, "memoryEvents": [{"scope": "participant", "consent": "explicit",
+               "context": {"entities": ["张岚", "李宁"], "scene": "咖啡馆"}}]}
+    text = "请记住：昨天张岚和李宁在咖啡馆讨论了前天的约定。"
+    router = SemanticTurnRouter("test-key", generation_call=lambda **_: provider_response(json.dumps(payload)))
+    result = asyncio.run(router.classify(text, []))
+    assert result["status"] == "classified"
+    assert result["memoryAtoms"][0]["text"] == text
+    assert result["memoryAtoms"][0]["subject"] is None
+    assert result["memoryAtoms"][0]["predicate"] is None
+    assert result["protocolNormalizations"] == ["memoryEvents-to-source-events"]
+    payload.update(text="fabricated outside the event envelope", subject="invented")
+    normalized = asyncio.run(router.classify(text, []))
+    assert normalized["memoryAtoms"][0]["text"] == text
+    assert normalized["memoryAtoms"][0]["subject"] is None
+    assert "ignored-top-level-event-content" in normalized["protocolNormalizations"]
+
+
 def decision(**overrides):
     value = {
         "speechControl": "none",

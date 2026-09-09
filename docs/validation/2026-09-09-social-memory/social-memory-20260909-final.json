@@ -1,0 +1,522 @@
+{
+  "passed": true,
+  "mock": false,
+  "input": "text-control",
+  "model": "qwen3.5-omni-flash-realtime",
+  "clock": {
+    "nowUtc": "2026-09-09T01:44:57+00:00",
+    "localNow": "2026-09-09T09:44:57+08:00",
+    "timezone": "Asia/Shanghai",
+    "utcOffsetMinutes": 480,
+    "authority": "server-clock",
+    "timezoneSource": "iana"
+  },
+  "testCode": "QDC4430",
+  "writes": [
+    {
+      "input": "请记住：2026-09-08张岚和李宁在咖啡馆讨论了2026-09-07的约定：由李宁把编号QDC4430的青色样机交给王梅。",
+      "receipt": {
+        "type": "memory_status",
+        "status": "committed",
+        "message": "已保存：请记住：2026-09-08张岚和李宁在咖啡馆讨论了2026-09-07的约定：由李宁把编号QDC4430的青色样机交给王梅。",
+        "committedCardIds": [
+          "3c5f72b01be34397"
+        ]
+      },
+      "receiptMs": 1574.4
+    },
+    {
+      "input": "请记住：2026-09-07张岚和李宁在咖啡馆讨论了2026-09-08的约定：由张岚把红色文件交给赵宇。",
+      "receipt": {
+        "type": "memory_status",
+        "status": "committed",
+        "message": "已保存：请记住：2026-09-07张岚和李宁在咖啡馆讨论了2026-09-08的约定：由张岚把红色文件交给赵宇。",
+        "committedCardIds": [
+          "8a1d7c3f1a434707"
+        ]
+      },
+      "receiptMs": 1898.2
+    }
+  ],
+  "turns": [
+    {
+      "input": "张岚和李宁昨天在咖啡馆讨论的前天的约定是什么？请简短回答。",
+      "audioPackets": 19,
+      "firstTextMs": 1581.4,
+      "firstAudioMs": 1853.3,
+      "transcript": "前天的约定是，李宁把编号QDC4430的青色样机交给王梅。",
+      "terminal": {
+        "sequence": 1,
+        "status": "response.done",
+        "usage": {
+          "inputTokens": 2034,
+          "outputTokens": 99,
+          "totalTokens": 2133,
+          "inputTokenDetails": {
+            "text_tokens": 2034
+          },
+          "outputTokenDetails": {
+            "text_tokens": 24,
+            "audio_tokens": 75
+          }
+        },
+        "fragmentCommitted": true,
+        "interrupted": false,
+        "localCancelRequested": false
+      },
+      "finishedMs": 3151.6
+    }
+  ],
+  "userId": "e1a2d2a275c54aac",
+  "writeSession": "6bd281b6cd1e4bca",
+  "recallSession": "95e687d0abd946ab",
+  "performance": {
+    "metrics": {
+      "retrievalMs": {
+        "name": "retrievalMs",
+        "value": 7.143,
+        "eventId": "006619dfebad4f58",
+        "responseId": null,
+        "timestamp": "2026-09-09T01:45:02.481+00:00",
+        "samples": 1,
+        "median": 7.143,
+        "minimum": 7.143,
+        "maximum": 7.143
+      },
+      "routerMs": {
+        "name": "routerMs",
+        "value": 1066.8,
+        "eventId": "6636b637ed9149fd",
+        "responseId": null,
+        "timestamp": "2026-09-09T01:45:02.487+00:00",
+        "samples": 1,
+        "median": 1066.8,
+        "minimum": 1066.8,
+        "maximum": 1066.8
+      },
+      "responseFirstTextMs": {
+        "name": "responseFirstTextMs",
+        "value": 448.971,
+        "eventId": "729de3d7950e4e07",
+        "responseId": "resp_B4g4Ac9HZ6TjBkXkmrFcH",
+        "timestamp": "2026-09-09T01:45:02.972+00:00",
+        "samples": 1,
+        "median": 448.971,
+        "minimum": 448.971,
+        "maximum": 448.971
+      },
+      "responseFirstAudioMs": {
+        "name": "responseFirstAudioMs",
+        "value": 720.543,
+        "eventId": "df2968dc5eb34d43",
+        "responseId": "resp_B4g4Ac9HZ6TjBkXkmrFcH",
+        "timestamp": "2026-09-09T01:45:03.244+00:00",
+        "samples": 1,
+        "median": 720.543,
+        "minimum": 720.543,
+        "maximum": 720.543
+      }
+    },
+    "latestUsage": {
+      "responseId": "resp_B4g4Ac9HZ6TjBkXkmrFcH",
+      "eventId": "90ee125dadb64f0b",
+      "status": "response.done",
+      "inputTokens": 2034,
+      "outputTokens": 99,
+      "totalTokens": 2133,
+      "inputTokenDetails": {
+        "text_tokens": 2034
+      },
+      "outputTokenDetails": {
+        "text_tokens": 24,
+        "audio_tokens": 75
+      }
+    },
+    "timeouts": 0,
+    "windowEvents": 34,
+    "windowLimit": 160,
+    "claimBoundary": "Measured stages from the current session's latest 160 events. Response first output starts at response request, excluding routing, microphone endpointing and playback. Separate stages may belong to different turns; do not sum them."
+  },
+  "injectedEvidence": [
+    {
+      "episodeId": "3c5f72b01be34397",
+      "cardId": "3c5f72b01be34397",
+      "timestamp": "2026-09-09T01:44:59.181+00:00",
+      "source": "semantic-memory-card",
+      "summary": "请记住：2026-09-08张岚和李宁在咖啡馆讨论了2026-09-07的约定：由李宁把编号QDC4430的青色样机交给王梅。",
+      "kind": "event",
+      "layer": "current",
+      "score": 0.1919,
+      "reasons": [
+        "term-overlap"
+      ],
+      "recordedAt": "2026-09-09T01:44:59.181+00:00",
+      "effectiveAt": null,
+      "effectiveEnd": null,
+      "timezone": "Asia/Shanghai",
+      "sourceIds": [
+        "b27201f96c624c6b"
+      ],
+      "evidenceContext": {
+        "calibratedProbability": null,
+        "clock": {
+          "authority": "server-clock",
+          "localNow": "2026-09-09T09:44:59+08:00",
+          "nowUtc": "2026-09-09T01:44:59+00:00",
+          "timezone": "Asia/Shanghai",
+          "timezoneSource": "iana",
+          "utcOffsetMinutes": 480
+        },
+        "entities": [
+          "张岚",
+          "李宁",
+          "王梅"
+        ],
+        "rejected": [],
+        "scene": "在咖啡馆",
+        "sourceSessionId": "6bd281b6cd1e4bca",
+        "sourceText": "请记住：2026-09-08张岚和李宁在咖啡馆讨论了2026-09-07的约定：由李宁把编号QDC4430的青色样机交给王梅。",
+        "status": "source-grounded-labels",
+        "times": [
+          {
+            "anchor": "turn",
+            "end": "2026-09-08T16:00:00.000+00:00",
+            "expression": "2026-09-08",
+            "relation": "讨论",
+            "start": "2026-09-07T16:00:00.000+00:00",
+            "status": "resolved"
+          },
+          {
+            "anchor": "turn",
+            "end": "2026-09-07T16:00:00.000+00:00",
+            "expression": "2026-09-07",
+            "relation": "约定",
+            "start": "2026-09-06T16:00:00.000+00:00",
+            "status": "resolved"
+          }
+        ]
+      },
+      "temporalSupport": "matching-references"
+    }
+  ],
+  "exportAudit": {
+    "complete": true,
+    "cards": [
+      {
+        "id": "3c5f72b01be34397",
+        "userId": "e1a2d2a275c54aac",
+        "caseId": "6bd281b6cd1e4bca",
+        "scope": "participant",
+        "tier": "long",
+        "kind": "event",
+        "text": "请记住：2026-09-08张岚和李宁在咖啡馆讨论了2026-09-07的约定：由李宁把编号QDC4430的青色样机交给王梅。",
+        "normalizedText": "请记住：2026-09-08张岚和李宁在咖啡馆讨论了2026-09-07的约定：由李宁把编号qdc4430的青色样机交给王梅。",
+        "memoryKey": null,
+        "happenedAt": "2026-09-09T01:44:59.181+00:00",
+        "dayKey": "2026-09-09",
+        "recordedAt": "2026-09-09T01:44:59.181+00:00",
+        "effectiveAt": null,
+        "effectiveEnd": null,
+        "timezone": "Asia/Shanghai",
+        "utcOffsetMinutes": 480,
+        "recurrence": null,
+        "subject": null,
+        "predicate": null,
+        "value": null,
+        "sourceIds": [
+          "b27201f96c624c6b"
+        ],
+        "status": "active",
+        "importance": 1,
+        "supersedes": null,
+        "metadata": {
+          "candidateScope": "6bd281b6cd1e4bca",
+          "evidenceContext": {
+            "calibratedProbability": null,
+            "clock": {
+              "authority": "server-clock",
+              "localNow": "2026-09-09T09:44:59+08:00",
+              "nowUtc": "2026-09-09T01:44:59+00:00",
+              "timezone": "Asia/Shanghai",
+              "timezoneSource": "iana",
+              "utcOffsetMinutes": 480
+            },
+            "entities": [
+              "张岚",
+              "李宁",
+              "王梅"
+            ],
+            "rejected": [],
+            "scene": "在咖啡馆",
+            "sourceSessionId": "6bd281b6cd1e4bca",
+            "sourceText": "请记住：2026-09-08张岚和李宁在咖啡馆讨论了2026-09-07的约定：由李宁把编号QDC4430的青色样机交给王梅。",
+            "status": "source-grounded-labels",
+            "times": [
+              {
+                "anchor": "turn",
+                "end": "2026-09-08T16:00:00.000+00:00",
+                "expression": "2026-09-08",
+                "relation": "讨论",
+                "start": "2026-09-07T16:00:00.000+00:00",
+                "status": "resolved"
+              },
+              {
+                "anchor": "turn",
+                "end": "2026-09-07T16:00:00.000+00:00",
+                "expression": "2026-09-07",
+                "relation": "约定",
+                "start": "2026-09-06T16:00:00.000+00:00",
+                "status": "resolved"
+              }
+            ]
+          },
+          "evidenceEventId": "b27201f96c624c6b",
+          "originalKind": "event",
+          "skill": null,
+          "source": "semantic-memory-card",
+          "task": null
+        },
+        "createdAt": "2026-09-09T01:44:59.181+00:00",
+        "updatedAt": "2026-09-09T01:44:59.181+00:00"
+      }
+    ],
+    "journalSessions": [
+      "6bd281b6cd1e4bca",
+      "95e687d0abd946ab",
+      "memory_trace"
+    ],
+    "sourceReferencesResolved": true
+  },
+  "otherUserIsolated": true,
+  "routing": [
+    {
+      "method": "semantic-turn-router-v12",
+      "model": "qwen-flash",
+      "status": "classified",
+      "componentErrors": [],
+      "protocolNormalizations": [
+        "memoryEvents-to-source-events"
+      ],
+      "speechControl": null,
+      "taskControl": null,
+      "preferenceIntent": null,
+      "memoryQuery": null,
+      "memoryKind": "event",
+      "memoryText": "请记住：2026-09-08张岚和李宁在咖啡馆讨论了2026-09-07的约定：由李宁把编号QDC4430的青色样机交给王梅。",
+      "memoryKey": null,
+      "memoryScope": "participant",
+      "memoryConsent": "explicit",
+      "memoryAtoms": [
+        {
+          "kind": "event",
+          "text": "请记住：2026-09-08张岚和李宁在咖啡馆讨论了2026-09-07的约定：由李宁把编号QDC4430的青色样机交给王梅。",
+          "subject": null,
+          "predicate": null,
+          "value": null,
+          "scope": "participant",
+          "consent": "explicit",
+          "context": {
+            "entities": [
+              "张岚",
+              "李宁",
+              "王梅"
+            ],
+            "scene": "在咖啡馆",
+            "times": [
+              {
+                "relation": "讨论",
+                "expression": "2026-09-08",
+                "anchor": "turn"
+              },
+              {
+                "relation": "约定",
+                "expression": "2026-09-07",
+                "anchor": "turn"
+              }
+            ]
+          }
+        }
+      ],
+      "memoryDraft": null,
+      "memoryQuerySpec": null,
+      "skillControl": null,
+      "selectedSkill": null,
+      "intentKind": "foreground-dialogue",
+      "intents": [
+        {
+          "kind": "foreground-dialogue",
+          "text": "请记住：2026-09-08张岚和李宁在咖啡馆讨论了2026-09-07的约定：由李宁把编号QDC4430的青色样机交给王梅。",
+          "parameters": {}
+        }
+      ],
+      "revision": null,
+      "skillStatus": "no-match",
+      "rawOutput": "{\"v\":1,\"memoryEvents\":[{\"scope\":\"participant\",\"consent\":\"explicit\",\"context\":{\"entities\":[\"张岚\",\"李宁\",\"王梅\"],\"times\":[{\"relation\":\"讨论\",\"expression\":\"2026-09-08\",\"anchor\":\"turn\"},{\"relation\":\"约定\",\"expression\":\"2026-09-07\",\"anchor\":\"turn\"}],\"scene\":\"在咖啡馆\"},\"text\":\"张岚和李宁在咖啡馆讨论了2026-09-07的约定：由李宁把编号QDC4430的青色样机交给王梅。\"}]}",
+      "requestMetrics": {
+        "httpStatus": 200,
+        "usage": {
+          "input_tokens": 2387,
+          "output_tokens": 128,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "total_tokens": 2515
+        },
+        "requestId": "121dd40b-0bb1-9e89-b2c0-cf020316670f"
+      },
+      "latencyMs": 1493.7,
+      "policyVersion": "semantic-turn-router-v12",
+      "claimBoundary": "Only the current transcript is classified, with explicit clock, pending draft and previous-turn context. Labels are hypotheses, not facts.",
+      "acceptedIntents": []
+    },
+    {
+      "method": "semantic-turn-router-v12",
+      "model": "qwen-flash",
+      "status": "classified",
+      "componentErrors": [],
+      "protocolNormalizations": [],
+      "speechControl": null,
+      "taskControl": null,
+      "preferenceIntent": null,
+      "memoryQuery": null,
+      "memoryKind": "event",
+      "memoryText": "请记住：2026-09-07张岚和李宁在咖啡馆讨论了2026-09-08的约定：由张岚把红色文件交给赵宇。",
+      "memoryKey": null,
+      "memoryScope": "participant",
+      "memoryConsent": "explicit",
+      "memoryAtoms": [
+        {
+          "kind": "event",
+          "text": "请记住：2026-09-07张岚和李宁在咖啡馆讨论了2026-09-08的约定：由张岚把红色文件交给赵宇。",
+          "subject": "张岚",
+          "predicate": "约定",
+          "value": "把红色文件交给赵宇",
+          "scope": "participant",
+          "consent": "explicit",
+          "context": {
+            "entities": [
+              "张岚",
+              "李宁",
+              "赵宇"
+            ],
+            "scene": "在咖啡馆",
+            "times": [
+              {
+                "relation": "讨论",
+                "expression": "2026-09-07",
+                "anchor": "turn"
+              },
+              {
+                "relation": "约定",
+                "expression": "2026-09-08",
+                "anchor": "turn"
+              }
+            ]
+          }
+        }
+      ],
+      "memoryDraft": null,
+      "memoryQuerySpec": null,
+      "skillControl": null,
+      "selectedSkill": null,
+      "intentKind": "foreground-dialogue",
+      "intents": [
+        {
+          "kind": "foreground-dialogue",
+          "text": "请记住：2026-09-07张岚和李宁在咖啡馆讨论了2026-09-08的约定：由张岚把红色文件交给赵宇。",
+          "parameters": {}
+        }
+      ],
+      "revision": null,
+      "skillStatus": "no-match",
+      "rawOutput": "{\"v\":1,\"memoryAtoms\":[{\"kind\":\"event\",\"text\":\"2026-09-07张岚和李宁在咖啡馆讨论了2026-09-08的约定：由张岚把红色文件交给赵宇。\",\"subject\":\"张岚\",\"predicate\":\"约定\",\"value\":\"把红色文件交给赵宇\",\"scope\":\"participant\",\"consent\":\"explicit\",\"context\":{\"entities\":[\"张岚\",\"李宁\",\"赵宇\"],\"scene\":\"在咖啡馆\",\"times\":[{\"relation\":\"讨论\",\"expression\":\"2026-09-07\",\"anchor\":\"turn\"},{\"relation\":\"约定\",\"expression\":\"2026-09-08\",\"anchor\":\"turn\"}]}}]}",
+      "requestMetrics": {
+        "httpStatus": 200,
+        "usage": {
+          "input_tokens": 2678,
+          "output_tokens": 151,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "total_tokens": 2829
+        },
+        "requestId": "528944b3-735d-9187-82bf-412d6b95a131"
+      },
+      "latencyMs": 1820.9,
+      "policyVersion": "semantic-turn-router-v12",
+      "claimBoundary": "Only the current transcript is classified, with explicit clock, pending draft and previous-turn context. Labels are hypotheses, not facts.",
+      "acceptedIntents": []
+    },
+    {
+      "method": "semantic-turn-router-v12",
+      "model": "qwen-flash",
+      "status": "classified",
+      "componentErrors": [],
+      "protocolNormalizations": [],
+      "speechControl": null,
+      "taskControl": null,
+      "preferenceIntent": null,
+      "memoryQuery": "referential",
+      "memoryKind": null,
+      "memoryText": null,
+      "memoryKey": null,
+      "memoryScope": null,
+      "memoryConsent": null,
+      "memoryAtoms": [],
+      "memoryDraft": null,
+      "memoryQuerySpec": {
+        "subject": null,
+        "predicate": null,
+        "context": {
+          "entities": [
+            "张岚",
+            "李宁"
+          ],
+          "scene": null,
+          "times": [
+            {
+              "relation": "讨论",
+              "expression": "昨天",
+              "anchor": "turn"
+            },
+            {
+              "relation": "约定",
+              "expression": "前天",
+              "anchor": "turn"
+            }
+          ]
+        }
+      },
+      "skillControl": null,
+      "selectedSkill": null,
+      "intentKind": "foreground-dialogue",
+      "intents": [
+        {
+          "kind": "foreground-dialogue",
+          "text": "张岚和李宁昨天在咖啡馆讨论的前天的约定是什么？请简短回答。",
+          "parameters": {}
+        }
+      ],
+      "revision": null,
+      "skillStatus": "no-match",
+      "rawOutput": "{\"v\":1,\"memoryQuerySpec\":{\"subject\":null,\"predicate\":null,\"context\":{\"entities\":[\"张岚\",\"李宁\"],\"times\":[{\"relation\":\"讨论\",\"expression\":\"昨天\",\"anchor\":\"turn\"},{\"relation\":\"约定\",\"expression\":\"前天\",\"anchor\":\"turn\"}]}}}",
+      "requestMetrics": {
+        "httpStatus": 200,
+        "usage": {
+          "input_tokens": 2353,
+          "output_tokens": 56,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "total_tokens": 2409
+        },
+        "requestId": "dddbb42e-a842-9389-b9bf-8485f0b8ee19"
+      },
+      "latencyMs": 1066.8,
+      "policyVersion": "semantic-turn-router-v12",
+      "claimBoundary": "Only the current transcript is classified, with explicit clock, pending draft and previous-turn context. Labels are hypotheses, not facts.",
+      "acceptedIntents": []
+    }
+  ],
+  "sourceReport": "outputs/social-memory-20260909-final/acceptance.json"
+}

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from egoassist.prompts import prompt_text
+
 import re
 from pathlib import Path
 from typing import Any, Callable
@@ -196,25 +198,20 @@ class SkillRuntime:
                     for tool in tools
                 ) or "- 无额外工具"
                 return (
-                    "你是 EgoAssist，一个通用实时多模态助手。当前没有加载领域 Skill，用户已指定自定义任务。\n\n"
-                    f"{self.task.spec.realtime_instructions(memories)}\n可用工具：\n{tool_text}"
+                    prompt_text('skills/context.1', v0=self.task.spec.realtime_instructions(memories), v1=tool_text)
                 )
             return (
-                "你是 EgoAssist，一个通用实时多模态助手。当前没有加载领域 Skill，也没有预设任务。"
-                "先理解用户实际目标；自然回答一般问题。只有证据明确匹配可用 Skill 时才加载它，"
-                "不因看到某类物体就擅自推断用户目标或加载领域工作流。看不清或意图不明确时简短询问。"
-                "持续接收用户麦克风和相机画面；允许用户与助手同时说话。只输出面向用户的最终话语，"
-                "不要说出内部决策、保持安静之类的元话语。"
+                prompt_text('skills/context.2')
             )
         catalog = "、".join(spec.title for spec in self.tasks.values())
         if self.task is None:
             task_guidance = (
-                f"可选任务：{catalog}。先确认用户的具体目标；不要把默认任务冒充为用户目标。"
+                prompt_text('skills/context.3', v0=catalog)
                 if catalog
-                else "该 Skill 未声明预设任务；直接按其能力边界响应，不虚构步骤或任务状态。"
+                else prompt_text('skills/context.4')
             )
             return (
-                "你是一个通用实时具身助手。领域 Skill 已加载。"
+                prompt_text('skills/context.5')
                 + ("具体任务尚未确定。\n\n" if catalog else "这是无固定步骤的对话工作流。\n\n")
                 + (f"{self.skill.instruction_context()}\n\n" if include_skill_policy else "")
                 + task_guidance
@@ -230,8 +227,7 @@ class SkillRuntime:
             self.skill.realtime_instructions(
                 self.task.spec, memories, tool_declarations, include_skill_policy=include_skill_policy,
             )
-            + f"\n当前 Skill 可切换任务：{catalog}。用户明确说出其中一个任务名称时切换；"
-              "若用户目标不是当前任务，先澄清或请求创建任务，绝不把默认任务冒充为用户目标。"
+            + prompt_text('skills/context.6', v0=catalog)
         )
 
     def live_state_text(self) -> str:
@@ -242,8 +238,5 @@ class SkillRuntime:
         completed = [item["title"] for item in snapshot["steps"] if item["status"] == "done"]
         observation = snapshot.get("observation") or {}
         return (
-            f"<runtime_state>当前步骤={self.task.current_step.id}:{self.task.current_step.title}; "
-            f"已确认完成={completed or ['无']}; 暂停={snapshot['paused']}; 总任务完成={snapshot['completed']}; "
-            f"最近观测={observation.get('summary', '无结构化观测')}; "
-            f"控制面决策={snapshot['decision']['action']}:{snapshot['decision']['reason']}</runtime_state>"
+            prompt_text('skills/live_state_text.1', v0=self.task.current_step.id, v1=self.task.current_step.title, v2=completed or ['无'], v3=snapshot['paused'], v4=snapshot['completed'], v5=observation.get('summary', '无结构化观测'), v6=snapshot['decision']['action'], v7=snapshot['decision']['reason'])
         )

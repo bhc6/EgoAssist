@@ -13,10 +13,10 @@ from typing import Any, Callable, Mapping
 
 from egoassist.memory.timeline import looks_like_question, normalize_identity
 from egoassist.product.contracts import IntentCandidate
-from .router_protocol import ROUTER_PROMPT, expand_decision
+from .router_protocol import EVENT_CONTENT_FIELDS, ROUTER_PROMPT, expand_decision
 
 
-TURN_ROUTER_POLICY_VERSION = "semantic-turn-router-v9"
+TURN_ROUTER_POLICY_VERSION = "semantic-turn-router-v13"
 TASK_CONTROLS = {
     "none", "confirm-step", "rollback", "repeat",
     "pause-task", "resume-task", "request-help", "show-reference",
@@ -414,7 +414,8 @@ class SemanticTurnRouter:
                 self._classify_request(str(text), skill_catalog, request_metrics),
                 timeout=self.timeout_seconds,
             )
-            parsed = expand_decision(json.loads(raw))
+            wire_decision = json.loads(raw)
+            parsed = expand_decision(wire_decision)
             if not isinstance(parsed, dict):
                 raise ValueError("router output must be a JSON object")
             legacy_fields = {
@@ -433,7 +434,7 @@ class SemanticTurnRouter:
             component_errors = []
             memory_components = {}
             for field, normalizer, empty in (
-                ("memoryAtoms", self._normalize_atoms, []),
+                ("memoryAtoms", lambda value: self._normalize_atoms(value, str(text)), []),
                 ("memoryDraft", self._normalize_draft, None),
                 ("memoryQuerySpec", self._normalize_query_spec, None),
             ):
@@ -522,6 +523,11 @@ class SemanticTurnRouter:
                 "model": self.model,
                 "status": "classified",
                 "componentErrors": component_errors,
+                "protocolNormalizations": (
+                    (["memoryQuery-object-to-spec"] if isinstance(wire_decision.get("memoryQuery"), dict) else [])
+                    + (["memoryEvents-to-source-events"] if "memoryEvents" in wire_decision else [])
+                    + (["ignored-top-level-event-content"] if "memoryEvents" in wire_decision and set(wire_decision) & EVENT_CONTENT_FIELDS else [])
+                ),
                 "speechControl": None if speech_control == "none" else speech_control,
                 "taskControl": None if task_control == "none" else task_control,
                 "preferenceIntent": None if preference_intent == "none" else preference_intent,
@@ -612,6 +618,8 @@ class SemanticTurnRouter:
             result_format="message", temperature=0, enable_thinking=False,
             response_format={"type": "json_object"},
         )
+        metrics["messages"] = arguments["messages"]
+        metrics["parameters"] = {key: value for key, value in arguments.items() if key not in {"messages", "model"}}
         # The injected SDK-shaped hook is only for explicit integrations/tests.
         # Production uses native async I/O: cancellation closes the request and
         # never leaves a timed-out HTTP call running in an executor thread.
@@ -678,7 +686,8 @@ class SemanticTurnRouter:
         return {"type": "correction", "supersedesTurnId": previous_id}
 
     @staticmethod
-    def _normalize_atoms(value: Any) -> list[dict[str, str]]:
+    def _normalize_atoms(value: Any, source_text: str = "") -> list[dict[str, Any]]:
+        from egoassist.memory.evidence import normalize_context
         if value is None:
             return []
         if not isinstance(value, list) or len(value) > 3:
@@ -686,7 +695,24 @@ class SemanticTurnRouter:
         result = []
         required = {"kind", "text", "subject", "predicate", "value", "scope", "consent"}
         for item in value:
-            if not isinstance(item, dict) or set(item) != required:
+            if isinstance(item, dict) and item.get("kind") == "event":
+                if set(item) - required - {"context"} or not {"kind", "scope", "consent"} <= set(item):
+                    raise ValueError("invalid event memory fields")
+                if item["scope"] not in {"case", "participant"} or item["consent"] not in {"observed", "explicit"}:
+                    raise ValueError("invalid event memory scope or consent")
+                event_text = source_text if source_text and len(value) == 1 else item.get("text", source_text)
+                if not isinstance(event_text, str) or not event_text.strip():
+                    raise ValueError("event memory requires source text")
+                if source_text and event_text not in source_text:
+                    raise ValueError("event excerpt must occur in the source turn")
+                if any(item.get(key) is not None and not isinstance(item[key], str) for key in ("subject", "predicate", "value")):
+                    raise ValueError("invalid optional event labels")
+                result.append({"kind": "event", "text": event_text.strip()[:500],
+                               "subject": item.get("subject"), "predicate": item.get("predicate"),
+                               "value": item.get("value"), "scope": item["scope"], "consent": item["consent"],
+                               "context": normalize_context(item.get("context"))})
+                continue
+            if not isinstance(item, dict) or set(item) - {"context"} != required:
                 raise ValueError("invalid memory atom fields")
             if item["kind"] not in {"fact", "event", "state", "preference"}:
                 raise ValueError("invalid memory atom kind")
@@ -696,7 +722,10 @@ class SemanticTurnRouter:
                 raise ValueError("memory atom values must be non-empty strings")
             if len(item["text"]) > 500 or len(item["subject"]) > 160 or len(item["predicate"]) > 80:
                 raise ValueError("memory atom is too long")
-            result.append({key: item[key].strip() for key in required})
+            atom = {key: item[key].strip() for key in required}
+            if "context" in item:
+                atom["context"] = normalize_context(item["context"])
+            result.append(atom)
         return result
 
     @staticmethod
@@ -724,17 +753,20 @@ class SemanticTurnRouter:
         }
 
     @staticmethod
-    def _normalize_query_spec(value: Any) -> dict[str, str | None] | None:
+    def _normalize_query_spec(value: Any) -> dict[str, Any] | None:
+        from egoassist.memory.evidence import normalize_context
         if value is None:
             return None
-        if not isinstance(value, dict) or set(value) != {"subject", "predicate"}:
+        if not isinstance(value, dict) or set(value) - {"context"} != {"subject", "predicate"}:
             raise ValueError("invalid memoryQuerySpec fields")
-        if any(item is not None and not isinstance(item, str) for item in value.values()):
+        if any(value[key] is not None and not isinstance(value[key], str) for key in ("subject", "predicate")):
             raise ValueError("invalid memoryQuerySpec values")
         result = {
             "subject": value["subject"].strip() if value["subject"] else None,
             "predicate": value["predicate"].strip() if value["predicate"] else None,
         }
+        if "context" in value:
+            result["context"] = normalize_context(value["context"])
         return result if any(result.values()) else None
 
     @staticmethod

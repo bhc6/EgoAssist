@@ -52,6 +52,12 @@
          at the top level rather than inside a collapsible panel (ADR 007). -->
     <section id="ambientBanner" class="ambient-banner" hidden></section>
 
+    <section class="performance-band" aria-label="实时性能审计">
+      <div class="performance-heading"><b>实时性能</b><span id="performanceWindow">暂无测量</span></div>
+      <div id="performanceMetrics" class="performance-metrics"></div>
+      <div id="performanceUsage" class="performance-usage"></div>
+    </section>
+
     <section class="research-grid">
       <aside class="source-panel panel">
         <div class="panel-head"><div><span>01 / RAW INPUT</span><h1>证据源</h1></div><b id="cameraState">设备离线</b></div>
@@ -69,6 +75,11 @@
           <article><span>USER TRANSCRIPT</span><p id="transcript">等待语音</p></article>
           <article id="assistantCaption"><span>SPOKEN AUDIO TRANSCRIPT</span><p>等待语音输出</p></article>
         </div>
+        <form id="textTurnForm" class="text-turn-form">
+          <label for="textTurnInput">消息</label>
+          <textarea id="textTurnInput" rows="2" maxlength="2000" required></textarea>
+          <button id="textTurnSend" type="submit">发送</button><span id="textTurnError" role="status"></span>
+        </form>
         <div class="quick">
           <button data-say="完成了" data-requires-task>目标达成</button><button data-say="再说一遍">重复</button>
           <button data-say="怎么做">请求帮助</button><button data-say="暂停" data-requires-task>暂停</button>
@@ -115,6 +126,24 @@
         <section aria-labelledby="resultInboxTitle"><h3 id="resultInboxTitle">结果</h3><div id="resultInbox" class="work-list"></div></section>
         <section aria-labelledby="artifactListTitle"><h3 id="artifactListTitle">当前步骤资料</h3><div id="artifactList" class="work-list"></div></section>
       </div>
+    </section>
+
+    <section class="insights-panel panel" aria-labelledby="insightTitle">
+      <div class="panel-head"><h2 id="insightTitle">记录报告与建议</h2><span id="insightStatus" role="status"></span></div>
+      <form id="insightForm" class="insight-controls">
+        <label>周期<select id="insightKind"><option value="daily">日报</option><option value="weekly">周报</option><option value="monthly">月报</option><option value="suggestions">当前建议</option></select></label>
+        <label>日期<input id="insightDate" type="date" required></label>
+        <label>来源范围<select id="insightScope"><option value="case">当前案例</option><option value="account">我的全部案例</option></select></label>
+        <button id="insightGenerate" type="submit">生成</button>
+        <label class="memory-switch"><input id="proactiveSuggestions" type="checkbox">在线主动建议</label>
+      </form>
+      <div id="insightResults" aria-live="polite"></div>
+    </section>
+
+    <section class="prompt-audit-panel panel" aria-labelledby="promptAuditTitle">
+      <div class="panel-head"><h2 id="promptAuditTitle">提示词与真实请求</h2><button id="refreshPromptAudit" type="button">刷新</button></div>
+      <details id="promptAuditDetails"><summary>已发送请求、证据与原始输出</summary><div id="actualPromptRequests"></div></details>
+      <details id="promptTemplatesDetails"><summary>提示词文件</summary><div id="promptTemplates"></div></details>
     </section>
 
     <section class="privacy-panel panel" aria-labelledby="privacyTitle">
@@ -185,6 +214,6 @@
     </form>
   </dialog>
   <script src="vendor/livekit-client.umd.js?v=2.21.0"></script>
-  <script src="app.js?v=20260813-workflow"></script>
+  <script src="app.js?v=20260909-insights"></script>
 </body>
 </html>

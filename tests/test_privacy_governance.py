@@ -43,6 +43,18 @@ def test_export_contains_identity_product_timeline_and_outcome(tmp_path):
     assert exported["product"]["schema"] == "egoassist.account-export.v1"
 
 
+def test_export_preserves_valid_rows_and_reports_corrupt_journal_lines(tmp_path):
+    user_id, _, _, _, service = _governance(tmp_path)
+    path = tmp_path / "users" / user_id / "sessions" / "damaged.jsonl"
+    path.parent.mkdir(parents=True)
+    path.write_text('{"id":"source-1","text":"original"}\n{"broken":\n', encoding="utf-8")
+    exported = service.export_account(user_id)
+    assert exported["complete"] is False
+    assert exported["journals"][0]["entries"][0]["id"] == "source-1"
+    assert exported["journals"][0]["invalidLines"] == [{"line": 2, "raw": '{"broken":'}]
+    assert exported["exportErrors"][0]["lines"] == [2]
+
+
 def test_deletion_is_complete_idempotent_and_only_leaves_bounded_evidence(tmp_path):
     user_id, identity, database, timeline, service = _governance(tmp_path)
     timeline.remember("sensitive", user_id=user_id, case_id=None, scope="participant", kind="fact")

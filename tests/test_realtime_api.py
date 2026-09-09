@@ -93,6 +93,39 @@ def semantic_result(text, *, selected_skill=None):
     }
 
 
+def test_model_consent_label_cannot_promote_a_field_note_event(tmp_path, monkeypatch):
+    install_queue_test_bridge(monkeypatch)
+
+    async def classify(_self, text, catalog):
+        return {**semantic_result(text), "memoryAtoms": [{
+            "kind": "event", "text": text, "subject": None, "predicate": None, "value": None,
+            "scope": "participant", "consent": "explicit", "context": {"entities": ["张岚"]},
+        }]}
+
+    monkeypatch.setattr(run_egoassist.SemanticTurnRouter, "classify", classify)
+
+    async def scenario():
+        app = create_app(str(BUILTIN_SKILLS_ROOT), None, str(tmp_path / "runtime.json"), "test-realtime", "Ethan")
+        async with TestClient(TestServer(app)) as client:
+            await register_client(client)
+            sid = (await (await client.post('/api/sessions')).json())["session"]["id"]
+            async with client.ws_connect('/ws/realtime?session=' + sid) as ws:
+                await _recv(ws)
+                await _recv(ws)
+                await ws.send_json({"type": "control", "transcript": "请整理现场记录：张岚收到了样机。"})
+                async with asyncio.timeout(3):
+                    while True:
+                        message = await ws.receive_json()
+                        if message.get("type") == "state" and message["state"]["episodicMemory"]["timelineViews"]["case"]["recent"]:
+                            views = message["state"]["episodicMemory"]["timelineViews"]
+                            assert views["participant"]["recent"] == []
+                            evidence = views["case"]["recent"][0]["metadata"]["evidenceContext"]
+                            assert evidence["scopeAdjustment"] == "event-durable-consent-not-grounded"
+                            break
+
+    asyncio.run(scenario())
+
+
 async def _recv(ws):
     """Read the next protocol message, skipping out-of-band memory_trace events.
 

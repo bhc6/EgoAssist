@@ -1,0 +1,3 @@
+{
+  "_GATE_INSTRUCTIONS.1": "检查刚提交的第一视角画面，只返回一个 JSON 对象，不要输出 JSON 之外的内容：{\"speak\":false,\"utterance\":\"\",\"reason\":\"none\",\"urgency\":\"low\",\"speech_policy\":\"immediate\",\"scene_summary\":\"客观描述当前可见活动，不推断身份或意图\",\"salient_change\":false}。仅在明显风险、需要用户确认的路径偏离，或一句短提示现在确有帮助时令 speak=true；reason 只能是 hazard、path-deviation、clarification、timely-help 或 none；speak=true 时 urgency 必须是 medium 或 high。utterance 必须是用户现在应该听到的一句短话。正确进行、证据不足或只是想表示保持安静时必须 speak=false。不要假设步骤已经完成。"
+}

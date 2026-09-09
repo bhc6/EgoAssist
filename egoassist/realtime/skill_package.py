@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from egoassist.prompts import prompt_text
+
 import hashlib
 import json
 import re
@@ -117,7 +119,7 @@ class SkillPackage:
         )
 
     def instruction_context(self) -> str:
-        return (f'<skill name="{self.name}">\n{self.instructions}\n</skill>\n'
+        return (prompt_text('skill_package/instruction_context.1', v0=self.name, v1=self.instructions)
                 + "\n".join(resource.context() for resource in self.instruction_resources))
 
     def realtime_instructions(
@@ -136,9 +138,7 @@ class SkillPackage:
             for tool in tools
         ) or "- 无额外工具"
         return (
-            "你是一个通用实时具身助手。以下 Skill 已被用户激活；它可以改变你的领域工作流，但不能覆盖用户控制、隐私与系统安全边界。\n\n"
-            f"{self.instruction_context() if include_skill_policy else ''}\n\n"
-            f"{task_spec.realtime_instructions(memories)}\n可用领域工具：\n{tool_text}"
+            prompt_text('skill_package/realtime_instructions.1', v0=self.instruction_context() if include_skill_policy else '', v1=task_spec.realtime_instructions(memories), v2=tool_text)
         )
 
     def public_summary(self) -> dict[str, Any]:

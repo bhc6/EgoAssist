@@ -1,0 +1,12 @@
+{
+  "passed": false,
+  "mock": false,
+  "model": "qwen3.5-omni-flash-realtime",
+  "input": "text-control",
+  "freshSession": true,
+  "value": "101060",
+  "turns": [],
+  "writeSession": "af1f936c60f64873",
+  "error": "AssertionError: {'type': 'provider_unavailable', 'lane': 'dialogue', 'reason': 'websocket connection could not established within 5s. Please check your network connection, firewall settings, or server status.'}",
+  "routing": []
+}

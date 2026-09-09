@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from egoassist.prompts import prompt_text
+
 import json
 import os
 import re
@@ -63,14 +65,7 @@ def perception_prompt(context: PerceptionFrameContext | Mapping[str, Any]) -> st
         for item in value.authorized_artifacts
     ]
     return (
-        "Inspect only the submitted egocentric frame against the immutable task context below. "
-        "Return one JSON object with checkpoint_id, completed, confidence, summary, "
-        "visible_evidence, hazards, and unrelated. hazards is an array of "
-        "{kind,message,confidence}. checkpoint_id must be one of the supplied candidates. "
-        "completed is only a visual hypothesis, never a command to advance the task. "
-        "Do not infer invisible actions, identity, intent, or facts from reference text alone. "
-        "Use unrelated=true when the frame does not show evidence relevant to this checkpoint. "
-        "Use Chinese for summary and hazard messages.\n"
+        prompt_text('perception/perception_prompt.1')
         + json.dumps(
             {
                 "schema": value.schema_version,
@@ -225,17 +220,7 @@ def ambient_prompt(context: AmbientFrameContext | Mapping[str, Any]) -> str:
         for item in value.watch_locations
     ]
     return (
-        "Inspect only the submitted egocentric frame against the immutable watch context below. "
-        "Return one JSON object with activity_id, observed, location_id, confidence, summary, "
-        "visible_evidence, and hazards. hazards is an array of {kind,message,confidence}. "
-        "activity_id must be one of the supplied activity candidates, or "
-        f"'{NONE_OBSERVED}' with observed=false when no watched activity is visible. "
-        "Absence is a valid and expected answer, not a failure. "
-        f"location_id must be one of the supplied location candidates, or '{UNKNOWN_LOCATION}'. "
-        "Report only what is visible in this frame. Never infer swallowing, ingestion, "
-        "consumption, dosage, identity, or intent, and never infer anything from reference "
-        "text alone. This observation carries no authority to advance or complete anything. "
-        "Use Chinese for summary and hazard messages.\n"
+        prompt_text('perception/ambient_prompt.1', v0=NONE_OBSERVED, v1=UNKNOWN_LOCATION)
         + json.dumps(
             {
                 "schema": value.schema_version,
@@ -435,10 +420,7 @@ class StructuredPerceptionAdapter:
         if allowed == ["unknown"]:
             raise ValueError("allowed checkpoints are required for model perception")
         prompt = (
-            "Conservatively map visible egocentric evidence to a checkpoint hypothesis. "
-            f"Return JSON only. checkpoint_id must be one of {json.dumps(allowed)}; include "
-            "completed, confidence, summary, visible_evidence, hazards, and unrelated. "
-            "Completion is evidence only, never a task advancement command."
+            prompt_text('perception/analyze.5', v0=json.dumps(allowed))
         )
         payload = {
             "model": self.model,

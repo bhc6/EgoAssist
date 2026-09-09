@@ -14,6 +14,25 @@ from egoassist.memory.timeline import (
 from egoassist.memory.temporal import ClockContext
 
 
+def retrieval_audit_from_events(events: list[dict[str, Any]]) -> dict[str, Any] | None:
+    retrieved = next((item for item in reversed(events) if item.get("type") == "episodic.memory.retrieved"), None)
+    if not retrieved:
+        return None
+    injected = next((item for item in reversed(events) if item.get("type") == "episodic.memory.injected"
+                     and item.get("parentEventIds") == retrieved.get("parentEventIds")), None)
+    if not injected:
+        return None
+    payload = retrieved["payload"]
+    injection = injected["payload"]
+    evidence = {item["episodeId"]: item for item in injection.get("evidence", [])}
+    candidates = [{**item, "record": evidence.get(item["episodeId"], {}),
+                   "retrievalReasons": item.get("retrievalReasons", [])}
+                  for item in payload.get("candidates", [])]
+    return {**payload, "candidates": candidates, "selected": [item for item in candidates if item.get("selected")],
+            "injection": injection, "auditEventId": retrieved["eventId"],
+            "timestamp": retrieved.get("timestampWall"), "projection": "last-journalled-retrieval"}
+
+
 class RealtimeEpisodeMemory:
     """Expose the former episodic API while storing typed timeline cards."""
 
@@ -93,6 +112,7 @@ class RealtimeEpisodeMemory:
         predicate: str | None = None,
         value: str | None = None,
         candidate_scope: str | None = None,
+        evidence_context: dict[str, Any] | None = None,
     ) -> dict[str, Any] | None:
         summary = " ".join(str(summary).split()).strip()[:1000]
         if not summary:
@@ -114,6 +134,7 @@ class RealtimeEpisodeMemory:
             "evidenceEventId": evidence_event_id,
             "originalKind": str(kind),
             "candidateScope": str(candidate_scope or "__default__"),
+            "evidenceContext": evidence_context or {},
         }
         card = self._timeline.remember(
             summary,
@@ -211,6 +232,8 @@ class RealtimeEpisodeMemory:
         selected = result.get("selected", [])
         injection = {
             "status": "injected" if selected else "no-evidence",
+            "queryContext": result.get("routing", {}).get("evidenceContext", {}),
+            "temporalStatus": result.get("routing", {}).get("temporalStatus", "not-requested"),
             "query": str(result.get("query", "")),
             "episodeIds": [item["episodeId"] for item in selected],
             "cardIds": [item["episodeId"] for item in selected],
@@ -224,6 +247,13 @@ class RealtimeEpisodeMemory:
                 "layer": item.get("layer"),
                 "score": item["score"],
                 "reasons": item.get("retrievalReasons", []),
+                "recordedAt": item["record"].get("recordedAt"),
+                "effectiveAt": item["record"].get("effectiveAt"),
+                "effectiveEnd": item["record"].get("effectiveEnd"),
+                "timezone": item["record"].get("timezone"),
+                "sourceIds": item["record"].get("sourceIds", []),
+                "evidenceContext": item["record"].get("evidenceContext", {}),
+                "temporalSupport": item.get("temporalSupport", "not-requested"),
             } for item in sorted(selected, key=lambda value: value["record"]["timestamp"])],
         }
         result["injection"] = injection
@@ -241,6 +271,7 @@ class RealtimeEpisodeMemory:
         session_id: str | None = None,
         user_scope: str = "local-default",
         allow_cross_session: bool = False,
+        allow_participant_overlay: bool = False,
     ) -> dict[str, Any]:
         user_id, case_id, memory_scope = self._identity(
             session_id=session_id,
@@ -253,7 +284,10 @@ class RealtimeEpisodeMemory:
             scope=memory_scope,
         )
         retrieval = self._last_retrieval_by_session.get(session_id or "__default__")
-        if retrieval is None or retrieval.get("scope", {}).get("memoryScope") != memory_scope:
+        visible_scopes = {memory_scope}
+        if memory_scope == "case" and allow_participant_overlay:
+            visible_scopes.add("case+participant")
+        if retrieval is None or retrieval.get("scope", {}).get("memoryScope") not in visible_scopes:
             retrieval = self.retrieve(
                 "", emit=False, session_id=session_id, user_scope=user_scope,
                 allow_cross_session=allow_cross_session,
@@ -266,6 +300,7 @@ class RealtimeEpisodeMemory:
             "retrieval": retrieval,
             "scope": memory_scope,
             "retainsRawMedia": False,
+            "evidenceNetwork": timeline_state.get("evidenceNetwork", {}),
         }
 
     def consolidate(
@@ -342,6 +377,7 @@ class RealtimeEpisodeMemory:
             "value": card.get("value"),
             "status": card.get("status"),
             "sourceIds": card.get("sourceIds", []),
+            "evidenceContext": metadata.get("evidenceContext", {}),
         }
 
     @classmethod
@@ -352,6 +388,7 @@ class RealtimeEpisodeMemory:
             "selected": item["selected"],
             "rejectionReasons": list(item.get("rejectionReasons", [])),
             "retrievalReasons": list(item.get("reasons", [])),
+            "temporalSupport": item.get("temporalSupport", "not-requested"),
             "scopeMatch": True,
             "sessionMatch": True,
             "layer": item.get("layer"),

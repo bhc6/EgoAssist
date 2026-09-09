@@ -89,6 +89,32 @@ def test_fake_ip_detection_is_limited_to_benchmark_network():
     assert not _is_fake_ip("not-an-ip")
 
 
+def test_dual_stack_uses_dns_ipv4_without_pinning_provider_addresses(monkeypatch):
+    monkeypatch.delenv("DASHSCOPE_REALTIME_IPS", raising=False)
+    monkeypatch.setattr(socket, "getaddrinfo", lambda *args, **kwargs: [
+        (socket.AF_INET6, socket.SOCK_STREAM, 0, "", ("2001:db8::1", 443, 0, 0)),
+        (socket.AF_INET, socket.SOCK_STREAM, 0, "", ("203.0.113.10", 443)),
+    ])
+    assert _realtime_public_ips() == ["203.0.113.10"]
+
+
+def test_session_updates_only_on_changed_policy_tools_or_connection():
+    bridge = scheduler_bridge()
+    bridge.voice, bridge.instructions = "Ethan", "policy"
+    calls = []
+    bridge.conversation.update_session = lambda **kwargs: calls.append(kwargs)
+    bridge._configure_dialogue(bridge.conversation)
+    bridge._configure_dialogue(bridge.conversation)
+    assert len(calls) == 1
+    bridge._provider_tools = [{"name": "reference"}]
+    bridge._configure_dialogue(bridge.conversation)
+    assert len(calls) == 2
+    replacement = FakeConversation()
+    replacement.update_session = lambda **kwargs: calls.append(kwargs)
+    bridge._configure_dialogue(replacement)
+    assert len(calls) == 3
+
+
 def test_provider_active_response_error_is_internal_backpressure():
     payload = {
         "type": "error",

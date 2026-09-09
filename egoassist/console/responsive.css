@@ -132,3 +132,27 @@
     min-width: 180px;
   }
 }
+/* Measured stages remain independently timestamped, including on narrow screens. */
+.performance-band { margin: 12px 0; padding: 12px 16px; border-top: 1px solid #cbd3ce; border-bottom: 1px solid #cbd3ce; background: #fff; }
+.performance-heading { display: flex; flex-wrap: wrap; gap: 8px 24px; align-items: baseline; font-size: 13px; }
+.performance-heading span, .performance-usage { color: #566760; font-size: 11px; overflow-wrap: anywhere; }
+.performance-metrics { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 12px; margin: 10px 0; }
+.performance-metric { display: grid; grid-template-rows: 18px 26px 16px; min-width: 0; }
+.performance-metric span, .performance-metric small { font-size: 11px; color: #566760; }
+.performance-metric b { font-size: 17px; font-variant-numeric: tabular-nums; }
+.tl-evidence-detail pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 320px; overflow: auto; font-size: 11px; }
+.text-turn-form { display: grid; grid-template-columns: 1fr auto; gap: 6px; margin: 12px 0; }
+.text-turn-form label, .text-turn-form textarea, #textTurnError { grid-column: 1 / -1; }
+.text-turn-form textarea { width: 100%; min-width: 0; box-sizing: border-box; resize: vertical; }
+.text-turn-form button { grid-column: 2; }
+#textTurnError { font-size: 12px; color: #a13729; overflow-wrap: anywhere; }
+@media (max-width: 650px) { .performance-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+.insight-controls { display: flex; flex-wrap: wrap; gap: 12px; align-items: end; margin-bottom: 12px; }
+.insight-controls label { display: flex; flex-direction: column; gap: 4px; }
+.insight-controls .memory-switch { flex-direction: row; align-items: center; }
+.insight-item { padding: 10px 0; border-top: 1px solid #dce3df; overflow-wrap: anywhere; }
+.insight-item p { margin: 4px 0; }
+.insight-item pre, .prompt-audit-panel pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 420px; overflow: auto; }
+.insight-source { border-left: 2px solid #3b8067; margin: 8px 0; padding-left: 10px; }
+#insightStatus { overflow-wrap: anywhere; }
+@media (max-width: 600px) { .insight-controls > label { flex: 1 1 130px; min-width: 0; } .insight-controls input, .insight-controls select { max-width: 100%; min-width: 0; } }

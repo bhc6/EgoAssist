@@ -1,0 +1,13 @@
+{
+  "mock": false,
+  "url": "http://127.0.0.1:8780",
+  "runtimeRoot": ".egoassist-real-demo",
+  "sessionId": "654a81721e304ac0",
+  "providerConnected": true,
+  "model": "qwen3.5-omni-flash-realtime",
+  "input": "请用一句话回答：今天是几月几日？",
+  "assistantTranscript": "今天是2026年9月9日。",
+  "audioPackets": 7,
+  "errors": [],
+  "verification": "scripts/check_realtime.py against the running service; completed assistant transcript and actual audio received"
+}

@@ -15,7 +15,8 @@ from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping
 from uuid import uuid4
 
-from .temporal import ClockContext, query_time_range
+from .temporal import ClockContext, query_time_range, resolve_time_semantics
+from .evidence import evidence_network, ground_context, time_matches
 
 
 class _ClosingConnection:
@@ -881,6 +882,14 @@ class TimelineMemory:
         query_spec = dict(query_spec or {})
         query_subject = normalize_identity(query_spec.get("subject"))
         query_predicate = normalize_identity(query_spec.get("predicate"))
+        query_context = ground_context(query_spec.get("context"), query, clock)
+        query_entities = [normalize_identity(item) for item in query_context["entities"]]
+        query_times = [item for item in query_context["times"] if item["status"] == "resolved"]
+        temporal_status = "resolved" if query_times else "not-requested"
+        if any(item["status"] != "resolved" for item in query_context["times"]) or (
+            not query_context["times"] and resolve_time_semantics(query, clock, kind=None)["ambiguous"]
+        ):
+            temporal_status = "needs-clarification"
         query_normalized = normalize_text(query)
         query_terms = self._tokenize(query)
         requested_kinds = set(DEFAULT_RETRIEVABLE_KINDS if kinds is None else kinds)
@@ -913,6 +922,8 @@ class TimelineMemory:
         wants_today = any(marker in query_normalized for marker in self._hints.today_hints)
         today_key = clock.local_now.date().isoformat()
         range_start, range_end = query_time_range(query, clock)
+        if query_context["times"]:
+            range_start, range_end = None, None
 
         # Batch FTS5 scoring for all candidates
         fts_scores: dict[str, float] = {}
@@ -962,8 +973,38 @@ class TimelineMemory:
                     if card_end is not None
                     else range_start <= card_start < upper
                 )
+            evidence = card.get("metadata", {}).get("evidenceContext", {})
+            card_times = [item for item in evidence.get("times", []) if item.get("start")]
+            temporal_support = "not-requested"
+            if query_times:
+                temporal_support = "unresolved"
+                if card_times:
+                    time_eligible = all(any(time_matches(requested, item) for item in (
+                        [item for item in card_times if normalize_identity(item.get("relation")) ==
+                         normalize_identity(requested["relation"])] or card_times
+                    )) for requested in query_times)
+                    temporal_support = "matching-references" if time_eligible else "conflicting-references"
+                elif len(query_times) == 1 and card.get("effectiveAt"):
+                    time_eligible = time_matches(query_times[0], {
+                        "start": card["effectiveAt"], "end": card.get("effectiveEnd"),
+                    })
+                    temporal_support = "legacy-event-time" if time_eligible else "conflicting-event-time"
+            card_entities = {normalize_identity(item) for item in evidence.get("entities", [])}
+            entity_eligible = all(item in card_entities or item in normalize_identity(card["text"])
+                                  for item in query_entities)
+            scene_eligible = not query_context["scene"] or (
+                normalize_identity(query_context["scene"]) in normalize_identity(
+                    str(evidence.get("scene") or "") + " " + card["text"]
+                )
+            )
             subject_eligible = not query_subject or _subject_identity(card.get("subject")) == _subject_identity(query_subject)
             predicate_eligible = not query_predicate or normalize_identity(card.get("predicate")) == query_predicate
+            if card["kind"] == "event":
+                # An interaction can contain several people and relations;
+                # its evidence is not exhausted by a single extracted triple.
+                event_text = normalize_identity(card["text"])
+                subject_eligible = subject_eligible or query_subject in card_entities or bool(query_subject and query_subject in event_text)
+                predicate_eligible = predicate_eligible or bool(query_predicate and query_predicate in event_text)
             # Verbatim fallback cards have no extracted entity/relation. Treat
             # their placeholder as unknown, allowing only constraints actually
             # present in the saved text; never relax a known structured mismatch.
@@ -974,7 +1015,7 @@ class TimelineMemory:
             # Ineligible rows remain in the audit, but cannot contribute a score.
             # Avoid tokenizing their text on every structured lookup.
             card_terms = self._tokenize(card["text"]) if (
-                time_eligible and subject_eligible and predicate_eligible
+                time_eligible and subject_eligible and predicate_eligible and entity_eligible and scene_eligible
             ) else set()
             overlap = len(query_terms & card_terms)
             union = max(1, len(query_terms | card_terms))
@@ -992,7 +1033,7 @@ class TimelineMemory:
             # eligibility filters below (query constraints, not score priors).
             score = max(0.0, lexical)
             structured_match = bool(query_subject or query_predicate) and subject_eligible and predicate_eligible
-            eligible = time_eligible and subject_eligible and predicate_eligible and (
+            eligible = time_eligible and subject_eligible and predicate_eligible and entity_eligible and scene_eligible and (
                 structured_match or overlap > 0
             )
             # Pinned fast-path cards (direct key lookup) qualify on the strength of
@@ -1001,7 +1042,7 @@ class TimelineMemory:
             # A canonical fact recorded outside the asked-about range is not an
             # answer to a time-scoped question (e.g. "did I take my meds at 3pm?"
             # must not surface the 4pm dose just because it shares the same key).
-            if card["id"] in pinned_card_ids and time_eligible and subject_eligible and predicate_eligible:
+            if card["id"] in pinned_card_ids and time_eligible and subject_eligible and predicate_eligible and entity_eligible and scene_eligible:
                 score = 1.0
                 eligible = True
             reasons = []
@@ -1019,11 +1060,14 @@ class TimelineMemory:
                 "selected": False,
                 "layer": layer,
                 "kind": card["kind"],
+                "temporalSupport": temporal_support,
                 "reasons": reasons,
                 "rejectionReasons": [] if eligible else [
                     "time-mismatch" if not time_eligible else
                     "subject-mismatch" if not subject_eligible else
                     "predicate-mismatch" if not predicate_eligible else
+                    "entity-mismatch" if not entity_eligible else
+                    "scene-mismatch" if not scene_eligible else
                     "no-relevant-evidence"
                 ],
                 "card": card,
@@ -1050,6 +1094,8 @@ class TimelineMemory:
                 "layers": ["current", "short", "long"],
                 "clock": clock.prompt_payload(),
                 "querySpec": {"subject": query_subject, "predicate": query_predicate},
+                "evidenceContext": query_context,
+                "temporalStatus": temporal_status,
             },
             "minimumScore": _min_score,
             "timing": {"retrievalMs": round((time.perf_counter() - started) * 1000, 3),
@@ -1057,7 +1103,9 @@ class TimelineMemory:
             "candidates": candidates[:20],
             "selected": selected,
             "injection": {"status": "not-injected", "cardIds": []},
-            "claimBoundary": "Entity and civil-time constraints are applied before lexical/embedding ranking; retrieval does not infer an answer.",
+            "scoreMeaning": "lexical-ranking-or-exact-key-priority",
+            "calibratedProbability": None,
+            "claimBoundary": "Source-grounded entity and time constraints precede lexical ranking. Unknown temporal roles remain unresolved. Scores are not truth probabilities.",
         }
 
     def promote_to_long(self, *, user_id: str, case_id: str | None, scope: str) -> dict[str, Any]:
@@ -1133,6 +1181,8 @@ class TimelineMemory:
             "count": len(cards),
             "layers": counts,
             "recent": cards[:12],
+            "evidenceNetwork": {**evidence_network([card for card in cards if card["status"] == "active"]),
+                                "cardLimit": 200, "scope": scope},
             "scope": scope,
             "draft": self.pending_draft(user_id=user_id, case_id=case_id) if scope == "case" and case_id else None,
             "retainsRawMedia": False,

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from egoassist.prompts import prompt_text
+
 import asyncio
 import base64
 from collections import deque
@@ -114,6 +116,11 @@ def _realtime_public_ips(host: str = _DASHSCOPE_HOST) -> list[str]:
             f"DashScope DNS lookup failed for {host}; configure DASHSCOPE_REALTIME_IPS or a working resolver"
         ) from exc
     if system_ips and not all(_is_fake_ip(item) for item in system_ips):
+        # The SDK's WebSocket dial has no Happy Eyeballs and only waits 5s.
+        # Prefer current DNS IPv4 answers on dual-stack hosts; preserve SNI.
+        ipv4 = [item for item in system_ips if ":" not in item and not _is_fake_ip(item)]
+        if ipv4 and any(":" in item for item in system_ips):
+            return ipv4
         return []
     resolver_urls = [
         item.strip() for item in os.getenv(
@@ -178,13 +185,7 @@ class _OmniPerceptionLane:
 
     _SILENT_PCM16 = base64.b64encode(bytes(640)).decode("ascii")
     _GATE_INSTRUCTIONS = (
-        "检查刚提交的第一视角画面，只返回一个 JSON 对象，不要输出 JSON 之外的内容："
-        '{"speak":false,"utterance":"","reason":"none","urgency":"low","speech_policy":"immediate",'
-        '"scene_summary":"客观描述当前可见活动，不推断身份或意图","salient_change":false}。'
-        "仅在明显风险、需要用户确认的路径偏离，或一句短提示现在确有帮助时令 speak=true；"
-        "reason 只能是 hazard、path-deviation、clarification、timely-help 或 none；"
-        "speak=true 时 urgency 必须是 medium 或 high。utterance 必须是用户现在应该听到的一句短话。"
-        "正确进行、证据不足或只是想表示保持安静时必须 speak=false。不要假设步骤已经完成。"
+        prompt_text('omni/_GATE_INSTRUCTIONS.1')
     )
 
     def __init__(
@@ -643,6 +644,10 @@ class OmniBrowserBridge:
         )
 
     def _configure_dialogue(self, conversation) -> None:
+        tools = getattr(self, "_provider_tools", [])
+        signature = (conversation, self.voice, self.instructions, json.dumps(tools, sort_keys=True))
+        if getattr(self, "_last_dialogue_configuration", None) == signature:
+            return
         conversation.update_session(
             output_modalities=[self.modalities.AUDIO, self.modalities.TEXT],
             voice=self.voice,
@@ -653,8 +658,11 @@ class OmniBrowserBridge:
             turn_detection_threshold=0.2,
             turn_detection_silence_duration_ms=650,
             turn_detection_param={"create_response": False, "interrupt_response": True},
-            tools=getattr(self, "_provider_tools", []),
+            tools=tools,
         )
+        self._last_dialogue_configuration = signature
+        self._trace("model.prompt", {"channel": "session.update", "instructions": self.instructions,
+                                    "tools": tools, "model": getattr(self, "model", None)})
 
     def _replay_context(self, conversation) -> int:
         harness = getattr(self, "_context_harness", None)
@@ -1718,7 +1726,8 @@ class OmniBrowserBridge:
 
     def _send_response(self, request: _ResponseRequest) -> None:
         try:
-            self._trace("response.dispatched", {"sequence": request.sequence, "priority": request.priority, "speechPolicy": request.speech_policy, "outputMode": request.output_mode, "purpose": request.purpose})
+            self._trace("response.dispatched", {"sequence": request.sequence, "priority": request.priority, "speechPolicy": request.speech_policy, "outputMode": request.output_mode, "purpose": request.purpose,
+                                                "instructions": request.instructions})
             self.conversation.create_response(
                 instructions=request.instructions,
                 output_modalities=[self.modalities.TEXT] if request.output_mode == "text" else [self.modalities.AUDIO, self.modalities.TEXT],

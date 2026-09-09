@@ -42,3 +42,4 @@ research_references/
 # ---- 系统 ----
 .DS_Store
 node_modules/
+.egoassist-insights-demo/

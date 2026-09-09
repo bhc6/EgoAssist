@@ -1,0 +1,522 @@
+{
+  "passed": true,
+  "mock": false,
+  "input": "text-control",
+  "model": "qwen3.5-omni-flash-realtime",
+  "clock": {
+    "nowUtc": "2026-09-09T01:53:34+00:00",
+    "localNow": "2026-09-09T09:53:34+08:00",
+    "timezone": "Asia/Shanghai",
+    "utcOffsetMinutes": 480,
+    "authority": "server-clock",
+    "timezoneSource": "iana"
+  },
+  "testCode": "Q03CDA9",
+  "writes": [
+    {
+      "input": "请记住：2026-09-08陈澄和周岳在实验室讨论了2026-09-06的约定：由周岳把编号Q03CDA9的青色样机交给苏岩。",
+      "receipt": {
+        "type": "memory_status",
+        "status": "committed",
+        "message": "已保存：请记住：2026-09-08陈澄和周岳在实验室讨论了2026-09-06的约定：由周岳把编号Q03CDA9的青色样机交给苏岩。",
+        "committedCardIds": [
+          "c5f153e1fda04368"
+        ]
+      },
+      "receiptMs": 1879.6
+    },
+    {
+      "input": "请记住：2026-09-06陈澄和周岳在实验室讨论了2026-09-08的约定：由陈澄把红色文件交给赵宇。",
+      "receipt": {
+        "type": "memory_status",
+        "status": "committed",
+        "message": "已保存：请记住：2026-09-06陈澄和周岳在实验室讨论了2026-09-08的约定：由陈澄把红色文件交给赵宇。",
+        "committedCardIds": [
+          "ded84af1bdc94b9e"
+        ]
+      },
+      "receiptMs": 1951
+    }
+  ],
+  "turns": [
+    {
+      "input": "陈澄和周岳昨天在实验室讨论的、以那次讨论为参照的前天的约定是什么？请简短回答。",
+      "audioPackets": 20,
+      "firstTextMs": 1461.3,
+      "firstAudioMs": 1727.3,
+      "transcript": "前天的约定是周岳把编号Q03CDA9的青色样机交给苏岩。",
+      "terminal": {
+        "sequence": 1,
+        "status": "response.done",
+        "usage": {
+          "inputTokens": 2053,
+          "outputTokens": 103,
+          "totalTokens": 2156,
+          "inputTokenDetails": {
+            "text_tokens": 2053
+          },
+          "outputTokenDetails": {
+            "text_tokens": 24,
+            "audio_tokens": 79
+          }
+        },
+        "fragmentCommitted": true,
+        "interrupted": false,
+        "localCancelRequested": false
+      },
+      "finishedMs": 3256
+    }
+  ],
+  "relativeAnchor": true,
+  "userId": "171f242ce4144f7c",
+  "writeSession": "085e3482fece4a3b",
+  "recallSession": "73cbee31ec404d94",
+  "performance": {
+    "metrics": {
+      "retrievalMs": {
+        "name": "retrievalMs",
+        "value": 4.881,
+        "eventId": "8e2e105a6f9e499f",
+        "responseId": null,
+        "timestamp": "2026-09-09T01:53:39.904+00:00",
+        "samples": 1,
+        "median": 4.881,
+        "minimum": 4.881,
+        "maximum": 4.881
+      },
+      "routerMs": {
+        "name": "routerMs",
+        "value": 957.2,
+        "eventId": "1ab08d83b60f49c4",
+        "responseId": null,
+        "timestamp": "2026-09-09T01:53:39.908+00:00",
+        "samples": 1,
+        "median": 957.2,
+        "minimum": 957.2,
+        "maximum": 957.2
+      },
+      "responseFirstTextMs": {
+        "name": "responseFirstTextMs",
+        "value": 447.036,
+        "eventId": "c3c0595fab584c23",
+        "responseId": "resp_BrwfIwETpw79PUPJfUKSh",
+        "timestamp": "2026-09-09T01:53:40.388+00:00",
+        "samples": 1,
+        "median": 447.036,
+        "minimum": 447.036,
+        "maximum": 447.036
+      },
+      "responseFirstAudioMs": {
+        "name": "responseFirstAudioMs",
+        "value": 712.617,
+        "eventId": "8084ad3b2efa490f",
+        "responseId": "resp_BrwfIwETpw79PUPJfUKSh",
+        "timestamp": "2026-09-09T01:53:40.654+00:00",
+        "samples": 1,
+        "median": 712.617,
+        "minimum": 712.617,
+        "maximum": 712.617
+      }
+    },
+    "latestUsage": {
+      "responseId": "resp_BrwfIwETpw79PUPJfUKSh",
+      "eventId": "eabc2d7baa264832",
+      "status": "response.done",
+      "inputTokens": 2053,
+      "outputTokens": 103,
+      "totalTokens": 2156,
+      "inputTokenDetails": {
+        "text_tokens": 2053
+      },
+      "outputTokenDetails": {
+        "text_tokens": 24,
+        "audio_tokens": 79
+      }
+    },
+    "timeouts": 0,
+    "windowEvents": 34,
+    "windowLimit": 160,
+    "claimBoundary": "Measured stages from the current session's latest 160 events. Response first output starts at response request, excluding routing, microphone endpointing and playback. Separate stages may belong to different turns; do not sum them."
+  },
+  "injectedEvidence": [
+    {
+      "episodeId": "c5f153e1fda04368",
+      "cardId": "c5f153e1fda04368",
+      "timestamp": "2026-09-09T01:53:36.670+00:00",
+      "source": "semantic-memory-card",
+      "summary": "请记住：2026-09-08陈澄和周岳在实验室讨论了2026-09-06的约定：由周岳把编号Q03CDA9的青色样机交给苏岩。",
+      "kind": "event",
+      "layer": "current",
+      "score": 0.1638,
+      "reasons": [
+        "term-overlap"
+      ],
+      "recordedAt": "2026-09-09T01:53:36.670+00:00",
+      "effectiveAt": null,
+      "effectiveEnd": null,
+      "timezone": "Asia/Shanghai",
+      "sourceIds": [
+        "1b173f0f9eea4ad1"
+      ],
+      "evidenceContext": {
+        "calibratedProbability": null,
+        "clock": {
+          "authority": "server-clock",
+          "localNow": "2026-09-09T09:53:36+08:00",
+          "nowUtc": "2026-09-09T01:53:36+00:00",
+          "timezone": "Asia/Shanghai",
+          "timezoneSource": "iana",
+          "utcOffsetMinutes": 480
+        },
+        "entities": [
+          "陈澄",
+          "周岳",
+          "苏岩"
+        ],
+        "rejected": [],
+        "scene": "在实验室",
+        "sourceSessionId": "085e3482fece4a3b",
+        "sourceText": "请记住：2026-09-08陈澄和周岳在实验室讨论了2026-09-06的约定：由周岳把编号Q03CDA9的青色样机交给苏岩。",
+        "status": "source-grounded-labels",
+        "times": [
+          {
+            "anchor": "turn",
+            "end": "2026-09-08T16:00:00.000+00:00",
+            "expression": "2026-09-08",
+            "relation": "讨论",
+            "start": "2026-09-07T16:00:00.000+00:00",
+            "status": "resolved"
+          },
+          {
+            "anchor": "turn",
+            "end": "2026-09-06T16:00:00.000+00:00",
+            "expression": "2026-09-06",
+            "relation": "约定",
+            "start": "2026-09-05T16:00:00.000+00:00",
+            "status": "resolved"
+          }
+        ]
+      },
+      "temporalSupport": "matching-references"
+    }
+  ],
+  "exportAudit": {
+    "complete": true,
+    "cards": [
+      {
+        "id": "c5f153e1fda04368",
+        "userId": "171f242ce4144f7c",
+        "caseId": "085e3482fece4a3b",
+        "scope": "participant",
+        "tier": "long",
+        "kind": "event",
+        "text": "请记住：2026-09-08陈澄和周岳在实验室讨论了2026-09-06的约定：由周岳把编号Q03CDA9的青色样机交给苏岩。",
+        "normalizedText": "请记住：2026-09-08陈澄和周岳在实验室讨论了2026-09-06的约定：由周岳把编号q03cda9的青色样机交给苏岩。",
+        "memoryKey": null,
+        "happenedAt": "2026-09-09T01:53:36.670+00:00",
+        "dayKey": "2026-09-09",
+        "recordedAt": "2026-09-09T01:53:36.670+00:00",
+        "effectiveAt": null,
+        "effectiveEnd": null,
+        "timezone": "Asia/Shanghai",
+        "utcOffsetMinutes": 480,
+        "recurrence": null,
+        "subject": null,
+        "predicate": null,
+        "value": null,
+        "sourceIds": [
+          "1b173f0f9eea4ad1"
+        ],
+        "status": "active",
+        "importance": 1,
+        "supersedes": null,
+        "metadata": {
+          "candidateScope": "085e3482fece4a3b",
+          "evidenceContext": {
+            "calibratedProbability": null,
+            "clock": {
+              "authority": "server-clock",
+              "localNow": "2026-09-09T09:53:36+08:00",
+              "nowUtc": "2026-09-09T01:53:36+00:00",
+              "timezone": "Asia/Shanghai",
+              "timezoneSource": "iana",
+              "utcOffsetMinutes": 480
+            },
+            "entities": [
+              "陈澄",
+              "周岳",
+              "苏岩"
+            ],
+            "rejected": [],
+            "scene": "在实验室",
+            "sourceSessionId": "085e3482fece4a3b",
+            "sourceText": "请记住：2026-09-08陈澄和周岳在实验室讨论了2026-09-06的约定：由周岳把编号Q03CDA9的青色样机交给苏岩。",
+            "status": "source-grounded-labels",
+            "times": [
+              {
+                "anchor": "turn",
+                "end": "2026-09-08T16:00:00.000+00:00",
+                "expression": "2026-09-08",
+                "relation": "讨论",
+                "start": "2026-09-07T16:00:00.000+00:00",
+                "status": "resolved"
+              },
+              {
+                "anchor": "turn",
+                "end": "2026-09-06T16:00:00.000+00:00",
+                "expression": "2026-09-06",
+                "relation": "约定",
+                "start": "2026-09-05T16:00:00.000+00:00",
+                "status": "resolved"
+              }
+            ]
+          },
+          "evidenceEventId": "1b173f0f9eea4ad1",
+          "originalKind": "event",
+          "skill": null,
+          "source": "semantic-memory-card",
+          "task": null
+        },
+        "createdAt": "2026-09-09T01:53:36.670+00:00",
+        "updatedAt": "2026-09-09T01:53:36.670+00:00"
+      }
+    ],
+    "journalSessions": [
+      "085e3482fece4a3b",
+      "73cbee31ec404d94",
+      "memory_trace"
+    ],
+    "sourceReferencesResolved": true
+  },
+  "otherUserIsolated": true,
+  "routing": [
+    {
+      "method": "semantic-turn-router-v13",
+      "model": "qwen-flash",
+      "status": "classified",
+      "componentErrors": [],
+      "protocolNormalizations": [
+        "memoryEvents-to-source-events"
+      ],
+      "speechControl": null,
+      "taskControl": null,
+      "preferenceIntent": null,
+      "memoryQuery": null,
+      "memoryKind": "event",
+      "memoryText": "请记住：2026-09-08陈澄和周岳在实验室讨论了2026-09-06的约定：由周岳把编号Q03CDA9的青色样机交给苏岩。",
+      "memoryKey": null,
+      "memoryScope": "participant",
+      "memoryConsent": "explicit",
+      "memoryAtoms": [
+        {
+          "kind": "event",
+          "text": "请记住：2026-09-08陈澄和周岳在实验室讨论了2026-09-06的约定：由周岳把编号Q03CDA9的青色样机交给苏岩。",
+          "subject": null,
+          "predicate": null,
+          "value": null,
+          "scope": "participant",
+          "consent": "explicit",
+          "context": {
+            "entities": [
+              "陈澄",
+              "周岳",
+              "苏岩"
+            ],
+            "scene": "在实验室",
+            "times": [
+              {
+                "relation": "讨论",
+                "expression": "2026-09-08",
+                "anchor": "turn"
+              },
+              {
+                "relation": "约定",
+                "expression": "2026-09-06",
+                "anchor": "turn"
+              }
+            ]
+          }
+        }
+      ],
+      "memoryDraft": null,
+      "memoryQuerySpec": null,
+      "skillControl": null,
+      "selectedSkill": null,
+      "intentKind": "foreground-dialogue",
+      "intents": [
+        {
+          "kind": "foreground-dialogue",
+          "text": "请记住：2026-09-08陈澄和周岳在实验室讨论了2026-09-06的约定：由周岳把编号Q03CDA9的青色样机交给苏岩。",
+          "parameters": {}
+        }
+      ],
+      "revision": null,
+      "skillStatus": "no-match",
+      "rawOutput": "{\"v\":1,\"memoryEvents\":[{\"scope\":\"participant\",\"consent\":\"explicit\",\"context\":{\"entities\":[\"陈澄\",\"周岳\",\"苏岩\"],\"times\":[{\"relation\":\"讨论\",\"expression\":\"2026-09-08\",\"anchor\":\"turn\"},{\"relation\":\"约定\",\"expression\":\"2026-09-06\",\"anchor\":\"turn\"}],\"scene\":\"在实验室\"},\"text\":\"陈澄和周岳在实验室讨论了2026-09-06的约定：由周岳把编号Q03CDA9的青色样机交给苏岩。\"}]}",
+      "requestMetrics": {
+        "httpStatus": 200,
+        "usage": {
+          "input_tokens": 2439,
+          "output_tokens": 126,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "total_tokens": 2565
+        },
+        "requestId": "d2b00cdf-590b-9af9-8059-c235ed6ccb43"
+      },
+      "latencyMs": 1801.9,
+      "policyVersion": "semantic-turn-router-v13",
+      "claimBoundary": "Only the current transcript is classified, with explicit clock, pending draft and previous-turn context. Labels are hypotheses, not facts.",
+      "acceptedIntents": []
+    },
+    {
+      "method": "semantic-turn-router-v13",
+      "model": "qwen-flash",
+      "status": "classified",
+      "componentErrors": [],
+      "protocolNormalizations": [],
+      "speechControl": null,
+      "taskControl": null,
+      "preferenceIntent": null,
+      "memoryQuery": null,
+      "memoryKind": "event",
+      "memoryText": "请记住：2026-09-06陈澄和周岳在实验室讨论了2026-09-08的约定：由陈澄把红色文件交给赵宇。",
+      "memoryKey": null,
+      "memoryScope": "participant",
+      "memoryConsent": "explicit",
+      "memoryAtoms": [
+        {
+          "kind": "event",
+          "text": "请记住：2026-09-06陈澄和周岳在实验室讨论了2026-09-08的约定：由陈澄把红色文件交给赵宇。",
+          "subject": "约定",
+          "predicate": "讨论",
+          "value": "2026-09-08",
+          "scope": "participant",
+          "consent": "explicit",
+          "context": {
+            "entities": [
+              "陈澄",
+              "周岳"
+            ],
+            "scene": null,
+            "times": [
+              {
+                "relation": "讨论",
+                "expression": "2026-09-06",
+                "anchor": "turn"
+              },
+              {
+                "relation": "约定",
+                "expression": "2026-09-08",
+                "anchor": "turn"
+              }
+            ]
+          }
+        }
+      ],
+      "memoryDraft": null,
+      "memoryQuerySpec": null,
+      "skillControl": null,
+      "selectedSkill": null,
+      "intentKind": "foreground-dialogue",
+      "intents": [
+        {
+          "kind": "foreground-dialogue",
+          "text": "请记住：2026-09-06陈澄和周岳在实验室讨论了2026-09-08的约定：由陈澄把红色文件交给赵宇。",
+          "parameters": {}
+        }
+      ],
+      "revision": null,
+      "skillStatus": "no-match",
+      "rawOutput": "{\"v\":1,\"memoryAtoms\":[{\"kind\":\"event\",\"text\":\"2026-09-06陈澄和周岳在实验室讨论了2026-09-08的约定：由陈澄把红色文件交给赵宇。\",\"subject\":\"约定\",\"predicate\":\"讨论\",\"value\":\"2026-09-08\",\"scope\":\"participant\",\"consent\":\"explicit\",\"context\":{\"entities\":[\"陈澄\",\"周岳\"],\"times\":[{\"relation\":\"讨论\",\"expression\":\"2026-09-06\",\"anchor\":\"turn\"},{\"relation\":\"约定\",\"expression\":\"2026-09-08\",\"anchor\":\"turn\"}]}}]}",
+      "requestMetrics": {
+        "httpStatus": 200,
+        "usage": {
+          "input_tokens": 2720,
+          "output_tokens": 144,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "total_tokens": 2864
+        },
+        "requestId": "8b070360-3605-99a5-96ad-47e69713dd55"
+      },
+      "latencyMs": 1880.8,
+      "policyVersion": "semantic-turn-router-v13",
+      "claimBoundary": "Only the current transcript is classified, with explicit clock, pending draft and previous-turn context. Labels are hypotheses, not facts.",
+      "acceptedIntents": []
+    },
+    {
+      "method": "semantic-turn-router-v13",
+      "model": "qwen-flash",
+      "status": "classified",
+      "componentErrors": [],
+      "protocolNormalizations": [],
+      "speechControl": null,
+      "taskControl": null,
+      "preferenceIntent": null,
+      "memoryQuery": "referential",
+      "memoryKind": null,
+      "memoryText": null,
+      "memoryKey": null,
+      "memoryScope": null,
+      "memoryConsent": null,
+      "memoryAtoms": [],
+      "memoryDraft": null,
+      "memoryQuerySpec": {
+        "subject": null,
+        "predicate": null,
+        "context": {
+          "entities": [
+            "陈澄",
+            "周岳"
+          ],
+          "scene": null,
+          "times": [
+            {
+              "relation": "讨论",
+              "expression": "昨天",
+              "anchor": "turn"
+            },
+            {
+              "relation": "约定",
+              "expression": "前天",
+              "anchor": "0"
+            }
+          ]
+        }
+      },
+      "skillControl": null,
+      "selectedSkill": null,
+      "intentKind": "foreground-dialogue",
+      "intents": [
+        {
+          "kind": "foreground-dialogue",
+          "text": "陈澄和周岳昨天在实验室讨论的、以那次讨论为参照的前天的约定是什么？请简短回答。",
+          "parameters": {}
+        }
+      ],
+      "revision": null,
+      "skillStatus": "no-match",
+      "rawOutput": "{\"v\":1,\"memoryQuerySpec\":{\"subject\":null,\"predicate\":null,\"context\":{\"entities\":[\"陈澄\",\"周岳\"],\"times\":[{\"relation\":\"讨论\",\"expression\":\"昨天\",\"anchor\":\"turn\"},{\"relation\":\"约定\",\"expression\":\"前天\",\"anchor\":\"0\"}]}}}",
+      "requestMetrics": {
+        "httpStatus": 200,
+        "usage": {
+          "input_tokens": 2412,
+          "output_tokens": 56,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "total_tokens": 2468
+        },
+        "requestId": "8b80d0ee-1aef-947c-b80b-750390e03b7d"
+      },
+      "latencyMs": 957.2,
+      "policyVersion": "semantic-turn-router-v13",
+      "claimBoundary": "Only the current transcript is classified, with explicit clock, pending draft and previous-turn context. Labels are hypotheses, not facts.",
+      "acceptedIntents": []
+    }
+  ],
+  "sourceReport": "outputs/social-memory-anchor-20260909-3/acceptance.json"
+}

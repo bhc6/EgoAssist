@@ -72,6 +72,7 @@ class ClockContext:
             "timezone": self.timezone_name,
             "utcOffsetMinutes": self.utc_offset_minutes,
             "authority": "server-clock",
+            "timezoneSource": "iana" if getattr(self.tzinfo, "key", None) else "fixed-offset-fallback",
         }
 
 
@@ -164,6 +165,14 @@ def resolve_time_semantics(text: str, clock: ClockContext, *, kind: str | None) 
     lowered = value.casefold()
     target_date, date_explicit = _calendar_date(value, clock)
     clock_value = _clock_from_text(value)
+    # Multiple dates describe potentially different events. Do not silently
+    # choose whichever keyword happens to be checked first.
+    mentions = set(re.findall(
+        r"day before yesterday|day after tomorrow|yesterday|tomorrow|today|tonight|"
+        r"前天|昨天|昨日|今天|今日|明天|后天|\d{4}[-/.]\d{1,2}[-/.]\d{1,2}|(?:\d{4}年)?\d{1,2}月\d{1,2}日",
+        lowered,
+    ))
+    ambiguous = len(mentions) > 1
     recurrence = None
     if any(marker in lowered for marker in ("每天", "每日", "every day", "daily")):
         recurrence = {
@@ -180,7 +189,9 @@ def resolve_time_semantics(text: str, clock: ClockContext, *, kind: str | None) 
 
     effective_at = None
     effective_end = None
-    if date_explicit and clock_value is None:
+    if ambiguous:
+        pass
+    elif date_explicit and clock_value is None:
         local_start = _local_datetime(target_date, (0, 0), clock)
         local_end = _local_datetime(target_date + timedelta(days=1), (0, 0), clock)
         effective_at = local_start.astimezone(timezone.utc)
@@ -200,6 +211,7 @@ def resolve_time_semantics(text: str, clock: ClockContext, *, kind: str | None) 
         "recurrence": recurrence,
         "dateExplicit": date_explicit,
         "clockExplicit": clock_value is not None,
+        "ambiguous": ambiguous,
     }
 
 
