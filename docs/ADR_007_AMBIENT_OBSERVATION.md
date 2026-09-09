@@ -91,9 +91,9 @@ sampling interval — all real, none of them the user's decision in the moment.
 
 Mitigations, in the order they apply:
 
-1. `EGOASSIST_AMBIENT_MODE` defaults **off**. A default deployment behaves
-   exactly as it did before this ADR, and `/api/privacy` does not even mention
-   an ambient provider.
+1. `EGOASSIST_AMBIENT_MODE` defaults **on**. A default deployment can react
+   without a spoken command. `/api/privacy` still withholds the ambient provider
+   until the participant grants consent.
 2. Consent is per participant, separately granted, and revocable. The consent id
    sits *inside* the frame binding tuple, so revocation invalidates frames
    already in flight — it cannot be raced.

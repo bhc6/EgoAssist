@@ -34,15 +34,15 @@ def ambient_app(tmp_path, monkeypatch, *, enabled: bool = True):
     )
 
 
-def test_ambient_is_off_and_undisclosed_by_default(tmp_path, monkeypatch):
+def test_ambient_is_enabled_but_undisclosed_without_consent(tmp_path, monkeypatch):
     """Default deployment: no ambient capability, and the disclosure does not
     mention an ambient provider the deployment never uses."""
     async def scenario():
-        app = ambient_app(tmp_path, monkeypatch, enabled=False)
+        app = ambient_app(tmp_path, monkeypatch, enabled=True)
         async with TestClient(TestServer(app)) as client:
             await register_client(client, "default-user")
             privacy = await (await client.get("/api/privacy")).json()
-            assert privacy["ambient"]["enabled"] is False
+            assert privacy["ambient"]["enabled"] is True
             assert privacy["ambient"]["consented"] is False
             providers = {item["provider"] for item in privacy["providers"]}
             assert "ambient-observation-model" not in providers

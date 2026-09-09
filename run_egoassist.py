@@ -453,7 +453,7 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
     # (a frame may reach the provider with no user-initiated task), so it must be
     # switched on deliberately, per deployment, with a watchlist on disk.
     ambient_settings: dict[str, Any] = {
-        "enabled": _env_flag("EGOASSIST_AMBIENT_MODE", False),
+        "enabled": _env_flag("EGOASSIST_AMBIENT_MODE", True),
         "watchlist_path": os.getenv("EGOASSIST_AMBIENT_WATCHLIST", "").strip(),
         "interval_seconds": max(
             5.0, float(os.getenv("EGOASSIST_AMBIENT_INTERVAL_SECONDS", "20") or 20)

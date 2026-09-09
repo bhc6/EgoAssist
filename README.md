@@ -126,7 +126,7 @@ flowchart LR
 | `EGOASSIST_INSIGHT_CONCURRENCY` | `2` | 全局报告并发，不超过待办容量 16 |
 | `EGOASSIST_INSIGHT_TIMEOUT` | `30` 秒 | 单次报告 HTTP 截止时间 |
 | `EGOASSIST_INSIGHT_JOB_TIMEOUT` | `45` 秒 | 获得执行名额后的截止时间，不含排队 |
-| `EGOASSIST_AMBIENT_MODE` | `0` | 无任务观察，另需用户授权 |
+| `EGOASSIST_AMBIENT_MODE` | `1` | 无任务观察默认开启；仍需账户授权 |
 | `EGOASSIST_TEMPORAL_TARGET` | 空 | 持久提醒服务，未配置时对应能力不可用 |
 | `LIVEKIT_URL/API_KEY/API_SECRET` | 空 | 配齐后使用 LiveKit，否则使用 WebSocket 媒体路径 |
 
