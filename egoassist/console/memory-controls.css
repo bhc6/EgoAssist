@@ -58,11 +58,11 @@ main { max-width: 1640px; padding: 16px 24px; }
 .memory-query { font-size: 14px; white-space: pre-wrap; overflow-wrap: anywhere; margin: 10px 0; }
 .memory-activity { border-bottom: 1px solid var(--line); padding-bottom: 10px; }
 .memory-activity ol, #memoryActivity { list-style: none; margin: 8px 0 0; padding: 0; max-height: 260px; overflow: auto; }
-.memory-activity li { display: grid; grid-template-columns: 82px 100px minmax(0, 1fr); gap: 8px; align-items: baseline; padding: 7px 0; border-top: 1px solid #e3e8ea; font-size: 12px; }
-.memory-activity time { color: var(--muted); font-size: 11px; }
-.memory-activity li > b { color: #276c81; }
+.memory-activity li { display: grid; grid-template-columns: minmax(0, 82px) minmax(0, 120px) minmax(0, 1fr); gap: 8px; align-items: start; padding: 7px 0; border-top: 1px solid #e3e8ea; font-size: 12px; min-width: 0; }
+.memory-activity time { color: var(--muted); font-size: 11px; overflow-wrap: anywhere; }
+.memory-activity li > b { color: #276c81; overflow-wrap: anywhere; word-break: break-word; }
 .memory-activity li > span { overflow-wrap: anywhere; }
-.memory-activity details { grid-column: 2 / -1; margin: 0; }
+.memory-activity details { grid-column: 1 / -1; margin: 0; min-width: 0; }
 .memory-activity details pre { max-height: 180px; }
 .memory-activity-empty { color: var(--muted); padding: 10px 0 !important; }
 .memory-flow { display: grid; grid-template-columns: 1fr 1fr 1.4fr; padding: 12px 0; margin: 0; list-style: none; gap: 12px; }
@@ -102,7 +102,7 @@ main { max-width: 1640px; padding: 16px 24px; }
 #turnWorkflowDetails > summary { color: var(--ink); font-size: 14px; }
 #workflowSelection { color: var(--muted); font-size: 12px; }
 .live-workflow { border: 0; background: transparent; }
-.workflow-fact { grid-template-columns: 112px minmax(0, 1fr); padding: 8px 0; }
+.workflow-fact { grid-template-columns: minmax(90px, 112px) minmax(0, 1fr); padding: 8px 0; min-width: 0; }
 .shared-scene-band { margin-top: 24px; padding: 18px 0; background: transparent; }
 .shared-scene-grid { grid-template-columns: minmax(0, 1fr) minmax(0, 2fr); }
 .shared-scene-image { max-height: 180px; }
@@ -149,4 +149,7 @@ body > footer { background: transparent; color: var(--muted); border-top: 1px so
   .reports-layout { gap: 16px; }
   #insightJobs { max-height: 280px; }
   .performance-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .memory-activity li { grid-template-columns: minmax(0, 68px) minmax(0, 104px) minmax(0, 1fr); gap: 6px; }
+  .memory-activity li > span { overflow-wrap: anywhere; word-break: break-word; }
+  .workflow-fact { grid-template-columns: minmax(76px, 92px) minmax(0, 1fr); gap: 8px; }
 }
