@@ -7,7 +7,7 @@
   <link rel="icon" href="data:,">
   <link rel="stylesheet" href="styles.css">
   <link rel="stylesheet" href="memory-controls.css?v=20260813-workflow">
-  <link rel="stylesheet" href="responsive.css?v=20260729-mirror">
+  <link rel="stylesheet" href="responsive.css?v=20260909-text-input">
 </head>
 <body class="auth-required">
   <div id="authGate" class="auth-gate">
@@ -40,6 +40,13 @@
   </header>
 
   <main>
+    <form id="textTurnForm" class="text-turn-form">
+      <label for="textTurnInput">文字对话</label>
+      <textarea id="textTurnInput" rows="2" maxlength="2000" required></textarea>
+      <button id="textTurnSend" type="submit" class="primary">发送</button>
+      <span id="textTurnError" role="status" aria-live="polite"></span>
+    </form>
+
     <section class="session-strip">
       <div><span>SESSION</span><b id="sessionId">-</b></div>
       <div><span>PROMPT HASH</span><b id="promptHash">-</b></div>
@@ -76,11 +83,6 @@
           <article><span>USER TRANSCRIPT</span><p id="transcript">等待语音</p></article>
           <article id="assistantCaption"><span>SPOKEN AUDIO TRANSCRIPT</span><p>等待语音输出</p></article>
         </div>
-        <form id="textTurnForm" class="text-turn-form">
-          <label for="textTurnInput">消息</label>
-          <textarea id="textTurnInput" rows="2" maxlength="2000" required></textarea>
-          <button id="textTurnSend" type="submit">发送</button><span id="textTurnError" role="status"></span>
-        </form>
         <details open><summary>问题与回答</summary><div id="turnHistory" aria-live="polite"></div></details>
         <div class="quick">
           <button data-say="完成了" data-requires-task>目标达成</button><button data-say="再说一遍">重复</button>
