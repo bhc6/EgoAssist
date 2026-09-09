@@ -421,7 +421,7 @@ class TaskSession:
         remaining = [step for step in self.spec.steps if self.checkpoints[step.id]["status"] not in {"satisfied", "skipped"}]
         if not remaining:
             self.completed = True
-            self.decision = self._decision("guide", "任务完成。请执行最后的安全检查。", source, 1.0)
+            self.decision = self._decision("guide", "用户已确认全部步骤完成。", source, 1.0)
         else:
             next_step = next((step for step in self.spec.steps[self.step_index + 1:] if step in remaining), remaining[0])
             self.current_checkpoint_id = next_step.id

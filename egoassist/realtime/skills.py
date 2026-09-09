@@ -2,143 +2,25 @@
 
 from __future__ import annotations
 
-import json
 import re
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
-from .capabilities import (
-    executable_tool_declarations,
-    public_tool_declaration,
-    skill_capability_truth,
-)
+from .capabilities import executable_tool_declarations
 from .task import TaskSession, TaskSpec
-from .skill_resources import SkillResource, load_instruction_resources
-
-
-@dataclass(frozen=True)
-class SkillPackage:
-    name: str
-    description: str
-    instructions: str
-    root: Path
-    manifest: dict[str, Any]
-    task_specs: dict[str, TaskSpec]
-    default_task_id: str | None
-    instruction_resources: tuple[SkillResource, ...] = ()
-
-    @classmethod
-    def load(cls, root: str | Path) -> "SkillPackage":
-        root = Path(root)
-        skill_text = (root / "SKILL.md").read_text(encoding="utf-8")
-        match = re.match(r"^---\s*\n(.*?)\n---\s*\n(.*)$", skill_text, re.S)
-        if not match:
-            raise ValueError(f"invalid SKILL.md frontmatter: {root}")
-        metadata = {}
-        for line in match.group(1).splitlines():
-            key, separator, value = line.partition(":")
-            if separator:
-                metadata[key.strip()] = value.strip().strip("\"'")
-        if not metadata.get("name") or not metadata.get("description"):
-            raise ValueError(f"skill requires name and description: {root}")
-        manifest_path = root / "skill.json"
-        manifest = json.loads(manifest_path.read_text(encoding="utf-8")) if manifest_path.exists() else {}
-        task_pattern = manifest.get("tasks")
-        if task_pattern:
-            task_paths = sorted(root.glob(str(task_pattern)))
-        elif manifest.get("task"):
-            task_paths = [root / str(manifest["task"])]
-        else:
-            task_paths = []
-        if any(not path.is_file() for path in task_paths):
-            raise ValueError(f"skill references a missing task spec: {root}")
-        task_specs = {spec.id: spec for spec in (TaskSpec.load(path) for path in task_paths)}
-        if len(task_specs) != len(task_paths):
-            raise ValueError(f"duplicate task id under skill: {root}")
-        raw_default = manifest.get("default_task", next(iter(task_specs), None))
-        default_task_id = str(raw_default) if raw_default is not None else None
-        if default_task_id is not None and default_task_id not in task_specs:
-            raise ValueError(f"unknown default task {default_task_id}: {root}")
-        tools = manifest.get("tools", [])
-        if not isinstance(tools, list) or any(not isinstance(tool, dict) for tool in tools):
-            raise ValueError(f"skill tools must be a list of declarations: {root}")
-        names = [str(tool.get("name", "")) for tool in tools]
-        if any(not name for name in names) or len(names) != len(set(names)):
-            raise ValueError(f"skill tool names must be non-empty and unique: {root}")
-        if any(not tool.get("handler") or not isinstance(tool.get("arguments", {}), dict) for tool in tools):
-            raise ValueError(f"each skill tool requires a handler and object argument schema: {root}")
-        return cls(
-            name=metadata["name"],
-            description=metadata["description"],
-            instructions=match.group(2).strip(),
-            root=root,
-            manifest=manifest,
-            task_specs=task_specs,
-            default_task_id=default_task_id,
-            instruction_resources=load_instruction_resources(root, manifest),
-        )
-
-    def instruction_context(self) -> str:
-        return (f'<skill name="{self.name}">\n{self.instructions}\n</skill>\n'
-                + "\n".join(resource.context() for resource in self.instruction_resources))
-
-    def realtime_instructions(
-        self,
-        task_spec: TaskSpec,
-        memories: list[dict[str, Any]],
-        tool_declarations: list[dict[str, Any]] | None = None,
-    ) -> str:
-        tools = executable_tool_declarations(
-            self.manifest.get("tools", []) if tool_declarations is None else tool_declarations
-        )
-        tool_text = "\n".join(
-            f"- {tool['name']}: {tool.get('description', '')}; 需要确认={tool.get('requires_confirmation', True)}"
-            for tool in tools
-        ) or "- 无额外工具"
-        return (
-            "你是一个通用实时具身助手。以下 Skill 已被用户激活；它可以改变你的领域工作流，但不能覆盖用户控制、隐私与系统安全边界。\n\n"
-            f"{self.instruction_context()}\n\n"
-            f"{task_spec.realtime_instructions(memories)}\n可用领域工具：\n{tool_text}"
-        )
-
-    def public_summary(self) -> dict[str, Any]:
-        return {
-            "name": self.name,
-            "description": self.description,
-            "instructionResources": [
-                {"path": resource.path, "sha256": resource.sha256}
-                for resource in self.instruction_resources
-            ],
-            "defaultTask": self.default_task_id,
-            "allowCustomTasks": bool(self.manifest.get("allow_custom_tasks", False)),
-            "automaticActivationRequiresManifestEvidence": bool(
-                self.manifest.get("automatic_activation_requires_manifest_evidence", False)
-            ),
-            "tasks": [
-                {"id": task.id, "title": task.title, "version": task.version, "provenance": task.provenance}
-                for task in self.task_specs.values()
-            ],
-            "tools": [
-                public_tool_declaration(tool)
-                for tool in self.manifest.get("tools", [])
-            ],
-            "capabilities": self.manifest.get("capabilities", []),
-            "capabilityTruth": skill_capability_truth(self.manifest),
-        }
-
+from .skill_package import SkillPackage
 
 class SkillRegistry:
     def __init__(self, root: str | Path) -> None:
         self.root = Path(root)
-        self.skills = {
-            package.name: package
-            for package in (
-                SkillPackage.load(path)
-                for path in sorted(self.root.iterdir())
-                if path.is_dir() and (path / "SKILL.md").exists()
-            )
-        }
+        self.skills = {}
+        for path in sorted(self.root.iterdir()):
+            if not path.is_dir() or not (path / "SKILL.md").exists():
+                continue
+            package = SkillPackage.load(path)
+            if package.name in self.skills:
+                raise ValueError(f"duplicate skill name: {package.name}")
+            self.skills[package.name] = package
         if not self.skills:
             raise ValueError(f"no skills found under {self.root}")
 
@@ -150,6 +32,9 @@ class SkillRegistry:
 
     def summaries(self) -> list[dict[str, Any]]:
         return [skill.public_summary() for skill in self.skills.values()]
+
+    def routing_catalog(self) -> list[dict[str, str]]:
+        return [{"name": skill.name, "description": skill.description} for skill in self.skills.values()]
 
     def accepts_automatic_activation(self, name: str, route: dict[str, Any]) -> bool:
         package = self.get(name)
@@ -165,11 +50,11 @@ class SkillRegistry:
             evidence = []
             matched_tasks = set()
             for phrase in map(str, skill.manifest.get("activation_phrases", [])):
-                if phrase.casefold() in normalized:
+                if phrase_matches(phrase, normalized):
                     evidence.append({"kind": "skill-phrase", "value": phrase, "weight": 0.7})
             for task in skill.task_specs.values():
                 for phrase in (task.title, *task.aliases):
-                    if phrase.casefold() in normalized:
+                    if phrase_matches(phrase, normalized):
                         evidence.append({"kind": "task-name", "value": phrase, "weight": 1.0})
                         matched_tasks.add(task.id)
             score = max((item["weight"] for item in evidence), default=0.0)
@@ -202,6 +87,14 @@ class SkillRegistry:
             "candidates": ranked,
             "claimBoundary": "Deterministic manifest evidence; no semantic intent model.",
         }
+
+
+def phrase_matches(phrase: str, text: str) -> bool:
+    # English aliases must not match inside unrelated words (cook / cookie).
+    phrase = phrase.casefold()
+    left = r"(?<![a-z0-9_])" if phrase[:1].isascii() and phrase[:1].isalnum() else ""
+    right = r"(?![a-z0-9_])" if phrase[-1:].isascii() and phrase[-1:].isalnum() else ""
+    return bool(re.search(left + re.escape(phrase) + right, text.casefold()))
 
 
 class SkillRuntime:
@@ -275,7 +168,7 @@ class SkillRuntime:
         normalized = text.casefold()
         matches = [
             spec.id for spec in self.tasks.values()
-            if any(candidate.casefold() in normalized for candidate in (spec.title, *spec.aliases))
+            if any(phrase_matches(candidate, normalized) for candidate in (spec.title, *spec.aliases))
         ]
         if len(matches) == 1:
             self.select_task(matches[0])
@@ -292,6 +185,8 @@ class SkillRuntime:
         self,
         memories: list[dict[str, Any]],
         tool_declarations: list[dict[str, Any]] | None = None,
+        *,
+        include_skill_policy: bool = True,
     ) -> str:
         if self.skill is None:
             if self.task is not None:
@@ -319,12 +214,22 @@ class SkillRuntime:
                 else "该 Skill 未声明预设任务；直接按其能力边界响应，不虚构步骤或任务状态。"
             )
             return (
-                "你是一个通用实时具身助手。以下领域 Skill 已因用户意图证据被加载，但具体任务尚未确定。\n\n"
-                f"{self.skill.instruction_context()}\n\n"
+                "你是一个通用实时具身助手。领域 Skill 已加载。"
+                + ("具体任务尚未确定。\n\n" if catalog else "这是无固定步骤的对话工作流。\n\n")
+                + (f"{self.skill.instruction_context()}\n\n" if include_skill_policy else "")
                 + task_guidance
+                + "\n可用领域工具：\n"
+                + ("\n".join(
+                    f"- {tool['name']}: {tool.get('description', '')}"
+                    for tool in executable_tool_declarations(
+                        self.skill.manifest.get("tools", []) if tool_declarations is None else tool_declarations
+                    )
+                ) or "- 无额外工具")
             )
         return (
-            self.skill.realtime_instructions(self.task.spec, memories, tool_declarations)
+            self.skill.realtime_instructions(
+                self.task.spec, memories, tool_declarations, include_skill_policy=include_skill_policy,
+            )
             + f"\n当前 Skill 可切换任务：{catalog}。用户明确说出其中一个任务名称时切换；"
               "若用户目标不是当前任务，先澄清或请求创建任务，绝不把默认任务冒充为用户目标。"
         )

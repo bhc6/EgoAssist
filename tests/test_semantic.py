@@ -243,6 +243,28 @@ def test_semantic_router_rejects_question_disguised_as_memory_card_scope():
     assert result["memoryKind"] is None
 
 
+def test_invalid_optional_memory_draft_does_not_discard_valid_skill_control():
+    payload = {
+        "v": 1, "skill": "field-notes",
+        "memoryDraft": {"mode": "start", "subject": None, "predicate": None,
+                        "language": "zh", "missingFields": ["subject", "predicate"]},
+    }
+    router = SemanticTurnRouter("test-key", generation_call=lambda **_: provider_response(json.dumps(payload)))
+    catalog = [{"name": "field-notes", "description": "Organize dictated field notes"}]
+    result = asyncio.run(router.classify("请整理现场记录：仓库收到六箱配件", catalog))
+    assert result["status"] == "classified"
+    assert result["selectedSkill"] == "field-notes"
+    assert result["memoryDraft"] is None
+    assert result["memoryAtoms"] == []
+    assert result["memoryKind"] is None
+    assert result["componentErrors"][0]["component"] == "memoryDraft"
+    payload.pop("skill")
+    payload["skillControl"] = "deactivate"
+    result = asyncio.run(router.classify("退出当前 Skill", catalog))
+    assert result["skillControl"] == "deactivate"
+    assert result["memoryDraft"] is None
+
+
 def test_semantic_router_rejects_extra_fields():
     value = json.loads(decision())
     value["explanation"] = "should not be accepted"

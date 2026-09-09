@@ -42,6 +42,18 @@ async def verify(output):
                 await page.locator('#newSession').click()
                 await page.wait_for_function("document.querySelector('#sessionSelect').selectedOptions[0]?.textContent.includes('browser-real-session')")
                 report['sessionCreated'] = True
+                await page.locator('#skillSelect').select_option('packing-coach')
+                await page.wait_for_function("document.querySelector('#skillName').textContent.includes('packing-coach')")
+                await page.locator('#taskSelect').select_option('commute-check')
+                await page.wait_for_function("document.querySelector('#taskTitle').textContent.includes('通勤出门核对')")
+                report['proceduralSkillSelected'] = True
+                await page.locator('#skillSelect').select_option('field-notes')
+                await page.wait_for_function("document.querySelector('#skillName').textContent.includes('field-notes')")
+                assert await page.locator('#taskSelect').is_disabled()
+                assert await page.locator('#newTask').is_disabled()
+                assert '对话工作流' in await page.locator('#skillName').text_content()
+                assert 'static-skill-policy-injection' in await page.locator('#knowledge').text_content()
+                report['conversationalSkillReady'] = True
                 for width in (1440, 390):
                     await page.set_viewport_size({'width': width, 'height': 1000})
                     await page.screenshot(path=str(output / f'ui-{width}.png'), full_page=True)

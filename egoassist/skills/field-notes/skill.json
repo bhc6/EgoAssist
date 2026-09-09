@@ -1,0 +1,9 @@
+{
+  "version": "1.0.0",
+  "instruction_resources": ["references/note-contract.md"],
+  "activation_phrases": ["整理现场记录", "整理现场笔记", "口述现场记录", "起草交接记录", "field note", "field notes", "handover draft"],
+  "allow_custom_tasks": false,
+  "automatic_activation_requires_manifest_evidence": true,
+  "capabilities": ["evidence-preserving-draft", "uncertainty-separation"],
+  "tools": []
+}

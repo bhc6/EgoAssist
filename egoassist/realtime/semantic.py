@@ -16,7 +16,7 @@ from egoassist.product.contracts import IntentCandidate
 from .router_protocol import ROUTER_PROMPT, expand_decision
 
 
-TURN_ROUTER_POLICY_VERSION = "semantic-turn-router-v8"
+TURN_ROUTER_POLICY_VERSION = "semantic-turn-router-v9"
 TASK_CONTROLS = {
     "none", "confirm-step", "rollback", "repeat",
     "pause-task", "resume-task", "request-help", "show-reference",
@@ -428,9 +428,23 @@ class SemanticTurnRouter:
                 legacy_fields | structured_fields | lifecycle_fields
             ):
                 raise ValueError("router output has unexpected fields")
-            memory_atoms = self._normalize_atoms(parsed.get("memoryAtoms", []))
-            memory_draft = self._normalize_draft(parsed.get("memoryDraft"))
-            memory_query_spec = self._normalize_query_spec(parsed.get("memoryQuerySpec"))
+            # Optional memory structures cannot invalidate a separately valid control.
+            # Reject their contents, retain the raw output and expose component errors.
+            component_errors = []
+            memory_components = {}
+            for field, normalizer, empty in (
+                ("memoryAtoms", self._normalize_atoms, []),
+                ("memoryDraft", self._normalize_draft, None),
+                ("memoryQuerySpec", self._normalize_query_spec, None),
+            ):
+                try:
+                    memory_components[field] = normalizer(parsed.get(field))
+                except (ValueError, TypeError, KeyError) as exc:
+                    memory_components[field] = empty
+                    component_errors.append({"component": field, "error": str(exc)[:200]})
+            memory_atoms = memory_components["memoryAtoms"]
+            memory_draft = memory_components["memoryDraft"]
+            memory_query_spec = memory_components["memoryQuerySpec"]
             if memory_atoms:
                 first = memory_atoms[0]
                 parsed.update({
@@ -507,6 +521,7 @@ class SemanticTurnRouter:
                 "method": TURN_ROUTER_POLICY_VERSION,
                 "model": self.model,
                 "status": "classified",
+                "componentErrors": component_errors,
                 "speechControl": None if speech_control == "none" else speech_control,
                 "taskControl": None if task_control == "none" else task_control,
                 "preferenceIntent": None if preference_intent == "none" else preference_intent,

@@ -1,0 +1,31 @@
+{
+  "pytest": {
+    "sourceReport": "outputs/skill-catalog-tests.xml",
+    "sourceSha256": "ad51073ddac5dfcfea522d645fabbe40f0a46ac89f98325f602ace98275f9c92",
+    "tests": 368,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0,
+    "seconds": 53.192,
+    "timestamp": "2026-09-09T08:43:16.213352+08:00"
+  },
+  "staticChecks": ["git diff --check", "node --check egoassist/console/app.js"],
+  "packaging": {
+    "command": "pip wheel . --no-deps --no-build-isolation --wheel-dir outputs/skill-catalog-wheel",
+    "passed": true,
+    "verifiedContents": ["skill_package.py", "field-notes policy, manifest and reference", "packing-coach policy, manifest, tasks and reference", "three existing PDF references"],
+    "boundary": "Packaging was checked before final frontend label changes; the wheel is not a release of the final commit."
+  },
+  "runningService": {
+    "url": "http://127.0.0.1:8780",
+    "mock": false,
+    "checkScript": "scripts/check_realtime.py",
+    "sessionId": "668392dc35304b63",
+    "activeSkill": "field-notes",
+    "routingMethod": "semantic-turn-router-v9+manifest-evidence",
+    "audioEvents": 16,
+    "connected": true,
+    "errors": [],
+    "boundary": "Service smoke check; complete response.done assertions are in the separate real-provider acceptance runs."
+  }
+}

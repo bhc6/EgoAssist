@@ -1,0 +1,11 @@
+{
+  "version": "1.0.0",
+  "tasks": "tasks/*.json",
+  "default_task": null,
+  "instruction_resources": ["references/item-evidence.md"],
+  "activation_phrases": ["出门核对", "出门检查", "出门物品核对", "通勤出门核对", "出行打包", "整理行李", "打包行李", "pack my bag", "packing checklist"],
+  "allow_custom_tasks": true,
+  "automatic_activation_requires_manifest_evidence": true,
+  "capabilities": ["belongings-checklist", "item-evidence-separation"],
+  "tools": []
+}

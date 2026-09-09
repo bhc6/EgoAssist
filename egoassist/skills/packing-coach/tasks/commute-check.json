@@ -1,0 +1,14 @@
+{
+  "id": "commute-check",
+  "title": "通勤出门核对",
+  "aliases": ["通勤物品检查", "commute checklist"],
+  "version": "1.0",
+  "role": "出门物品核对助手",
+  "provenance": "egoassist-original/user-confirmed-checklist",
+  "safety_policy": ["只核对用户确认需要的物品", "看见物品不等于已放入包中", "不根据历史位置断言当前携带状态"],
+  "steps": [
+    {"id": "list", "title": "确认清单", "instruction": "若用户已给出要带的物品，简短复述该清单请其确认；仅在没有清单时询问需要带什么。", "completion": "用户确认了本次出门清单", "source": "user-confirmed requirements"},
+    {"id": "gather", "title": "逐项找到", "instruction": "对照刚确认的清单逐项找到物品，明确说出尚未找到或不确定的项目。", "completion": "用户确认清单上的物品均已找到", "source": "user report or current visual evidence"},
+    {"id": "carry", "title": "确认携带", "instruction": "请用户核对清单上的物品已放入包中或随身口袋，不能把桌上的物品算作已带走。", "completion": "用户确认清单物品已装好或随身携带", "source": "explicit user confirmation"}
+  ]
+}

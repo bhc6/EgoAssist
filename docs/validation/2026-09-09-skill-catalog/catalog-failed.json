@@ -1,0 +1,1752 @@
+{
+  "mock": false,
+  "model": "qwen3.5-omni-flash-realtime",
+  "input": "text-control",
+  "passed": false,
+  "physicalCompletionMeasured": false,
+  "turns": [
+    {
+      "input": "请解释浏览器 cookie 是什么。",
+      "passed": true,
+      "audioPackets": 109,
+      "firstTextMs": 935.1,
+      "firstAudioMs": 1239.2,
+      "transcript": "浏览器 cookie 是一种由网站存储在用户设备上的小型文本文件，用来记住用户的偏好、登录状态或浏览行为。当用户访问某个网站时，服务器会发送一个 cookie 到浏览器，之后每次请求该网站时，浏览器都会自动带上这个 cookie，帮助网站识别用户并提供更个性化的服务。例如，购物网站的购物车内容、网站的登录状态，或者你之前看过的商品推荐，都可能通过 cookie 来保存和追踪。不过，用户也可以手动清除 cookie，或者在浏览器设置中限制其使用。",
+      "terminal": {
+        "sequence": 1,
+        "status": "response.done",
+        "usage": {
+          "inputTokens": 1190,
+          "outputTokens": 546,
+          "totalTokens": 1736,
+          "inputTokenDetails": {
+            "text_tokens": 1190
+          },
+          "outputTokenDetails": {
+            "text_tokens": 111,
+            "audio_tokens": 435
+          }
+        },
+        "fragmentCommitted": true,
+        "interrupted": false,
+        "localCancelRequested": false
+      },
+      "finishedMs": 7717,
+      "observed": {
+        "skill": null,
+        "task": null
+      },
+      "state": {
+        "activeSkill": null,
+        "task": null,
+        "checkpoint": null,
+        "paused": false,
+        "promptSkill": null,
+        "artifacts": [],
+        "routing": {
+          "method": "semantic-turn-router-v8+manifest-evidence",
+          "input": "请解释浏览器 cookie 是什么。",
+          "status": "no-match",
+          "selectedSkill": null,
+          "selectedTask": null,
+          "candidates": [
+            {
+              "skill": "assembly-coach",
+              "score": 0,
+              "evidence": [],
+              "task": null,
+              "selected": false,
+              "rejectionReasons": [
+                "no-evidence"
+              ]
+            },
+            {
+              "skill": "field-notes",
+              "score": 0,
+              "evidence": [],
+              "task": null,
+              "selected": false,
+              "rejectionReasons": [
+                "no-evidence"
+              ]
+            },
+            {
+              "skill": "kitchen-coach",
+              "score": 0,
+              "evidence": [],
+              "task": null,
+              "selected": false,
+              "rejectionReasons": [
+                "no-evidence"
+              ]
+            },
+            {
+              "skill": "packing-coach",
+              "score": 0,
+              "evidence": [],
+              "task": null,
+              "selected": false,
+              "rejectionReasons": [
+                "no-evidence"
+              ]
+            }
+          ],
+          "claimBoundary": "Only the current transcript is classified, with explicit clock, pending draft and previous-turn context. Labels are hypotheses, not facts."
+        }
+      },
+      "contextLayers": [
+        {
+          "name": "context-trust-policy",
+          "source": "context-harness",
+          "tokens": 47,
+          "required": true
+        },
+        {
+          "name": "core-policy",
+          "source": "skill-runtime",
+          "tokens": 174,
+          "required": true
+        },
+        {
+          "name": "skill-catalog",
+          "source": "skill-registry",
+          "tokens": 355,
+          "required": true
+        }
+      ]
+    },
+    {
+      "input": "帮我做通勤出门核对，今天只带手机、钥匙和门禁卡，请告诉我第一步。",
+      "passed": true,
+      "audioPackets": 40,
+      "firstTextMs": 1201.2,
+      "firstAudioMs": 1480.9,
+      "transcript": "好的，我们开始通勤出门核对。第一步是确认清单：请告诉我今天出门必须带哪些物品？手机、钥匙和门禁卡可以作为可选建议，但请先确认你今天真正需要带的东西。",
+      "terminal": {
+        "sequence": 2,
+        "status": "response.done",
+        "usage": {
+          "inputTokens": 2333,
+          "outputTokens": 203,
+          "totalTokens": 2536,
+          "inputTokenDetails": {
+            "text_tokens": 2333
+          },
+          "outputTokenDetails": {
+            "text_tokens": 43,
+            "audio_tokens": 160
+          }
+        },
+        "fragmentCommitted": true,
+        "interrupted": false,
+        "localCancelRequested": false
+      },
+      "finishedMs": 3877.2,
+      "observed": {
+        "skill": {
+          "name": "packing-coach",
+          "description": "Help a user actively pack a bag or check belongings before leaving for work or a short trip. Use a user-confirmed list, distinguish present from packed and unknown items. Not for recalling an item's location, shopping, cooking or discussing travel in general.",
+          "version": "1.0.0",
+          "contentHash": "5dc0459c51bd1dcc44cc1b19b90cbc6a9c0e690ecf9e6c8678f5deabcac547cf",
+          "workflowMode": "procedural",
+          "instructionResources": [
+            {
+              "path": "references/item-evidence.md",
+              "sha256": "e181c7f88b3a3fc6bac191c0dbdd90adc9e9f3d3e28d4710a17789d98e36bf33"
+            }
+          ],
+          "defaultTask": null,
+          "allowCustomTasks": true,
+          "automaticActivationRequiresManifestEvidence": true,
+          "tasks": [
+            {
+              "id": "commute-check",
+              "title": "通勤出门核对",
+              "version": "1.0",
+              "provenance": "egoassist-original/user-confirmed-checklist"
+            },
+            {
+              "id": "short-trip-pack",
+              "title": "短途出行打包",
+              "version": "1.0",
+              "provenance": "egoassist-original/user-confirmed-checklist"
+            }
+          ],
+          "tools": [],
+          "capabilities": [
+            "belongings-checklist",
+            "item-evidence-separation"
+          ],
+          "capabilityTruth": [
+            {
+              "id": "belongings-checklist",
+              "status": "descriptive",
+              "executable": false,
+              "reason": "Manifest metadata describes desired behavior; no capability dispatcher is connected."
+            },
+            {
+              "id": "item-evidence-separation",
+              "status": "descriptive",
+              "executable": false,
+              "reason": "Manifest metadata describes desired behavior; no capability dispatcher is connected."
+            }
+          ]
+        },
+        "task": {
+          "task": {
+            "id": "commute-check",
+            "title": "通勤出门核对",
+            "version": "1.0",
+            "provenance": "egoassist-original/user-confirmed-checklist"
+          },
+          "completed": false,
+          "paused": false,
+          "stepIndex": 0,
+          "progress": 0,
+          "currentCheckpointId": "list",
+          "checkpointLedger": {
+            "list": {
+              "status": "active",
+              "confidence": 1,
+              "evidenceIds": [],
+              "updatedBy": "session-start"
+            },
+            "gather": {
+              "status": "unknown",
+              "confidence": 0,
+              "evidenceIds": [],
+              "updatedBy": null
+            },
+            "carry": {
+              "status": "unknown",
+              "confidence": 0,
+              "evidenceIds": [],
+              "updatedBy": null
+            }
+          },
+          "steps": [
+            {
+              "id": "list",
+              "title": "确认清单",
+              "instruction": "请用户确认今天出门必须带哪些物品；手机、钥匙和门禁卡仅作为可选建议。",
+              "completion": "用户确认了本次出门清单",
+              "risk": "low",
+              "source": "user-confirmed requirements",
+              "status": "active",
+              "confidence": 1,
+              "evidenceIds": [],
+              "updatedBy": "session-start"
+            },
+            {
+              "id": "gather",
+              "title": "逐项找到",
+              "instruction": "对照刚确认的清单逐项找到物品，明确说出尚未找到或不确定的项目。",
+              "completion": "用户确认清单上的物品均已找到",
+              "risk": "low",
+              "source": "user report or current visual evidence",
+              "status": "unknown",
+              "confidence": 0,
+              "evidenceIds": [],
+              "updatedBy": null
+            },
+            {
+              "id": "carry",
+              "title": "确认携带",
+              "instruction": "请用户核对清单上的物品已放入包中或随身口袋，不能把桌上的物品算作已带走。",
+              "completion": "用户确认清单物品已装好或随身携带",
+              "risk": "low",
+              "source": "explicit user confirmation",
+              "status": "unknown",
+              "confidence": 0,
+              "evidenceIds": [],
+              "updatedBy": null
+            }
+          ],
+          "observation": null,
+          "decision": {
+            "action": "guide",
+            "message": "请用户确认今天出门必须带哪些物品；手机、钥匙和门禁卡仅作为可选建议。",
+            "reason": "开始任务",
+            "confidence": 1
+          },
+          "announcedMemoryIds": [],
+          "perception": {
+            "contextId": "task-context-00e29b0df3844d2fb16daf9e3c48b3c0",
+            "taskId": "commute-check",
+            "taskVersion": "1.0",
+            "taskProvenance": "egoassist-original/user-confirmed-checklist",
+            "checkpointId": "list",
+            "checkpointEpoch": 0,
+            "allowedTransitions": [
+              "gather"
+            ],
+            "completionCriteria": "用户确认了本次出门清单",
+            "risk": "low",
+            "sourceReference": "user-confirmed requirements",
+            "completionEvidence": [],
+            "audit": [],
+            "policy": "evidence-only-user-confirmation-required"
+          },
+          "trace": []
+        }
+      },
+      "state": {
+        "activeSkill": "packing-coach",
+        "task": "commute-check",
+        "checkpoint": "list",
+        "paused": false,
+        "promptSkill": "packing-coach",
+        "artifacts": [],
+        "routing": {
+          "method": "semantic-turn-router-v8+manifest-evidence",
+          "input": "帮我做通勤出门核对，今天只带手机、钥匙和门禁卡，请告诉我第一步。",
+          "status": "matched",
+          "selectedSkill": "packing-coach",
+          "selectedTask": "commute-check",
+          "candidates": [
+            {
+              "skill": "packing-coach",
+              "score": 1,
+              "evidence": [
+                {
+                  "kind": "skill-phrase",
+                  "value": "出门核对",
+                  "weight": 0.7
+                },
+                {
+                  "kind": "skill-phrase",
+                  "value": "通勤出门核对",
+                  "weight": 0.7
+                },
+                {
+                  "kind": "task-name",
+                  "value": "通勤出门核对",
+                  "weight": 1
+                }
+              ],
+              "task": "commute-check",
+              "selected": true,
+              "rejectionReasons": []
+            },
+            {
+              "skill": "assembly-coach",
+              "score": 0,
+              "evidence": [],
+              "task": null,
+              "selected": false,
+              "rejectionReasons": [
+                "no-evidence"
+              ]
+            },
+            {
+              "skill": "field-notes",
+              "score": 0,
+              "evidence": [],
+              "task": null,
+              "selected": false,
+              "rejectionReasons": [
+                "no-evidence"
+              ]
+            },
+            {
+              "skill": "kitchen-coach",
+              "score": 0,
+              "evidence": [],
+              "task": null,
+              "selected": false,
+              "rejectionReasons": [
+                "no-evidence"
+              ]
+            }
+          ],
+          "claimBoundary": "Semantic Skill proposal validated against the package activation policy; manifest evidence may select a task. Neither output is a calibrated probability.",
+          "proposedSkill": "packing-coach"
+        }
+      },
+      "contextLayers": [
+        {
+          "name": "context-trust-policy",
+          "source": "context-harness",
+          "tokens": 47,
+          "required": true
+        },
+        {
+          "name": "core-policy",
+          "source": "skill-runtime",
+          "tokens": 733,
+          "required": true
+        },
+        {
+          "name": "active-skill-policy",
+          "source": "skill:packing-coach:5dc0459c51bd1dcc44cc1b19b90cbc6a9c0e690ecf9e6c8678f5deabcac547cf",
+          "tokens": 463,
+          "required": true
+        },
+        {
+          "name": "skill-runtime-state",
+          "source": "skill-runtime",
+          "tokens": 58,
+          "required": true
+        }
+      ]
+    },
+    {
+      "input": "我确认清单就是手机、钥匙和门禁卡，清单确认这一步完成了。",
+      "passed": true,
+      "audioPackets": 35,
+      "firstTextMs": 1056,
+      "firstAudioMs": 1328.2,
+      "transcript": "好的，清单确认完成。现在我们来逐项找到这些物品。首先，我看到你手边有手机，请问这是你要带的手机吗？如果还有其他需要的物品，请告诉我。",
+      "terminal": {
+        "sequence": 3,
+        "status": "response.done",
+        "usage": {
+          "inputTokens": 2739,
+          "outputTokens": 176,
+          "totalTokens": 2915,
+          "inputTokenDetails": {
+            "text_tokens": 2739
+          },
+          "outputTokenDetails": {
+            "text_tokens": 39,
+            "audio_tokens": 137
+          }
+        },
+        "fragmentCommitted": true,
+        "interrupted": false,
+        "localCancelRequested": false
+      },
+      "finishedMs": 3419.9,
+      "observed": {
+        "skill": {
+          "name": "packing-coach",
+          "description": "Help a user actively pack a bag or check belongings before leaving for work or a short trip. Use a user-confirmed list, distinguish present from packed and unknown items. Not for recalling an item's location, shopping, cooking or discussing travel in general.",
+          "version": "1.0.0",
+          "contentHash": "5dc0459c51bd1dcc44cc1b19b90cbc6a9c0e690ecf9e6c8678f5deabcac547cf",
+          "workflowMode": "procedural",
+          "instructionResources": [
+            {
+              "path": "references/item-evidence.md",
+              "sha256": "e181c7f88b3a3fc6bac191c0dbdd90adc9e9f3d3e28d4710a17789d98e36bf33"
+            }
+          ],
+          "defaultTask": null,
+          "allowCustomTasks": true,
+          "automaticActivationRequiresManifestEvidence": true,
+          "tasks": [
+            {
+              "id": "commute-check",
+              "title": "通勤出门核对",
+              "version": "1.0",
+              "provenance": "egoassist-original/user-confirmed-checklist"
+            },
+            {
+              "id": "short-trip-pack",
+              "title": "短途出行打包",
+              "version": "1.0",
+              "provenance": "egoassist-original/user-confirmed-checklist"
+            }
+          ],
+          "tools": [],
+          "capabilities": [
+            "belongings-checklist",
+            "item-evidence-separation"
+          ],
+          "capabilityTruth": [
+            {
+              "id": "belongings-checklist",
+              "status": "descriptive",
+              "executable": false,
+              "reason": "Manifest metadata describes desired behavior; no capability dispatcher is connected."
+            },
+            {
+              "id": "item-evidence-separation",
+              "status": "descriptive",
+              "executable": false,
+              "reason": "Manifest metadata describes desired behavior; no capability dispatcher is connected."
+            }
+          ]
+        },
+        "task": {
+          "task": {
+            "id": "commute-check",
+            "title": "通勤出门核对",
+            "version": "1.0",
+            "provenance": "egoassist-original/user-confirmed-checklist"
+          },
+          "completed": false,
+          "paused": false,
+          "stepIndex": 1,
+          "progress": 0.3333333333333333,
+          "currentCheckpointId": "gather",
+          "checkpointLedger": {
+            "list": {
+              "status": "satisfied",
+              "confidence": 1,
+              "evidenceIds": [],
+              "updatedBy": "用户语义确认"
+            },
+            "gather": {
+              "status": "active",
+              "confidence": 0,
+              "evidenceIds": [],
+              "updatedBy": "用户语义确认"
+            },
+            "carry": {
+              "status": "unknown",
+              "confidence": 0,
+              "evidenceIds": [],
+              "updatedBy": null
+            }
+          },
+          "steps": [
+            {
+              "id": "list",
+              "title": "确认清单",
+              "instruction": "请用户确认今天出门必须带哪些物品；手机、钥匙和门禁卡仅作为可选建议。",
+              "completion": "用户确认了本次出门清单",
+              "risk": "low",
+              "source": "user-confirmed requirements",
+              "status": "done",
+              "confidence": 1,
+              "evidenceIds": [],
+              "updatedBy": "用户语义确认"
+            },
+            {
+              "id": "gather",
+              "title": "逐项找到",
+              "instruction": "对照刚确认的清单逐项找到物品，明确说出尚未找到或不确定的项目。",
+              "completion": "用户确认清单上的物品均已找到",
+              "risk": "low",
+              "source": "user report or current visual evidence",
+              "status": "active",
+              "confidence": 0,
+              "evidenceIds": [],
+              "updatedBy": "用户语义确认"
+            },
+            {
+              "id": "carry",
+              "title": "确认携带",
+              "instruction": "请用户核对清单上的物品已放入包中或随身口袋，不能把桌上的物品算作已带走。",
+              "completion": "用户确认清单物品已装好或随身携带",
+              "risk": "low",
+              "source": "explicit user confirmation",
+              "status": "unknown",
+              "confidence": 0,
+              "evidenceIds": [],
+              "updatedBy": null
+            }
+          ],
+          "observation": null,
+          "decision": {
+            "action": "guide",
+            "message": "确认清单完成。下一步：对照刚确认的清单逐项找到物品，明确说出尚未找到或不确定的项目。",
+            "reason": "用户语义确认",
+            "confidence": 1
+          },
+          "announcedMemoryIds": [],
+          "perception": {
+            "contextId": "task-context-00e29b0df3844d2fb16daf9e3c48b3c0",
+            "taskId": "commute-check",
+            "taskVersion": "1.0",
+            "taskProvenance": "egoassist-original/user-confirmed-checklist",
+            "checkpointId": "gather",
+            "checkpointEpoch": 1,
+            "allowedTransitions": [
+              "list",
+              "carry"
+            ],
+            "completionCriteria": "用户确认清单上的物品均已找到",
+            "risk": "low",
+            "sourceReference": "user report or current visual evidence",
+            "completionEvidence": [],
+            "audit": [],
+            "policy": "evidence-only-user-confirmation-required"
+          },
+          "trace": []
+        }
+      },
+      "state": {
+        "activeSkill": "packing-coach",
+        "task": "commute-check",
+        "checkpoint": "gather",
+        "paused": false,
+        "promptSkill": "packing-coach",
+        "artifacts": [],
+        "routing": {
+          "method": "semantic-turn-router-v8+manifest-evidence",
+          "input": "我确认清单就是手机、钥匙和门禁卡，清单确认这一步完成了。",
+          "status": "no-match",
+          "selectedSkill": null,
+          "selectedTask": null,
+          "candidates": [
+            {
+              "skill": "assembly-coach",
+              "score": 0,
+              "evidence": [],
+              "task": null,
+              "selected": false,
+              "rejectionReasons": [
+                "no-evidence"
+              ]
+            },
+            {
+              "skill": "field-notes",
+              "score": 0,
+              "evidence": [],
+              "task": null,
+              "selected": false,
+              "rejectionReasons": [
+                "no-evidence"
+              ]
+            },
+            {
+              "skill": "kitchen-coach",
+              "score": 0,
+              "evidence": [],
+              "task": null,
+              "selected": false,
+              "rejectionReasons": [
+                "no-evidence"
+              ]
+            },
+            {
+              "skill": "packing-coach",
+              "score": 0,
+              "evidence": [],
+              "task": null,
+              "selected": false,
+              "rejectionReasons": [
+                "no-evidence"
+              ]
+            }
+          ],
+          "claimBoundary": "Only the current transcript is classified, with explicit clock, pending draft and previous-turn context. Labels are hypotheses, not facts."
+        }
+      },
+      "contextLayers": [
+        {
+          "name": "context-trust-policy",
+          "source": "context-harness",
+          "tokens": 47,
+          "required": true
+        },
+        {
+          "name": "core-policy",
+          "source": "skill-runtime",
+          "tokens": 733,
+          "required": true
+        },
+        {
+          "name": "active-skill-policy",
+          "source": "skill:packing-coach:5dc0459c51bd1dcc44cc1b19b90cbc6a9c0e690ecf9e6c8678f5deabcac547cf",
+          "tokens": 463,
+          "required": true
+        },
+        {
+          "name": "skill-runtime-state",
+          "source": "skill-runtime",
+          "tokens": 64,
+          "required": true
+        }
+      ]
+    },
+    {
+      "input": "我确认手机、钥匙和门禁卡都已经找到，找齐物品这一步完成了。",
+      "passed": true,
+      "audioPackets": 35,
+      "firstTextMs": 962.5,
+      "firstAudioMs": 1245.7,
+      "transcript": "好的，物品已找齐。现在请确认一下，手机、钥匙和门禁卡是否已经放进了你的包里或者随身口袋里？桌上的物品不算带走哦。",
+      "terminal": {
+        "sequence": 4,
+        "status": "response.done",
+        "usage": {
+          "inputTokens": 3150,
+          "outputTokens": 173,
+          "totalTokens": 3323,
+          "inputTokenDetails": {
+            "text_tokens": 3150
+          },
+          "outputTokenDetails": {
+            "text_tokens": 36,
+            "audio_tokens": 137
+          }
+        },
+        "fragmentCommitted": true,
+        "interrupted": false,
+        "localCancelRequested": false
+      },
+      "finishedMs": 3293.3,
+      "observed": {
+        "skill": {
+          "name": "packing-coach",
+          "description": "Help a user actively pack a bag or check belongings before leaving for work or a short trip. Use a user-confirmed list, distinguish present from packed and unknown items. Not for recalling an item's location, shopping, cooking or discussing travel in general.",
+          "version": "1.0.0",
+          "contentHash": "5dc0459c51bd1dcc44cc1b19b90cbc6a9c0e690ecf9e6c8678f5deabcac547cf",
+          "workflowMode": "procedural",
+          "instructionResources": [
+            {
+              "path": "references/item-evidence.md",
+              "sha256": "e181c7f88b3a3fc6bac191c0dbdd90adc9e9f3d3e28d4710a17789d98e36bf33"
+            }
+          ],
+          "defaultTask": null,
+          "allowCustomTasks": true,
+          "automaticActivationRequiresManifestEvidence": true,
+          "tasks": [
+            {
+              "id": "commute-check",
+              "title": "通勤出门核对",
+              "version": "1.0",
+              "provenance": "egoassist-original/user-confirmed-checklist"
+            },
+            {
+              "id": "short-trip-pack",
+              "title": "短途出行打包",
+              "version": "1.0",
+              "provenance": "egoassist-original/user-confirmed-checklist"
+            }
+          ],
+          "tools": [],
+          "capabilities": [
+            "belongings-checklist",
+            "item-evidence-separation"
+          ],
+          "capabilityTruth": [
+            {
+              "id": "belongings-checklist",
+              "status": "descriptive",
+              "executable": false,
+              "reason": "Manifest metadata describes desired behavior; no capability dispatcher is connected."
+            },
+            {
+              "id": "item-evidence-separation",
+              "status": "descriptive",
+              "executable": false,
+              "reason": "Manifest metadata describes desired behavior; no capability dispatcher is connected."
+            }
+          ]
+        },
+        "task": {
+          "task": {
+            "id": "commute-check",
+            "title": "通勤出门核对",
+            "version": "1.0",
+            "provenance": "egoassist-original/user-confirmed-checklist"
+          },
+          "completed": false,
+          "paused": false,
+          "stepIndex": 2,
+          "progress": 0.6666666666666666,
+          "currentCheckpointId": "carry",
+          "checkpointLedger": {
+            "list": {
+              "status": "satisfied",
+              "confidence": 1,
+              "evidenceIds": [],
+              "updatedBy": "用户语义确认"
+            },
+            "gather": {
+              "status": "satisfied",
+              "confidence": 1,
+              "evidenceIds": [],
+              "updatedBy": "用户语义确认"
+            },
+            "carry": {
+              "status": "active",
+              "confidence": 0,
+              "evidenceIds": [],
+              "updatedBy": "用户语义确认"
+            }
+          },
+          "steps": [
+            {
+              "id": "list",
+              "title": "确认清单",
+              "instruction": "请用户确认今天出门必须带哪些物品；手机、钥匙和门禁卡仅作为可选建议。",
+              "completion": "用户确认了本次出门清单",
+              "risk": "low",
+              "source": "user-confirmed requirements",
+              "status": "done",
+              "confidence": 1,
+              "evidenceIds": [],
+              "updatedBy": "用户语义确认"
+            },
+            {
+              "id": "gather",
+              "title": "逐项找到",
+              "instruction": "对照刚确认的清单逐项找到物品，明确说出尚未找到或不确定的项目。",
+              "completion": "用户确认清单上的物品均已找到",
+              "risk": "low",
+              "source": "user report or current visual evidence",
+              "status": "done",
+              "confidence": 1,
+              "evidenceIds": [],
+              "updatedBy": "用户语义确认"
+            },
+            {
+              "id": "carry",
+              "title": "确认携带",
+              "instruction": "请用户核对清单上的物品已放入包中或随身口袋，不能把桌上的物品算作已带走。",
+              "completion": "用户确认清单物品已装好或随身携带",
+              "risk": "low",
+              "source": "explicit user confirmation",
+              "status": "active",
+              "confidence": 0,
+              "evidenceIds": [],
+              "updatedBy": "用户语义确认"
+            }
+          ],
+          "observation": null,
+          "decision": {
+            "action": "guide",
+            "message": "逐项找到完成。下一步：请用户核对清单上的物品已放入包中或随身口袋，不能把桌上的物品算作已带走。",
+            "reason": "用户语义确认",
+            "confidence": 1
+          },
+          "announcedMemoryIds": [],
+          "perception": {
+            "contextId": "task-context-00e29b0df3844d2fb16daf9e3c48b3c0",
+            "taskId": "commute-check",
+            "taskVersion": "1.0",
+            "taskProvenance": "egoassist-original/user-confirmed-checklist",
+            "checkpointId": "carry",
+            "checkpointEpoch": 2,
+            "allowedTransitions": [
+              "gather"
+            ],
+            "completionCriteria": "用户确认清单物品已装好或随身携带",
+            "risk": "low",
+            "sourceReference": "explicit user confirmation",
+            "completionEvidence": [],
+            "audit": [],
+            "policy": "evidence-only-user-confirmation-required"
+          },
+          "trace": []
+        }
+      },
+      "state": {
+        "activeSkill": "packing-coach",
+        "task": "commute-check",
+        "checkpoint": "carry",
+        "paused": false,
+        "promptSkill": "packing-coach",
+        "artifacts": [],
+        "routing": {
+          "method": "semantic-turn-router-v8+manifest-evidence",
+          "input": "我确认手机、钥匙和门禁卡都已经找到，找齐物品这一步完成了。",
+          "status": "no-match",
+          "selectedSkill": null,
+          "selectedTask": null,
+          "candidates": [
+            {
+              "skill": "assembly-coach",
+              "score": 0,
+              "evidence": [],
+              "task": null,
+              "selected": false,
+              "rejectionReasons": [
+                "no-evidence"
+              ]
+            },
+            {
+              "skill": "field-notes",
+              "score": 0,
+              "evidence": [],
+              "task": null,
+              "selected": false,
+              "rejectionReasons": [
+                "no-evidence"
+              ]
+            },
+            {
+              "skill": "kitchen-coach",
+              "score": 0,
+              "evidence": [],
+              "task": null,
+              "selected": false,
+              "rejectionReasons": [
+                "no-evidence"
+              ]
+            },
+            {
+              "skill": "packing-coach",
+              "score": 0,
+              "evidence": [],
+              "task": null,
+              "selected": false,
+              "rejectionReasons": [
+                "no-evidence"
+              ]
+            }
+          ],
+          "claimBoundary": "Only the current transcript is classified, with explicit clock, pending draft and previous-turn context. Labels are hypotheses, not facts."
+        }
+      },
+      "contextLayers": [
+        {
+          "name": "context-trust-policy",
+          "source": "context-harness",
+          "tokens": 47,
+          "required": true
+        },
+        {
+          "name": "core-policy",
+          "source": "skill-runtime",
+          "tokens": 733,
+          "required": true
+        },
+        {
+          "name": "active-skill-policy",
+          "source": "skill:packing-coach:5dc0459c51bd1dcc44cc1b19b90cbc6a9c0e690ecf9e6c8678f5deabcac547cf",
+          "tokens": 463,
+          "required": true
+        },
+        {
+          "name": "skill-runtime-state",
+          "source": "skill-runtime",
+          "tokens": 69,
+          "required": true
+        }
+      ]
+    },
+    {
+      "input": "我确认手机、钥匙和门禁卡都已放进包里，携带核对这一步完成了。",
+      "passed": true,
+      "audioPackets": 48,
+      "firstTextMs": 1062.5,
+      "firstAudioMs": 1362.2,
+      "transcript": "好的，所有物品都已确认带齐并放入包中。最后做个安全检查：请环顾一下周围，确保没有遗漏重要物品，比如钱包、耳机或者雨伞等。如果都检查完毕，就可以出门了。",
+      "terminal": {
+        "sequence": 5,
+        "status": "response.done",
+        "usage": {
+          "inputTokens": 3538,
+          "outputTokens": 240,
+          "totalTokens": 3778,
+          "inputTokenDetails": {
+            "text_tokens": 3538
+          },
+          "outputTokenDetails": {
+            "text_tokens": 48,
+            "audio_tokens": 192
+          }
+        },
+        "fragmentCommitted": true,
+        "interrupted": false,
+        "localCancelRequested": false
+      },
+      "finishedMs": 4193.3,
+      "observed": {
+        "skill": {
+          "name": "packing-coach",
+          "description": "Help a user actively pack a bag or check belongings before leaving for work or a short trip. Use a user-confirmed list, distinguish present from packed and unknown items. Not for recalling an item's location, shopping, cooking or discussing travel in general.",
+          "version": "1.0.0",
+          "contentHash": "5dc0459c51bd1dcc44cc1b19b90cbc6a9c0e690ecf9e6c8678f5deabcac547cf",
+          "workflowMode": "procedural",
+          "instructionResources": [
+            {
+              "path": "references/item-evidence.md",
+              "sha256": "e181c7f88b3a3fc6bac191c0dbdd90adc9e9f3d3e28d4710a17789d98e36bf33"
+            }
+          ],
+          "defaultTask": null,
+          "allowCustomTasks": true,
+          "automaticActivationRequiresManifestEvidence": true,
+          "tasks": [
+            {
+              "id": "commute-check",
+              "title": "通勤出门核对",
+              "version": "1.0",
+              "provenance": "egoassist-original/user-confirmed-checklist"
+            },
+            {
+              "id": "short-trip-pack",
+              "title": "短途出行打包",
+              "version": "1.0",
+              "provenance": "egoassist-original/user-confirmed-checklist"
+            }
+          ],
+          "tools": [],
+          "capabilities": [
+            "belongings-checklist",
+            "item-evidence-separation"
+          ],
+          "capabilityTruth": [
+            {
+              "id": "belongings-checklist",
+              "status": "descriptive",
+              "executable": false,
+              "reason": "Manifest metadata describes desired behavior; no capability dispatcher is connected."
+            },
+            {
+              "id": "item-evidence-separation",
+              "status": "descriptive",
+              "executable": false,
+              "reason": "Manifest metadata describes desired behavior; no capability dispatcher is connected."
+            }
+          ]
+        },
+        "task": {
+          "task": {
+            "id": "commute-check",
+            "title": "通勤出门核对",
+            "version": "1.0",
+            "provenance": "egoassist-original/user-confirmed-checklist"
+          },
+          "completed": true,
+          "paused": false,
+          "stepIndex": 2,
+          "progress": 1,
+          "currentCheckpointId": "carry",
+          "checkpointLedger": {
+            "list": {
+              "status": "satisfied",
+              "confidence": 1,
+              "evidenceIds": [],
+              "updatedBy": "用户语义确认"
+            },
+            "gather": {
+              "status": "satisfied",
+              "confidence": 1,
+              "evidenceIds": [],
+              "updatedBy": "用户语义确认"
+            },
+            "carry": {
+              "status": "satisfied",
+              "confidence": 1,
+              "evidenceIds": [],
+              "updatedBy": "用户语义确认"
+            }
+          },
+          "steps": [
+            {
+              "id": "list",
+              "title": "确认清单",
+              "instruction": "请用户确认今天出门必须带哪些物品；手机、钥匙和门禁卡仅作为可选建议。",
+              "completion": "用户确认了本次出门清单",
+              "risk": "low",
+              "source": "user-confirmed requirements",
+              "status": "done",
+              "confidence": 1,
+              "evidenceIds": [],
+              "updatedBy": "用户语义确认"
+            },
+            {
+              "id": "gather",
+              "title": "逐项找到",
+              "instruction": "对照刚确认的清单逐项找到物品，明确说出尚未找到或不确定的项目。",
+              "completion": "用户确认清单上的物品均已找到",
+              "risk": "low",
+              "source": "user report or current visual evidence",
+              "status": "done",
+              "confidence": 1,
+              "evidenceIds": [],
+              "updatedBy": "用户语义确认"
+            },
+            {
+              "id": "carry",
+              "title": "确认携带",
+              "instruction": "请用户核对清单上的物品已放入包中或随身口袋，不能把桌上的物品算作已带走。",
+              "completion": "用户确认清单物品已装好或随身携带",
+              "risk": "low",
+              "source": "explicit user confirmation",
+              "status": "done",
+              "confidence": 1,
+              "evidenceIds": [],
+              "updatedBy": "用户语义确认"
+            }
+          ],
+          "observation": null,
+          "decision": {
+            "action": "guide",
+            "message": "任务完成。请执行最后的安全检查。",
+            "reason": "用户语义确认",
+            "confidence": 1
+          },
+          "announcedMemoryIds": [],
+          "perception": {
+            "contextId": "task-context-00e29b0df3844d2fb16daf9e3c48b3c0",
+            "taskId": "commute-check",
+            "taskVersion": "1.0",
+            "taskProvenance": "egoassist-original/user-confirmed-checklist",
+            "checkpointId": "carry",
+            "checkpointEpoch": 3,
+            "allowedTransitions": [
+              "gather"
+            ],
+            "completionCriteria": "用户确认清单物品已装好或随身携带",
+            "risk": "low",
+            "sourceReference": "explicit user confirmation",
+            "completionEvidence": [],
+            "audit": [],
+            "policy": "evidence-only-user-confirmation-required"
+          },
+          "trace": []
+        }
+      },
+      "state": {
+        "activeSkill": "packing-coach",
+        "task": "commute-check",
+        "checkpoint": "carry",
+        "paused": false,
+        "promptSkill": "packing-coach",
+        "artifacts": [],
+        "routing": {
+          "method": "semantic-turn-router-v8+manifest-evidence",
+          "input": "我确认手机、钥匙和门禁卡都已放进包里，携带核对这一步完成了。",
+          "status": "no-match",
+          "selectedSkill": null,
+          "selectedTask": null,
+          "candidates": [
+            {
+              "skill": "assembly-coach",
+              "score": 0,
+              "evidence": [],
+              "task": null,
+              "selected": false,
+              "rejectionReasons": [
+                "no-evidence"
+              ]
+            },
+            {
+              "skill": "field-notes",
+              "score": 0,
+              "evidence": [],
+              "task": null,
+              "selected": false,
+              "rejectionReasons": [
+                "no-evidence"
+              ]
+            },
+            {
+              "skill": "kitchen-coach",
+              "score": 0,
+              "evidence": [],
+              "task": null,
+              "selected": false,
+              "rejectionReasons": [
+                "no-evidence"
+              ]
+            },
+            {
+              "skill": "packing-coach",
+              "score": 0,
+              "evidence": [],
+              "task": null,
+              "selected": false,
+              "rejectionReasons": [
+                "no-evidence"
+              ]
+            }
+          ],
+          "claimBoundary": "Only the current transcript is classified, with explicit clock, pending draft and previous-turn context. Labels are hypotheses, not facts."
+        }
+      },
+      "contextLayers": [
+        {
+          "name": "context-trust-policy",
+          "source": "context-harness",
+          "tokens": 47,
+          "required": true
+        },
+        {
+          "name": "core-policy",
+          "source": "skill-runtime",
+          "tokens": 733,
+          "required": true
+        },
+        {
+          "name": "active-skill-policy",
+          "source": "skill:packing-coach:5dc0459c51bd1dcc44cc1b19b90cbc6a9c0e690ecf9e6c8678f5deabcac547cf",
+          "tokens": 463,
+          "required": true
+        },
+        {
+          "name": "skill-runtime-state",
+          "source": "skill-runtime",
+          "tokens": 73,
+          "required": true
+        }
+      ]
+    },
+    {
+      "input": "退出当前 Skill。",
+      "passed": true,
+      "audioPackets": 13,
+      "firstTextMs": 973.9,
+      "firstAudioMs": 1269.2,
+      "transcript": "好的，已退出当前技能。还有什么我可以帮你的吗？",
+      "terminal": {
+        "sequence": 6,
+        "status": "response.done",
+        "usage": {
+          "inputTokens": 3291,
+          "outputTokens": 67,
+          "totalTokens": 3358,
+          "inputTokenDetails": {
+            "text_tokens": 3291
+          },
+          "outputTokenDetails": {
+            "text_tokens": 15,
+            "audio_tokens": 52
+          }
+        },
+        "fragmentCommitted": true,
+        "interrupted": false,
+        "localCancelRequested": false
+      },
+      "finishedMs": 2102.8,
+      "observed": {
+        "skill": null,
+        "task": null
+      },
+      "state": {
+        "activeSkill": null,
+        "task": null,
+        "checkpoint": null,
+        "paused": false,
+        "promptSkill": null,
+        "artifacts": [],
+        "routing": {
+          "method": "semantic-turn-router-v8",
+          "input": "退出当前 Skill。",
+          "status": "deactivated",
+          "selectedSkill": null,
+          "selectedTask": null,
+          "candidates": [
+            {
+              "skill": "assembly-coach",
+              "score": 0,
+              "evidence": [],
+              "task": null,
+              "selected": false,
+              "rejectionReasons": [
+                "no-evidence"
+              ]
+            },
+            {
+              "skill": "field-notes",
+              "score": 0,
+              "evidence": [],
+              "task": null,
+              "selected": false,
+              "rejectionReasons": [
+                "no-evidence"
+              ]
+            },
+            {
+              "skill": "kitchen-coach",
+              "score": 0,
+              "evidence": [],
+              "task": null,
+              "selected": false,
+              "rejectionReasons": [
+                "no-evidence"
+              ]
+            },
+            {
+              "skill": "packing-coach",
+              "score": 0,
+              "evidence": [],
+              "task": null,
+              "selected": false,
+              "rejectionReasons": [
+                "no-evidence"
+              ]
+            }
+          ],
+          "claimBoundary": "Only the current transcript is classified, with explicit clock, pending draft and previous-turn context. Labels are hypotheses, not facts.",
+          "skillControl": "deactivate"
+        }
+      },
+      "contextLayers": [
+        {
+          "name": "context-trust-policy",
+          "source": "context-harness",
+          "tokens": 47,
+          "required": true
+        },
+        {
+          "name": "core-policy",
+          "source": "skill-runtime",
+          "tokens": 174,
+          "required": true
+        },
+        {
+          "name": "skill-catalog",
+          "source": "skill-registry",
+          "tokens": 355,
+          "required": true
+        }
+      ]
+    },
+    {
+      "input": "请整理现场记录：仓库收到六箱配件，其中一箱外包装潮湿，里面有没有损坏还没有检查。",
+      "passed": false,
+      "audioPackets": 41,
+      "firstTextMs": 1227.5,
+      "firstAudioMs": 1488.3,
+      "transcript": "收到六箱配件，其中一箱外包装潮湿，内部状况尚未检查。建议标记该箱为“待查验”，并安排后续开箱确认是否损坏。是否需要我帮你生成一份更完整的现场记录草稿？",
+      "terminal": {
+        "sequence": 7,
+        "status": "response.done",
+        "usage": {
+          "inputTokens": 3639,
+          "outputTokens": 209,
+          "totalTokens": 3848,
+          "inputTokenDetails": {
+            "text_tokens": 3639
+          },
+          "outputTokenDetails": {
+            "text_tokens": 46,
+            "audio_tokens": 163
+          }
+        },
+        "fragmentCommitted": true,
+        "interrupted": false,
+        "localCancelRequested": false
+      },
+      "finishedMs": 3963.3,
+      "observed": {
+        "skill": null,
+        "task": null
+      }
+    }
+  ],
+  "sessionId": "93fbe2a2fcd04880",
+  "catalog": [
+    {
+      "name": "assembly-coach",
+      "version": "1.2.0",
+      "contentHash": "f27de026b3a281d4a3b7dbc49fac9498d82ba0fb9cf3f124ba991ca48ea27e3d",
+      "workflowMode": "procedural",
+      "tasks": [
+        {
+          "id": "flat-pack-stool",
+          "title": "组装平板包装凳",
+          "version": "1.0",
+          "provenance": "bundled/generic-flat-pack-demo"
+        },
+        {
+          "id": "water-filter",
+          "title": "安装净水壶滤芯",
+          "version": "1.1",
+          "provenance": "bundled/generic-filter-procedure"
+        }
+      ],
+      "instructionResources": [
+        {
+          "path": "references/evidence-policy.md",
+          "sha256": "eead06b4bd65dc535baf0d41c21140bf9818782161a30961746fce80d2b7ba99"
+        }
+      ]
+    },
+    {
+      "name": "field-notes",
+      "version": "1.0.0",
+      "contentHash": "1cf4139e2dbafda9f4cdbb72f2bc7e485f390d1e85369543a50146b4d6d47b33",
+      "workflowMode": "conversational",
+      "tasks": [],
+      "instructionResources": [
+        {
+          "path": "references/note-contract.md",
+          "sha256": "a3392b76d08af40dd43d819fd0e9b203f169ce866b0d2ab0962ca5e7d598d247"
+        }
+      ]
+    },
+    {
+      "name": "kitchen-coach",
+      "version": "1.2.0",
+      "contentHash": "87995053b5dc44e277b03cec3e89658c11cc21c7e4acdeefc63a4bf3ab487160",
+      "workflowMode": "procedural",
+      "tasks": [
+        {
+          "id": "fruit-salad",
+          "title": "水果沙拉",
+          "version": "1.0",
+          "provenance": "bundled/no-cook-procedure"
+        },
+        {
+          "id": "oatmeal",
+          "title": "香蕉燕麦粥",
+          "version": "1.0",
+          "provenance": "bundled/simple-breakfast"
+        },
+        {
+          "id": "tomato-eggs",
+          "title": "番茄炒蛋",
+          "version": "1.1",
+          "provenance": "bundled/household-procedure"
+        }
+      ],
+      "instructionResources": [
+        {
+          "path": "references/safety-sources.md",
+          "sha256": "f618969d3757670e68c5eecf2fe62f9efb1de50afee0352276c573332bc4d8e5"
+        }
+      ]
+    },
+    {
+      "name": "packing-coach",
+      "version": "1.0.0",
+      "contentHash": "5dc0459c51bd1dcc44cc1b19b90cbc6a9c0e690ecf9e6c8678f5deabcac547cf",
+      "workflowMode": "procedural",
+      "tasks": [
+        {
+          "id": "commute-check",
+          "title": "通勤出门核对",
+          "version": "1.0",
+          "provenance": "egoassist-original/user-confirmed-checklist"
+        },
+        {
+          "id": "short-trip-pack",
+          "title": "短途出行打包",
+          "version": "1.0",
+          "provenance": "egoassist-original/user-confirmed-checklist"
+        }
+      ],
+      "instructionResources": [
+        {
+          "path": "references/item-evidence.md",
+          "sha256": "e181c7f88b3a3fc6bac191c0dbdd90adc9e9f3d3e28d4710a17789d98e36bf33"
+        }
+      ]
+    }
+  ],
+  "error": "AssertionError: ",
+  "routing": [
+    {
+      "method": "semantic-turn-router-v8",
+      "model": "qwen-flash",
+      "status": "classified",
+      "speechControl": null,
+      "taskControl": null,
+      "preferenceIntent": null,
+      "memoryQuery": null,
+      "memoryKind": null,
+      "memoryText": null,
+      "memoryKey": null,
+      "memoryScope": null,
+      "memoryConsent": null,
+      "memoryAtoms": [],
+      "memoryDraft": null,
+      "memoryQuerySpec": null,
+      "skillControl": null,
+      "selectedSkill": null,
+      "intentKind": "foreground-dialogue",
+      "intents": [
+        {
+          "kind": "foreground-dialogue",
+          "text": "请解释浏览器 cookie 是什么。",
+          "parameters": {}
+        }
+      ],
+      "revision": null,
+      "skillStatus": "no-match",
+      "rawOutput": "{\"v\":1}",
+      "requestMetrics": {
+        "httpStatus": 200,
+        "usage": {
+          "input_tokens": 1863,
+          "output_tokens": 5,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "total_tokens": 1868
+        },
+        "requestId": "b8365d5d-0fe9-91a9-9674-c5cc9525c3fa"
+      },
+      "latencyMs": 415.2,
+      "policyVersion": "semantic-turn-router-v8",
+      "claimBoundary": "Only the current transcript is classified, with explicit clock, pending draft and previous-turn context. Labels are hypotheses, not facts.",
+      "acceptedIntents": []
+    },
+    {
+      "method": "semantic-turn-router-v8",
+      "model": "qwen-flash",
+      "status": "classified",
+      "speechControl": null,
+      "taskControl": null,
+      "preferenceIntent": null,
+      "memoryQuery": null,
+      "memoryKind": null,
+      "memoryText": null,
+      "memoryKey": null,
+      "memoryScope": null,
+      "memoryConsent": null,
+      "memoryAtoms": [],
+      "memoryDraft": null,
+      "memoryQuerySpec": null,
+      "skillControl": null,
+      "selectedSkill": "packing-coach",
+      "intentKind": "foreground-dialogue",
+      "intents": [
+        {
+          "kind": "persistent-task",
+          "text": "Help with commuting departure checklist",
+          "parameters": {}
+        }
+      ],
+      "revision": null,
+      "skillStatus": "matched",
+      "rawOutput": "{\"v\":1,\"skill\":\"packing-coach\",\"intentKind\":\"persistent-task\",\"intents\":[{\"kind\":\"persistent-task\",\"text\":\"Help with commuting departure checklist\",\"parameters\":{}}]}",
+      "requestMetrics": {
+        "httpStatus": 200,
+        "usage": {
+          "input_tokens": 2131,
+          "output_tokens": 38,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "total_tokens": 2169
+        },
+        "requestId": "7aea3e01-2b39-9a4e-b507-0347407a686e"
+      },
+      "latencyMs": 642,
+      "policyVersion": "semantic-turn-router-v8",
+      "claimBoundary": "Only the current transcript is classified, with explicit clock, pending draft and previous-turn context. Labels are hypotheses, not facts.",
+      "acceptedIntents": [],
+      "requestedIntentKind": "persistent-task",
+      "intentExecution": {
+        "status": "unsupported",
+        "capability": "background-execution",
+        "reason": "No durable background-execution executor is connected."
+      }
+    },
+    {
+      "method": "semantic-turn-router-v8",
+      "model": "qwen-flash",
+      "status": "classified",
+      "speechControl": null,
+      "taskControl": "confirm-step",
+      "preferenceIntent": null,
+      "memoryQuery": null,
+      "memoryKind": null,
+      "memoryText": null,
+      "memoryKey": null,
+      "memoryScope": null,
+      "memoryConsent": null,
+      "memoryAtoms": [],
+      "memoryDraft": null,
+      "memoryQuerySpec": null,
+      "skillControl": null,
+      "selectedSkill": null,
+      "intentKind": "foreground-dialogue",
+      "intents": [
+        {
+          "kind": "foreground-dialogue",
+          "text": "我确认清单就是手机、钥匙和门禁卡，清单确认这一步完成了。",
+          "parameters": {}
+        }
+      ],
+      "revision": null,
+      "skillStatus": "no-match",
+      "rawOutput": "{\"v\":1,\"taskControl\":\"confirm-step\"}",
+      "requestMetrics": {
+        "httpStatus": 200,
+        "usage": {
+          "input_tokens": 2139,
+          "output_tokens": 11,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "total_tokens": 2150
+        },
+        "requestId": "0e96eeb9-70ad-99b3-a14b-ed23b4e2fb64"
+      },
+      "latencyMs": 494,
+      "policyVersion": "semantic-turn-router-v8",
+      "claimBoundary": "Only the current transcript is classified, with explicit clock, pending draft and previous-turn context. Labels are hypotheses, not facts.",
+      "acceptedIntents": []
+    },
+    {
+      "method": "semantic-turn-router-v8",
+      "model": "qwen-flash",
+      "status": "classified",
+      "speechControl": null,
+      "taskControl": "confirm-step",
+      "preferenceIntent": null,
+      "memoryQuery": null,
+      "memoryKind": null,
+      "memoryText": null,
+      "memoryKey": null,
+      "memoryScope": null,
+      "memoryConsent": null,
+      "memoryAtoms": [],
+      "memoryDraft": null,
+      "memoryQuerySpec": null,
+      "skillControl": null,
+      "selectedSkill": null,
+      "intentKind": "foreground-dialogue",
+      "intents": [
+        {
+          "kind": "foreground-dialogue",
+          "text": "我确认手机、钥匙和门禁卡都已经找到，找齐物品这一步完成了。",
+          "parameters": {}
+        }
+      ],
+      "revision": null,
+      "skillStatus": "no-match",
+      "rawOutput": "{\"v\":1,\"taskControl\":\"confirm-step\"}",
+      "requestMetrics": {
+        "httpStatus": 200,
+        "usage": {
+          "input_tokens": 2135,
+          "output_tokens": 11,
+          "prompt_tokens_details": {
+            "cached_tokens": 1664
+          },
+          "total_tokens": 2146
+        },
+        "requestId": "c22ad475-79ab-91b1-b983-fa4a40f435ac"
+      },
+      "latencyMs": 393,
+      "policyVersion": "semantic-turn-router-v8",
+      "claimBoundary": "Only the current transcript is classified, with explicit clock, pending draft and previous-turn context. Labels are hypotheses, not facts.",
+      "acceptedIntents": []
+    },
+    {
+      "method": "semantic-turn-router-v8",
+      "model": "qwen-flash",
+      "status": "classified",
+      "speechControl": null,
+      "taskControl": "confirm-step",
+      "preferenceIntent": null,
+      "memoryQuery": null,
+      "memoryKind": null,
+      "memoryText": null,
+      "memoryKey": null,
+      "memoryScope": null,
+      "memoryConsent": null,
+      "memoryAtoms": [],
+      "memoryDraft": null,
+      "memoryQuerySpec": null,
+      "skillControl": null,
+      "selectedSkill": null,
+      "intentKind": "foreground-dialogue",
+      "intents": [
+        {
+          "kind": "foreground-dialogue",
+          "text": "我确认手机、钥匙和门禁卡都已放进包里，携带核对这一步完成了。",
+          "parameters": {}
+        }
+      ],
+      "revision": null,
+      "skillStatus": "no-match",
+      "rawOutput": "{\"v\":1,\"taskControl\":\"confirm-step\"}",
+      "requestMetrics": {
+        "httpStatus": 200,
+        "usage": {
+          "input_tokens": 2140,
+          "output_tokens": 11,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "total_tokens": 2151
+        },
+        "requestId": "1157490b-78dd-98d5-8f70-e4239355aa94"
+      },
+      "latencyMs": 457.7,
+      "policyVersion": "semantic-turn-router-v8",
+      "claimBoundary": "Only the current transcript is classified, with explicit clock, pending draft and previous-turn context. Labels are hypotheses, not facts.",
+      "acceptedIntents": []
+    },
+    {
+      "method": "semantic-turn-router-v8",
+      "model": "qwen-flash",
+      "status": "classified",
+      "speechControl": null,
+      "taskControl": null,
+      "preferenceIntent": null,
+      "memoryQuery": null,
+      "memoryKind": null,
+      "memoryText": null,
+      "memoryKey": null,
+      "memoryScope": null,
+      "memoryConsent": null,
+      "memoryAtoms": [],
+      "memoryDraft": null,
+      "memoryQuerySpec": null,
+      "skillControl": "deactivate",
+      "selectedSkill": null,
+      "intentKind": "foreground-dialogue",
+      "intents": [
+        {
+          "kind": "foreground-dialogue",
+          "text": "退出当前 Skill。",
+          "parameters": {}
+        }
+      ],
+      "revision": null,
+      "skillStatus": "no-match",
+      "rawOutput": "{\"v\":1,\"skillControl\":\"deactivate\"}",
+      "requestMetrics": {
+        "httpStatus": 200,
+        "usage": {
+          "input_tokens": 2126,
+          "output_tokens": 11,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "total_tokens": 2137
+        },
+        "requestId": "8b6e807a-1db5-9f9b-9087-c24b374f9c4f"
+      },
+      "latencyMs": 440.2,
+      "policyVersion": "semantic-turn-router-v8",
+      "claimBoundary": "Only the current transcript is classified, with explicit clock, pending draft and previous-turn context. Labels are hypotheses, not facts.",
+      "acceptedIntents": []
+    },
+    {
+      "method": "semantic-turn-router-v8",
+      "model": "qwen-flash",
+      "status": "invalid",
+      "speechControl": null,
+      "taskControl": null,
+      "preferenceIntent": null,
+      "memoryQuery": null,
+      "memoryKind": null,
+      "memoryText": null,
+      "memoryKey": null,
+      "memoryScope": null,
+      "memoryConsent": null,
+      "memoryAtoms": [],
+      "memoryDraft": null,
+      "memoryQuerySpec": null,
+      "skillControl": null,
+      "selectedSkill": null,
+      "intentKind": "foreground-dialogue",
+      "intents": [
+        {
+          "kind": "foreground-dialogue",
+          "text": "请整理现场记录：仓库收到六箱配件，其中一箱外包装潮湿，里面有没有损坏还没有检查。",
+          "parameters": {}
+        }
+      ],
+      "revision": null,
+      "skillStatus": "unavailable",
+      "latencyMs": 687.8,
+      "policyVersion": "semantic-turn-router-v8",
+      "claimBoundary": "Classifier failed open to ordinary conversation; it cannot cause silence.",
+      "error": "ValueError: memory draft predicate is required",
+      "rawOutput": "{\"v\":1,\"skill\":\"field-notes\",\"memoryDraft\":{\"mode\":\"start\",\"subject\":null,\"predicate\":null,\"language\":\"zh\",\"missingFields\":[\"subject\",\"predicate\"]}}",
+      "timedOut": false,
+      "requestMetrics": {
+        "httpStatus": 200,
+        "usage": {
+          "input_tokens": 2126,
+          "output_tokens": 37,
+          "prompt_tokens_details": {
+            "cached_tokens": 1664
+          },
+          "total_tokens": 2163
+        },
+        "requestId": "b670b51f-53fd-9c21-a6af-4ed49890d28a"
+      },
+      "acceptedIntents": []
+    }
+  ],
+  "sourceReport": "outputs/skill-catalog-20260909-1/acceptance.json"
+}

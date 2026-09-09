@@ -663,6 +663,7 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
         *,
         episode_injection: dict | None = None,
         include_untrusted_evidence: bool = False,
+        include_skill_policy: bool = True,
     ) -> str:
         active_runtime = target_runtime or runtime
         # Durable user data is projected as typed low-trust messages by the
@@ -670,6 +671,7 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
         base = active_runtime.context(
             [],
             runtime_tool_declarations(active_runtime.skill) if active_runtime.skill else None,
+            include_skill_policy=include_skill_policy,
         )
         evidence = (episode_injection or active_episode_injection).get("evidence", [])
         if not include_untrusted_evidence or not evidence:
@@ -689,14 +691,11 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
 
     def harness_layers(target_runtime: SkillRuntime | None = None) -> list[ContextLayer]:
         active_runtime = target_runtime or runtime
-        catalog = [
-            {"name": item["name"], "description": item["description"]}
-            for item in registry.summaries()
-        ]
+        catalog = registry.routing_catalog()
         layers = [
             ContextLayer(
                 "core-policy",
-                context(target_runtime),
+                context(target_runtime, include_skill_policy=False),
                 trust="system",
                 priority=100,
                 required=True,
@@ -712,7 +711,16 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                 source="context-harness",
             ),
         ]
-        if not active_runtime.active:
+        if active_runtime.skill:
+            layers.append(ContextLayer(
+                "active-skill-policy",
+                active_runtime.skill.instruction_context(),
+                trust="system",
+                priority=95,
+                required=True,
+                source=f"skill:{active_runtime.skill.name}:{active_runtime.skill.content_hash}",
+            ))
+        else:
             layers.append(ContextLayer(
                 "skill-catalog",
                 "<available_skills>\n"
@@ -733,7 +741,7 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                 live,
                 trust="system",
                 priority=85,
-                required=False,
+                required=True,
                 source="skill-runtime",
             ))
         return layers
@@ -763,6 +771,7 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
         active_runtime = target_runtime or runtime
         return {
             "skill": active_runtime.skill.name if active_runtime.skill else None,
+            "skillContentHash": active_runtime.skill.content_hash if active_runtime.skill else None,
             "task": active_runtime.task.spec.id if active_runtime.task else None,
             "taskSpec": active_runtime.task.spec.to_dict() if active_runtime.task else None,
             "taskState": active_runtime.task.snapshot() if active_runtime.task else None,
@@ -1384,10 +1393,11 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                 "impact": {"status": "none", "text": PROMPTS.diag_impact_none},
                 "lastDecision": memory_state["decision"],
             }
+            unresolved_task = bool(active_runtime.skill and active_runtime.tasks)
             generic_decision = {
-                "action": "ask" if active_runtime.skill else "silent",
-                "message": PROMPTS.diag_decision_waiting if active_runtime.skill else PROMPTS.diag_decision_general,
-                "reason": "skill-loaded-task-unresolved" if active_runtime.skill else "no-domain-intent",
+                "action": "ask" if unresolved_task else "silent",
+                "message": PROMPTS.diag_decision_waiting if unresolved_task else PROMPTS.diag_decision_general,
+                "reason": "skill-loaded-task-unresolved" if unresolved_task else "conversational-skill" if active_runtime.skill else "no-domain-intent",
                 "confidence": 1.0 if active_runtime.skill else 0.0,
             }
             return {
@@ -1427,13 +1437,13 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                     {"id": "working", "name": PROMPTS.diag_mem_working_name, "status": "live" if bridges else "idle", "implementation": PROMPTS.diag_mem_working_impl},
                     {"id": "preference", "name": PROMPTS.diag_mem_preference_name, "status": "waiting-scope" if preference_settings["preference_enabled"] else "disabled", "implementation": PROMPTS.diag_mem_preference_impl},
                     {"id": "episodic", "name": PROMPTS.diag_mem_episodic_name, "status": "connected-summary" if episodic_settings["episodic_enabled"] else "disabled", "implementation": PROMPTS.diag_mem_episodic_impl_no_task},
-                    {"id": "knowledge", "name": PROMPTS.diag_mem_knowledge_name, "status": "unloaded", "implementation": PROMPTS.diag_mem_knowledge_impl_no_task},
+                    {"id": "knowledge", "name": PROMPTS.diag_mem_knowledge_name, "status": "static-injection" if active_runtime.skill else "unloaded", "implementation": "Active Skill policy and declared resources" if active_runtime.skill else PROMPTS.diag_mem_knowledge_impl_no_task},
                 ],
                 "knowledgeMechanism": {
-                    "method": "none",
-                    "selected": None,
+                    "method": "static-skill-policy-injection-v1" if active_runtime.skill else "none",
+                    "selected": {"skill": active_runtime.skill.name, "contentHash": active_runtime.skill.content_hash} if active_runtime.skill else None,
                     "candidates": [],
-                    "claimBoundary": "No domain knowledge is injected before intent routing.",
+                    "claimBoundary": "Active Skill policy is injected; no procedural task is selected." if active_runtime.skill else "No domain knowledge is injected before intent routing.",
                 },
                 "promptContext": {
                     "hash": (
@@ -1870,8 +1880,19 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
         active_runtime = target_runtime or runtime
         if active_runtime.task is None:
             if active_runtime.skill:
+                if not active_runtime.tasks:
+                    return (
+                        f"The active Skill is {active_runtime.skill.name}, a conversational workflow without fixed steps. "
+                        "Apply its policy to the current request directly; do not ask the user to select a task."
+                    )
                 return f"The active Skill is {active_runtime.skill.name}, but the task is unresolved."
             return "Respond naturally to the current user turn already present in conversation data."
+        if active_runtime.task.completed:
+            return (
+                "The user has confirmed all task checkpoints complete. Briefly acknowledge their confirmation. "
+                "Do not invent another checkpoint, an extra checklist or a mandatory final check. "
+                "This records user confirmation, not independently verified physical completion."
+            )
         decision = active_runtime.task.decision
         if task_control == "repeat":
             return PROMPTS.task_repeat
@@ -1907,6 +1928,21 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
         ) + control_instructions(
             target_runtime, task_control=result.get("taskControl"),
         )
+        instructions += (
+            " A user statement is reported evidence, never a camera observation. "
+            "Do not say you see an object based on its mention in the transcript. "
+            "Use supplied details rather than asking the user to repeat them. "
+            "A checklist suggestion does not add items to the user's agreed list."
+        )
+        active_runtime = target_runtime or runtime
+        observation = active_runtime.task.observation if active_runtime.task else None
+        if not observation or not str(observation.get("source", "")).startswith("camera/") or not observation.get("frameId"):
+            instructions += (
+                " No accepted live visual observation is supplied in this task state. "
+                "Do not claim to see, inspect or visually verify the scene; use the user's report."
+            )
+        else:
+            instructions += " Visual evidence describes its captured frame; never assume an earlier scene remains unchanged."
         evidence = result.get("episodicInjection", {}).get("evidence", [])
         if evidence:
             instructions += (
@@ -4852,10 +4888,7 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                 )
 
         async def classify_semantic_turn(text: str, turn_id: str | None = None) -> dict:
-            catalog = [
-                {"name": item["name"], "description": item["description"]}
-                for item in registry.summaries()
-            ]
+            catalog = registry.routing_catalog()
             turn_clock = clock_for_session(user_id, session_id)
             turns = (owner.work_ledger or CaseWorkLedger(harness.journal)).turns()
             previous = None
@@ -5251,6 +5284,7 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                     session_episode_injection = result["episodicInjection"]
                 current_skill_ref = {
                     "name": processing_runtime.skill.name if processing_runtime.skill else None,
+                    "contentHash": processing_runtime.skill.content_hash if processing_runtime.skill else None,
                     "version": (
                         processing_runtime.skill.manifest.get("version")
                         if processing_runtime.skill else None

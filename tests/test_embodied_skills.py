@@ -52,7 +52,7 @@ def test_bundled_skill_activation_requires_domain_evidence():
 
 def test_registry_discovers_agent_skills_and_runtime_switches_workflow():
     registry = SkillRegistry(BUILTIN_SKILLS_ROOT)
-    assert set(registry.skills) == {"assembly-coach", "kitchen-coach"}
+    assert set(registry.skills) == {"assembly-coach", "kitchen-coach", "packing-coach", "field-notes"}
 
     runtime = SkillRuntime(registry, "kitchen-coach")
     kitchen_context = runtime.context([])

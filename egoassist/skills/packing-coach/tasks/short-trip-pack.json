@@ -1,0 +1,14 @@
+{
+  "id": "short-trip-pack",
+  "title": "短途出行打包",
+  "aliases": ["短途旅行打包", "short trip packing"],
+  "version": "1.0",
+  "role": "短途出行打包助手",
+  "provenance": "egoassist-original/user-confirmed-checklist",
+  "safety_policy": ["不编造交通、证件或药物携带要求", "用户清单优先于通用示例"],
+  "steps": [
+    {"id": "scope", "title": "确认行程需求", "instruction": "确认出行天数和用户需要携带的物品，避免自动添加未经确认的必需品。", "completion": "用户确认本次出行清单", "source": "user-confirmed requirements"},
+    {"id": "gather", "title": "按清单集合物品", "instruction": "按用户清单集合物品，逐项指出未找到或状态不明的项目。", "completion": "用户确认所需物品已集合", "source": "user report or current visual evidence"},
+    {"id": "pack", "title": "核对实际装包", "instruction": "核对每个清单项目是否已实际装入包中或准备随身携带。", "completion": "用户确认清单全部装包或随身携带", "source": "explicit user confirmation"}
+  ]
+}

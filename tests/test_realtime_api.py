@@ -1429,6 +1429,41 @@ def test_rejected_skill_proposal_preserves_runtime_and_exit_clears_bridge(tmp_pa
     asyncio.run(scenario())
 
 
+def test_conversational_skill_has_auditable_policy_without_unresolved_task(tmp_path, monkeypatch):
+    instances = install_queue_test_bridge(monkeypatch)
+
+    async def classify(_self, text, catalog):
+        return semantic_result(text, selected_skill="field-notes")
+
+    monkeypatch.setattr(run_egoassist.SemanticTurnRouter, "classify", classify)
+
+    async def scenario():
+        app = create_app(str(BUILTIN_SKILLS_ROOT), None, str(tmp_path / "memory.json"), "test-realtime", "Ethan")
+        async with TestClient(TestServer(app)) as client:
+            await register_client(client)
+            sid = (await (await client.post("/api/sessions")).json())["session"]["id"]
+            async with client.ws_connect(f"/ws/realtime?session={sid}") as ws:
+                await _recv(ws)
+                await _recv(ws)
+                instances[0].on_transcript("请整理现场记录：六箱配件")
+                state = (await _recv_wait(ws, timeout=2))["state"]
+                assert state["task"] is None
+                assert state["activeSkill"]["workflowMode"] == "conversational"
+                assert state["genericDecision"]["reason"] == "conversational-skill"
+                assert state["knowledgeMechanism"]["method"] == "static-skill-policy-injection-v1"
+                layers = {layer["name"]: layer for layer in state["promptContext"]["harnesses"][0]["manifest"]["layers"]}
+                assert "active-skill-policy" in layers
+                assert "skill-runtime-state" not in layers
+                assert "Use the current dictated" not in layers["core-policy"]["content"]
+                assert state["activeSkill"]["contentHash"] in layers["active-skill-policy"]["source"]
+                await asyncio.wait_for(instances[0].request_event.wait(), 2)
+                instructions = instances[0].requests[-1][0]
+                assert "do not ask the user to select a task" in instructions
+                assert "No accepted live visual observation" in instructions
+
+    asyncio.run(scenario())
+
+
 def test_realtime_transcripts_are_classified_and_committed_in_fifo_order(tmp_path, monkeypatch):
     instances = install_queue_test_bridge(monkeypatch)
     first_started = asyncio.Event()

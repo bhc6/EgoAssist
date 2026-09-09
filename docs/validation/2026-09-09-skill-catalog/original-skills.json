@@ -1,0 +1,694 @@
+{
+  "mock": false,
+  "model": "qwen3.5-omni-flash-realtime",
+  "input": "text-control",
+  "physicalCompletionMeasured": false,
+  "passed": true,
+  "turns": [
+    {
+      "input": "我要做番茄炒蛋，请告诉我第一步。",
+      "audioPackets": 23,
+      "firstTextMs": 966.9,
+      "firstAudioMs": 1300.1,
+      "transcript": "好的，我们开始做番茄炒蛋。第一步是准备材料，请确认鸡蛋、番茄、少量油和盐是否都已放在操作区。",
+      "terminal": {
+        "sequence": 1,
+        "status": "response.done",
+        "usage": {
+          "inputTokens": 2213,
+          "outputTokens": 120,
+          "totalTokens": 2333,
+          "inputTokenDetails": {
+            "text_tokens": 2213
+          },
+          "outputTokenDetails": {
+            "text_tokens": 31,
+            "audio_tokens": 89
+          }
+        },
+        "fragmentCommitted": true,
+        "interrupted": false,
+        "localCancelRequested": false
+      },
+      "finishedMs": 2941.9,
+      "state": {
+        "activeSkill": "kitchen-coach",
+        "task": {
+          "id": "tomato-eggs",
+          "title": "番茄炒蛋",
+          "version": "1.1",
+          "provenance": "bundled/household-procedure"
+        },
+        "paused": false
+      },
+      "passed": true
+    },
+    {
+      "input": "请重复当前步骤。",
+      "audioPackets": 19,
+      "firstTextMs": 928.4,
+      "firstAudioMs": 1184.5,
+      "transcript": "请先确认鸡蛋、番茄、少量油和盐是否都已准备好并放在操作区。",
+      "terminal": {
+        "sequence": 2,
+        "status": "response.done",
+        "usage": {
+          "inputTokens": 2653,
+          "outputTokens": 94,
+          "totalTokens": 2747,
+          "inputTokenDetails": {
+            "text_tokens": 2653
+          },
+          "outputTokenDetails": {
+            "text_tokens": 19,
+            "audio_tokens": 75
+          }
+        },
+        "fragmentCommitted": true,
+        "interrupted": false,
+        "localCancelRequested": false
+      },
+      "finishedMs": 2342,
+      "state": {
+        "activeSkill": "kitchen-coach",
+        "task": {
+          "id": "tomato-eggs",
+          "title": "番茄炒蛋",
+          "version": "1.1",
+          "provenance": "bundled/household-procedure"
+        },
+        "paused": false
+      },
+      "passed": true
+    },
+    {
+      "input": "暂停当前任务。",
+      "audioPackets": 4,
+      "firstTextMs": 1036.9,
+      "firstAudioMs": 1300.1,
+      "transcript": "好的，任务已暂停。",
+      "terminal": {
+        "sequence": 3,
+        "status": "response.done",
+        "usage": {
+          "inputTokens": 3054,
+          "outputTokens": 24,
+          "totalTokens": 3078,
+          "inputTokenDetails": {
+            "text_tokens": 3054
+          },
+          "outputTokenDetails": {
+            "text_tokens": 8,
+            "audio_tokens": 16
+          }
+        },
+        "fragmentCommitted": true,
+        "interrupted": false,
+        "localCancelRequested": false
+      },
+      "finishedMs": 1645.3,
+      "state": {
+        "activeSkill": "kitchen-coach",
+        "task": {
+          "id": "tomato-eggs",
+          "title": "番茄炒蛋",
+          "version": "1.1",
+          "provenance": "bundled/household-procedure"
+        },
+        "paused": true
+      },
+      "passed": true
+    },
+    {
+      "input": "继续当前任务。",
+      "audioPackets": 30,
+      "firstTextMs": 944.2,
+      "firstAudioMs": 1261.2,
+      "transcript": "好的，请确认鸡蛋、番茄、少量油和盐是否都已放在操作区。如果都准备好了，就告诉我一声，我们继续下一步。",
+      "terminal": {
+        "sequence": 4,
+        "status": "response.done",
+        "usage": {
+          "inputTokens": 3447,
+          "outputTokens": 149,
+          "totalTokens": 3596,
+          "inputTokenDetails": {
+            "text_tokens": 3447
+          },
+          "outputTokenDetails": {
+            "text_tokens": 31,
+            "audio_tokens": 118
+          }
+        },
+        "fragmentCommitted": true,
+        "interrupted": false,
+        "localCancelRequested": false
+      },
+      "finishedMs": 3143.1,
+      "state": {
+        "activeSkill": "kitchen-coach",
+        "task": {
+          "id": "tomato-eggs",
+          "title": "番茄炒蛋",
+          "version": "1.1",
+          "provenance": "bundled/household-procedure"
+        },
+        "paused": false
+      },
+      "passed": true
+    },
+    {
+      "input": "我确认已经准备好鸡蛋、番茄、油和盐，这一步完成了。",
+      "audioPackets": 16,
+      "firstTextMs": 1012.3,
+      "firstAudioMs": 1326.1,
+      "transcript": "好的，准备已完成。接下来请把番茄洗净并擦干，完成后告诉我一声。",
+      "terminal": {
+        "sequence": 5,
+        "status": "response.done",
+        "usage": {
+          "inputTokens": 3907,
+          "outputTokens": 81,
+          "totalTokens": 3988,
+          "inputTokenDetails": {
+            "text_tokens": 3907
+          },
+          "outputTokenDetails": {
+            "text_tokens": 18,
+            "audio_tokens": 63
+          }
+        },
+        "fragmentCommitted": true,
+        "interrupted": false,
+        "localCancelRequested": false
+      },
+      "finishedMs": 2347.2,
+      "state": {
+        "activeSkill": "kitchen-coach",
+        "task": {
+          "id": "tomato-eggs",
+          "title": "番茄炒蛋",
+          "version": "1.1",
+          "provenance": "bundled/household-procedure"
+        },
+        "paused": false
+      },
+      "passed": true
+    },
+    {
+      "input": "回到上一步。",
+      "audioPackets": 21,
+      "firstTextMs": 885,
+      "firstAudioMs": 1202.5,
+      "transcript": "好的，已回到上一步。现在请确认鸡蛋、番茄、少量油和盐是否都已放在操作区。",
+      "terminal": {
+        "sequence": 6,
+        "status": "response.done",
+        "usage": {
+          "inputTokens": 4314,
+          "outputTokens": 106,
+          "totalTokens": 4420,
+          "inputTokenDetails": {
+            "text_tokens": 4314
+          },
+          "outputTokenDetails": {
+            "text_tokens": 25,
+            "audio_tokens": 81
+          }
+        },
+        "fragmentCommitted": true,
+        "interrupted": false,
+        "localCancelRequested": false
+      },
+      "finishedMs": 2586.3,
+      "state": {
+        "activeSkill": "kitchen-coach",
+        "task": {
+          "id": "tomato-eggs",
+          "title": "番茄炒蛋",
+          "version": "1.1",
+          "provenance": "bundled/household-procedure"
+        },
+        "paused": false
+      },
+      "passed": true
+    },
+    {
+      "input": "我要组装凳子，请告诉我第一步。",
+      "audioPackets": 42,
+      "firstTextMs": 1137.6,
+      "firstAudioMs": 1418.9,
+      "transcript": "好的，现在开始组装平板包装凳。第一步是清点零件，请按产品手册核对板件、紧固件和工具的数量是否一致。请确认清单上的所有物品都已找到并放在手边。",
+      "terminal": {
+        "sequence": 7,
+        "status": "response.done",
+        "usage": {
+          "inputTokens": 4669,
+          "outputTokens": 210,
+          "totalTokens": 4879,
+          "inputTokenDetails": {
+            "text_tokens": 4669
+          },
+          "outputTokenDetails": {
+            "text_tokens": 42,
+            "audio_tokens": 168
+          }
+        },
+        "fragmentCommitted": true,
+        "interrupted": false,
+        "localCancelRequested": false
+      },
+      "finishedMs": 3922.7,
+      "state": {
+        "activeSkill": "assembly-coach",
+        "task": {
+          "id": "flat-pack-stool",
+          "title": "组装平板包装凳",
+          "version": "1.0",
+          "provenance": "bundled/generic-flat-pack-demo"
+        },
+        "paused": false
+      },
+      "passed": true
+    },
+    {
+      "input": "请展示当前步骤的参考资料。",
+      "audioPackets": 32,
+      "firstTextMs": 945.9,
+      "firstAudioMs": 1269,
+      "transcript": "参考资料已展示，标题为“平板包装组装安全参考”。请根据手册清点板件、紧固件和工具，确保数量一致后再继续下一步。",
+      "terminal": {
+        "sequence": 8,
+        "status": "response.done",
+        "usage": {
+          "inputTokens": 5223,
+          "outputTokens": 159,
+          "totalTokens": 5382,
+          "inputTokenDetails": {
+            "text_tokens": 5223
+          },
+          "outputTokenDetails": {
+            "text_tokens": 33,
+            "audio_tokens": 126
+          }
+        },
+        "fragmentCommitted": true,
+        "interrupted": false,
+        "localCancelRequested": false
+      },
+      "finishedMs": 3177.7,
+      "state": {
+        "activeSkill": "assembly-coach",
+        "task": {
+          "id": "flat-pack-stool",
+          "title": "组装平板包装凳",
+          "version": "1.0",
+          "provenance": "bundled/generic-flat-pack-demo"
+        },
+        "paused": false
+      },
+      "passed": true
+    }
+  ],
+  "sessionId": "b06c272c27b548ad",
+  "referenceVerified": true,
+  "routing": [
+    {
+      "method": "semantic-turn-router-v9",
+      "model": "qwen-flash",
+      "status": "classified",
+      "componentErrors": [],
+      "speechControl": null,
+      "taskControl": null,
+      "preferenceIntent": null,
+      "memoryQuery": null,
+      "memoryKind": null,
+      "memoryText": null,
+      "memoryKey": null,
+      "memoryScope": null,
+      "memoryConsent": null,
+      "memoryAtoms": [],
+      "memoryDraft": null,
+      "memoryQuerySpec": null,
+      "skillControl": null,
+      "selectedSkill": "kitchen-coach",
+      "intentKind": "foreground-dialogue",
+      "intents": [
+        {
+          "kind": "foreground-dialogue",
+          "text": "我要做番茄炒蛋，请告诉我第一步。",
+          "parameters": {}
+        }
+      ],
+      "revision": null,
+      "skillStatus": "matched",
+      "rawOutput": "{\"v\":1,\"skill\":\"kitchen-coach\"}",
+      "requestMetrics": {
+        "httpStatus": 200,
+        "usage": {
+          "input_tokens": 1907,
+          "output_tokens": 12,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "total_tokens": 1919
+        },
+        "requestId": "2591099a-f9ca-980a-9f5e-2f7522f777ef"
+      },
+      "latencyMs": 437.3,
+      "policyVersion": "semantic-turn-router-v9",
+      "claimBoundary": "Only the current transcript is classified, with explicit clock, pending draft and previous-turn context. Labels are hypotheses, not facts.",
+      "acceptedIntents": []
+    },
+    {
+      "method": "semantic-turn-router-v9",
+      "model": "qwen-flash",
+      "status": "classified",
+      "componentErrors": [],
+      "speechControl": null,
+      "taskControl": "repeat",
+      "preferenceIntent": null,
+      "memoryQuery": null,
+      "memoryKind": null,
+      "memoryText": null,
+      "memoryKey": null,
+      "memoryScope": null,
+      "memoryConsent": null,
+      "memoryAtoms": [],
+      "memoryDraft": null,
+      "memoryQuerySpec": null,
+      "skillControl": null,
+      "selectedSkill": null,
+      "intentKind": "foreground-dialogue",
+      "intents": [
+        {
+          "kind": "foreground-dialogue",
+          "text": "请重复当前步骤。",
+          "parameters": {}
+        }
+      ],
+      "revision": null,
+      "skillStatus": "no-match",
+      "rawOutput": "{\"v\":1,\"taskControl\":\"repeat\"}",
+      "requestMetrics": {
+        "httpStatus": 200,
+        "usage": {
+          "input_tokens": 2152,
+          "output_tokens": 10,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "total_tokens": 2162
+        },
+        "requestId": "8738ddcd-4231-9ab6-8b90-62ab14b6b527"
+      },
+      "latencyMs": 407,
+      "policyVersion": "semantic-turn-router-v9",
+      "claimBoundary": "Only the current transcript is classified, with explicit clock, pending draft and previous-turn context. Labels are hypotheses, not facts.",
+      "acceptedIntents": []
+    },
+    {
+      "method": "semantic-turn-router-v9",
+      "model": "qwen-flash",
+      "status": "classified",
+      "componentErrors": [],
+      "speechControl": null,
+      "taskControl": "pause-task",
+      "preferenceIntent": null,
+      "memoryQuery": null,
+      "memoryKind": null,
+      "memoryText": null,
+      "memoryKey": null,
+      "memoryScope": null,
+      "memoryConsent": null,
+      "memoryAtoms": [],
+      "memoryDraft": null,
+      "memoryQuerySpec": null,
+      "skillControl": null,
+      "selectedSkill": null,
+      "intentKind": "foreground-dialogue",
+      "intents": [
+        {
+          "kind": "foreground-dialogue",
+          "text": "暂停当前任务。",
+          "parameters": {}
+        }
+      ],
+      "revision": null,
+      "skillStatus": "no-match",
+      "rawOutput": "{\"v\":1,\"taskControl\":\"pause-task\"}",
+      "requestMetrics": {
+        "httpStatus": 200,
+        "usage": {
+          "input_tokens": 2150,
+          "output_tokens": 11,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "total_tokens": 2161
+        },
+        "requestId": "114eb38b-14f3-94fc-b49c-14fcbc04e4b2"
+      },
+      "latencyMs": 502,
+      "policyVersion": "semantic-turn-router-v9",
+      "claimBoundary": "Only the current transcript is classified, with explicit clock, pending draft and previous-turn context. Labels are hypotheses, not facts.",
+      "acceptedIntents": []
+    },
+    {
+      "method": "semantic-turn-router-v9",
+      "model": "qwen-flash",
+      "status": "classified",
+      "componentErrors": [],
+      "speechControl": null,
+      "taskControl": "resume-task",
+      "preferenceIntent": null,
+      "memoryQuery": null,
+      "memoryKind": null,
+      "memoryText": null,
+      "memoryKey": null,
+      "memoryScope": null,
+      "memoryConsent": null,
+      "memoryAtoms": [],
+      "memoryDraft": null,
+      "memoryQuerySpec": null,
+      "skillControl": null,
+      "selectedSkill": null,
+      "intentKind": "foreground-dialogue",
+      "intents": [
+        {
+          "kind": "foreground-dialogue",
+          "text": "继续当前任务。",
+          "parameters": {}
+        }
+      ],
+      "revision": null,
+      "skillStatus": "no-match",
+      "rawOutput": "{\"v\":1,\"taskControl\":\"resume-task\"}",
+      "requestMetrics": {
+        "httpStatus": 200,
+        "usage": {
+          "input_tokens": 2152,
+          "output_tokens": 11,
+          "prompt_tokens_details": {
+            "cached_tokens": 1792
+          },
+          "total_tokens": 2163
+        },
+        "requestId": "87d19b4d-1288-9c67-9e49-c784540ba57a"
+      },
+      "latencyMs": 378.8,
+      "policyVersion": "semantic-turn-router-v9",
+      "claimBoundary": "Only the current transcript is classified, with explicit clock, pending draft and previous-turn context. Labels are hypotheses, not facts.",
+      "acceptedIntents": []
+    },
+    {
+      "method": "semantic-turn-router-v9",
+      "model": "qwen-flash",
+      "status": "classified",
+      "componentErrors": [],
+      "speechControl": null,
+      "taskControl": "confirm-step",
+      "preferenceIntent": null,
+      "memoryQuery": null,
+      "memoryKind": null,
+      "memoryText": null,
+      "memoryKey": null,
+      "memoryScope": null,
+      "memoryConsent": null,
+      "memoryAtoms": [],
+      "memoryDraft": null,
+      "memoryQuerySpec": null,
+      "skillControl": null,
+      "selectedSkill": null,
+      "intentKind": "foreground-dialogue",
+      "intents": [
+        {
+          "kind": "foreground-dialogue",
+          "text": "我确认已经准备好鸡蛋、番茄、油和盐，这一步完成了。",
+          "parameters": {}
+        }
+      ],
+      "revision": null,
+      "skillStatus": "no-match",
+      "rawOutput": "{\"v\":1,\"taskControl\":\"confirm-step\"}",
+      "requestMetrics": {
+        "httpStatus": 200,
+        "usage": {
+          "input_tokens": 2158,
+          "output_tokens": 11,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "total_tokens": 2169
+        },
+        "requestId": "9fc573c0-6e7d-9420-a3c6-bf7838e7ace8"
+      },
+      "latencyMs": 444.8,
+      "policyVersion": "semantic-turn-router-v9",
+      "claimBoundary": "Only the current transcript is classified, with explicit clock, pending draft and previous-turn context. Labels are hypotheses, not facts.",
+      "acceptedIntents": []
+    },
+    {
+      "method": "semantic-turn-router-v9",
+      "model": "qwen-flash",
+      "status": "classified",
+      "componentErrors": [],
+      "speechControl": null,
+      "taskControl": "rollback",
+      "preferenceIntent": null,
+      "memoryQuery": null,
+      "memoryKind": null,
+      "memoryText": null,
+      "memoryKey": null,
+      "memoryScope": null,
+      "memoryConsent": null,
+      "memoryAtoms": [],
+      "memoryDraft": null,
+      "memoryQuerySpec": null,
+      "skillControl": null,
+      "selectedSkill": null,
+      "intentKind": "foreground-dialogue",
+      "intents": [
+        {
+          "kind": "foreground-dialogue",
+          "text": "回到上一步。",
+          "parameters": {}
+        }
+      ],
+      "revision": null,
+      "skillStatus": "no-match",
+      "rawOutput": "{\"v\":1,\"taskControl\":\"rollback\"}",
+      "requestMetrics": {
+        "httpStatus": 200,
+        "usage": {
+          "input_tokens": 2163,
+          "output_tokens": 10,
+          "prompt_tokens_details": {
+            "cached_tokens": 1792
+          },
+          "total_tokens": 2173
+        },
+        "requestId": "b0da9ed0-2b25-9966-a0fb-f04cc87232f9"
+      },
+      "latencyMs": 299.8,
+      "policyVersion": "semantic-turn-router-v9",
+      "claimBoundary": "Only the current transcript is classified, with explicit clock, pending draft and previous-turn context. Labels are hypotheses, not facts.",
+      "acceptedIntents": []
+    },
+    {
+      "method": "semantic-turn-router-v9",
+      "model": "qwen-flash",
+      "status": "classified",
+      "componentErrors": [],
+      "speechControl": null,
+      "taskControl": null,
+      "preferenceIntent": null,
+      "memoryQuery": null,
+      "memoryKind": null,
+      "memoryText": null,
+      "memoryKey": null,
+      "memoryScope": null,
+      "memoryConsent": null,
+      "memoryAtoms": [],
+      "memoryDraft": null,
+      "memoryQuerySpec": null,
+      "skillControl": null,
+      "selectedSkill": "assembly-coach",
+      "intentKind": "foreground-dialogue",
+      "intents": [
+        {
+          "kind": "foreground-dialogue",
+          "text": "我要组装凳子，请告诉我第一步。",
+          "parameters": {}
+        }
+      ],
+      "revision": null,
+      "skillStatus": "matched",
+      "rawOutput": "{\"v\":1,\"skill\":\"assembly-coach\"}",
+      "requestMetrics": {
+        "httpStatus": 200,
+        "usage": {
+          "input_tokens": 2146,
+          "output_tokens": 11,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "total_tokens": 2157
+        },
+        "requestId": "78848f04-aa9d-90ac-9486-8e158e4c6760"
+      },
+      "latencyMs": 484.4,
+      "policyVersion": "semantic-turn-router-v9",
+      "claimBoundary": "Only the current transcript is classified, with explicit clock, pending draft and previous-turn context. Labels are hypotheses, not facts.",
+      "acceptedIntents": []
+    },
+    {
+      "method": "semantic-turn-router-v9",
+      "model": "qwen-flash",
+      "status": "classified",
+      "componentErrors": [],
+      "speechControl": null,
+      "taskControl": "show-reference",
+      "preferenceIntent": null,
+      "memoryQuery": null,
+      "memoryKind": null,
+      "memoryText": null,
+      "memoryKey": null,
+      "memoryScope": null,
+      "memoryConsent": null,
+      "memoryAtoms": [],
+      "memoryDraft": null,
+      "memoryQuerySpec": null,
+      "skillControl": null,
+      "selectedSkill": null,
+      "intentKind": "foreground-dialogue",
+      "intents": [
+        {
+          "kind": "foreground-dialogue",
+          "text": "请展示当前步骤的参考资料。",
+          "parameters": {}
+        }
+      ],
+      "revision": null,
+      "skillStatus": "no-match",
+      "rawOutput": "{\"v\":1,\"taskControl\":\"show-reference\"}",
+      "requestMetrics": {
+        "httpStatus": 200,
+        "usage": {
+          "input_tokens": 2154,
+          "output_tokens": 11,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "total_tokens": 2165
+        },
+        "requestId": "d92c9b69-9660-9841-b9a7-8817012f827d"
+      },
+      "latencyMs": 426.8,
+      "policyVersion": "semantic-turn-router-v9",
+      "claimBoundary": "Only the current transcript is classified, with explicit clock, pending draft and previous-turn context. Labels are hypotheses, not facts.",
+      "acceptedIntents": []
+    }
+  ],
+  "sourceReport": "outputs/skill-catalog-originals-20260909/acceptance.json"
+}

@@ -1,0 +1,24 @@
+{
+  "passed": true,
+  "pageErrors": [],
+  "failedRequests": [],
+  "viewports": [
+    {
+      "width": 1440,
+      "scrollWidth": 1440,
+      "workflowVisible": true
+    },
+    {
+      "width": 390,
+      "scrollWidth": 390,
+      "workflowVisible": true
+    }
+  ],
+  "mock": false,
+  "hardwareMeasured": false,
+  "sessionCreated": true,
+  "proceduralSkillSelected": true,
+  "conversationalSkillReady": true,
+  "sessionRestoredAfterLogin": true,
+  "sourceReport": "outputs/skill-catalog-browser-final-20260909/acceptance.json"
+}

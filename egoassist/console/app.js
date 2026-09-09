@@ -266,16 +266,17 @@ function renderPipeline(task, mechanism, step) {
   const retrieval = mechanism.retrieval || {};
   const routing = state.intentRouting || {status: "no-match", candidates: []};
   const decision = task?.decision || state.genericDecision || {action: "silent", confidence: 0, reason: "no-domain-intent"};
-  const taskSummary = task && step ? step.title + " · " + step.status : state.activeSkill ? "Skill loaded · task unresolved" : "No task hypothesis";
+  const conversational = state.activeSkill?.workflowMode === "conversational";
+  const taskSummary = task && step ? step.title + " · " + step.status : conversational ? "对话工作流已就绪" : state.activeSkill ? "Skill loaded · task unresolved" : "No task hypothesis";
   pipelineDetails = [
     {stage: "capture", title: "音频 / 视频采集", status: stream ? "live" : "idle", summary: stream ? "16 kHz PCM + latest-only JPEG" : "等待浏览器设备", claim: "原始媒体只记录大小和时间，不在账本保存 Base64"},
     {stage: "attribution", title: "声道与说话者归因", status: stream ? "live" : "idle", summary: "input transcript ≠ spoken output transcript", claim: state.audioAttribution?.claimBoundary || "等待媒体配置"},
     {stage: "intent", title: "意图路由", status: routing.status === "matched" ? "live" : routing.status === "ambiguous" ? "warning" : "idle", summary: routing.status + " · " + (routing.selectedSkill || "general"), claim: routing.claimBoundary},
     {stage: "perception", title: "结构化感知", status: task?.observation ? "live" : lanes.perception?.connected ? "warning" : "idle", summary: task?.observation ? task.observation.step + " · age " + task.observation.frameAgeMs + " ms" : lanes.perception?.connected ? "等待任务绑定的新鲜帧" : "感知通道未连接", claim: "每帧绑定 task/version/checkpoint/epoch 与允许路径；模型只产出证据，用户确认才推进 checkpoint"},
-    {stage: "task", title: "Skill / 任务假设", status: task ? "live" : state.activeSkill ? "warning" : "idle", summary: taskSummary, claim: task ? "Checkpoint ledger，不规定唯一执行路径" : "无证据时不加载领域工作流"},
+    {stage: "task", title: "Skill / 任务假设", status: task || conversational ? "live" : state.activeSkill ? "warning" : "idle", summary: taskSummary, claim: task ? "Checkpoint ledger，不规定唯一执行路径" : conversational ? "领域指令已加载；无固定步骤" : "无证据时不加载领域工作流"},
     {stage: "knowledge", title: "知识增强", status: state.knowledgeMechanism.method === "none" ? "idle" : "warning", summary: state.knowledgeMechanism.method, claim: state.knowledgeMechanism.claimBoundary},
     {stage: "memory", title: "TimelineMemory 检索", status: retrieval.status === "matched" || state.episodicMemory?.count ? "live" : "idle", summary: "timeline " + (state.episodicMemory?.count || 0) + " cards · 注入 " + (state.episodicMemory?.retrieval?.injection?.evidence?.length || 0) + " · " + (state.episodicMemory?.retrieval?.method || "hybrid"), claim: "scene/event/fact/state/observation 全类型统一检索；BM25 + 语义双路；北京时间标注注入证据"},
-    {stage: "policy", title: "主动干预策略", status: "live", summary: actionName(decision.action) + " · " + Math.round((decision.confidence || 0) * 100) + "%", claim: decision.reason},
+    {stage: "policy", title: "主动干预策略", status: "live", summary: actionName(decision.action), claim: decision.reason},
     {stage: "scheduler", title: "响应调度与打断", status: scheduler.pending || scheduler.activeResponseIds?.length ? "live" : "idle", summary: (lanes.dialogue?.turnDetection || "unknown") + " · " + (scheduler.activePolicies?.[0]?.speechPolicy || state.turnTakingPolicy.currentSelection.policy), claim: "转写后先检索与更新上下文，再显式创建唯一回答；Skill 可配置：" + state.turnTakingPolicy.currentSelection.basis},
     {stage: "output", title: "语音与字幕输出", status: scheduler.activeResponseIds?.length ? "live" : "idle", summary: scheduler.activeResponseIds?.join(", ") || "等待输出", claim: "只展示可验证输出和结构化中间产物，不声称访问隐藏思维链"}
   ];
@@ -298,7 +299,7 @@ function syncWorkflowFromState(task, mechanism) {
   }
   const decision = task?.decision || state.genericDecision;
   if (decision?.action) {
-    setWorkflowStage("reasoning", "complete", "已形成可观测决策：" + actionName(decision.action) + " · 置信度 " + Math.round((decision.confidence || 0) * 100) + "%");
+    setWorkflowStage("reasoning", "complete", "已形成可观测决策：" + actionName(decision.action));
     if (!state.scheduler?.pending && !(state.scheduler?.activeResponseIds || []).length) {
       setWorkflowStage("action", "skipped", "当前决策不需要外部工具或后台任务");
       setWorkflowStage("delivery", "active", "决策已进入响应调度器");
@@ -604,13 +605,14 @@ function render(next) {
   $("#sessionId").textContent = state.sessionId;
   $("#promptHash").textContent = state.promptContext.hash;
   $("#promptContext").textContent = state.promptContext.text;
-  $("#skillName").textContent = state.activeSkill ? state.activeSkill.name + " / " + (task ? task.task.title : "待确认任务") : "General / no Skill";
-  $("#taskTitle").textContent = task ? task.task.title + " · " + task.task.version : "No task hypothesis";
-  $("#skillSelect").innerHTML = "<option value=''>通用模式 · 按意图加载</option>" + state.skills.map(item => "<option value='" + esc(item.name) + "'>" + esc(item.name) + " · " + item.tasks.length + " tasks</option>").join("");
+  const conversational = state.activeSkill?.workflowMode === "conversational";
+  $("#skillName").textContent = state.activeSkill ? state.activeSkill.name + " / " + (task ? task.task.title : conversational ? "对话工作流" : "待确认任务") : "General / no Skill";
+  $("#taskTitle").textContent = task ? task.task.title + " · " + task.task.version : conversational ? "对话工作流已就绪" : "No task hypothesis";
+  $("#skillSelect").innerHTML = "<option value=''>通用模式 · 按意图加载</option>" + state.skills.map(item => "<option value='" + esc(item.name) + "'>" + esc(item.name) + " · " + (item.workflowMode === "conversational" ? "对话工作流" : item.tasks.length + " tasks") + "</option>").join("");
   $("#skillSelect").value = state.activeSkill?.name || "";
   $("#taskSelect").innerHTML = state.tasks.length ? "<option value=''>选择具体任务</option>" + state.tasks.map(item => "<option value='" + esc(item.id) + "'>" + esc(item.title) + " · " + esc(item.provenance) + "</option>").join("") : "<option value=''>无活动任务</option>";
   $("#taskSelect").value = task?.task.id || "";
-  $("#taskSelect").disabled = !state.activeSkill;
+  $("#taskSelect").disabled = !state.tasks.length;
   $("#newTask").disabled = !state.activeSkill?.allowCustomTasks;
   $("#skillTools").innerHTML = (state.activeSkill?.tools || []).map(item => {
     const availability = item.availability || {status: "unconfigured", executable: false, reason: "No executor is configured."};
@@ -621,16 +623,16 @@ function render(next) {
   $$("[data-tool]").forEach(button => button.onclick = () => executeTool(button));
   $("#action").textContent = actionName(decision.action);
   $("#decision").className = "decision " + decision.action;
-  $("#decision").innerHTML = "<h3>" + esc(decision.message) + "</h3><p>" + esc(decision.reason) + " · confidence " + Math.round(decision.confidence * 100) + "%</p>";
-  $("#mapStatus").textContent = task ? "当前假设 " + step.id + " · " + task.steps.length + " checkpoints" : "等待意图与任务证据";
+  $("#decision").innerHTML = "<h3>" + esc(decision.message) + "</h3><p>" + esc(decision.reason) + "</p>";
+  $("#mapStatus").textContent = task ? "当前假设 " + step.id + " · " + task.steps.length + " checkpoints" : conversational ? "无固定步骤" : "等待意图与任务证据";
   $("#steps").innerHTML = task ? task.steps.map(item => {
     const label = item.id === task.currentCheckpointId ? "当前系统假设" : "可选证据锚点";
-    return "<article class='checkpoint " + esc(item.status) + "'><span>" + esc(item.status) + "<br>confidence " + Math.round((item.confidence || 0) * 100) + "%</span><div><h3>" + esc(item.title) + "</h3><p>" + esc(label + " · " + item.instruction) + "</p></div><b>evidence " + (item.evidenceIds || []).length + "</b></article>";
-  }).join("") : "<p class='empty-state'>尚未建立任务假设。意图路由匹配后才加载领域工作流。</p>";
-  $("#knowledge").innerHTML = "<b>" + esc(state.knowledgeMechanism.method) + "</b><br>selected: " + esc(step ? step.id + " / " + step.source : "none") + "<br><span>边界：" + esc(state.knowledgeMechanism.claimBoundary) + "</span>";
+    return "<article class='checkpoint " + esc(item.status) + "'><span>" + esc(item.status) + "<br>" + esc(item.updatedBy || "未确认") + "</span><div><h3>" + esc(item.title) + "</h3><p>" + esc(label + " · " + item.instruction) + "</p></div><b>evidence " + (item.evidenceIds || []).length + "</b></article>";
+  }).join("") : conversational ? "<p class='empty-state'>领域指令已加载</p>" : "<p class='empty-state'>尚未建立任务假设。意图路由匹配后才加载领域工作流。</p>";
+  $("#knowledge").innerHTML = "<b>" + esc(state.knowledgeMechanism.method) + "</b><br>selected: " + esc(step ? step.id + " / " + step.source : state.activeSkill?.name || "none") + "<br><span>边界：" + esc(state.knowledgeMechanism.claimBoundary) + "</span>";
   const latestRejection = task?.perception?.audit?.[0];
   $("#vision").textContent = task?.observation
-    ? task.observation.step + " · accepted · age " + task.observation.frameAgeMs + " ms · " + Math.round(task.observation.confidence * 100) + "%"
+    ? task.observation.step + " · accepted · age " + task.observation.frameAgeMs + " ms"
     : latestRejection ? "rejected · " + latestRejection.reason : "等待任务绑定的结构化视觉证据";
   $("#memoryScope").textContent = "exact-trigger-lookup · " + (mechanism.scope.skill || "general") + " / " + (mechanism.scope.task || "unscoped");
   renderMemoryPolicy(state.memoryPolicy, state.memoryProfiles || []);

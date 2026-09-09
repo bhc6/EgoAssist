@@ -1,48 +1,43 @@
 # EgoAssist
 
-**Egocentric AI research base** — a minimal, reliable foundation for building
-Pi-Agent / Claude-Code style assistants in the first-person embodied domain.
+**Egocentric assistant demo and research base**, with real Qwen dialogue,
+explicit Skill/task state, scoped memory and an auditable browser console.
+The current validation covers software workflows; physical glasses, continuous
+visual task verification and production reliability require separate evaluation.
 
-The goal is *大道至简*: a small, auditable core that anyone can fork and build on,
-engineered to production-grade reliability (inspired by [Omi](https://github.com/BasedHardware/omi)).
-The framework speaks [MCP](https://modelcontextprotocol.io) as its external-tool
-protocol, routes each turn through an explicit Skill/task state machine rather
-than a free-running agent loop, and keeps memory, retrieval, and perception
-behind typed boundaries so each layer can be replaced independently.
-
-Latest real-provider audit: [memory latency and Skill workflows (2026-09-09)](docs/MEMORY_SKILLS_VALIDATION_2026-09-09.md), including failed trials, fixes, and the remaining cloud-latency limits.
+Latest review: [Skill architecture, product boundaries and real-provider validation
+(2026-09-09)](docs/SKILLS_ARCHITECTURE_2026-09-09.md). It includes failed trials,
+fixes, latency measurements and the distinction between model proposals and
+executed actions. Earlier [memory latency analysis](docs/MEMORY_SKILLS_VALIDATION_2026-09-09.md)
+records the retrieval optimizations and cloud-latency limits.
 
 ---
 
 ## Architecture
 
-```
-┌─────────────────────────────────────────────────────┐
-│                   run_egoassist.py                  │  HTTP / WebSocket server
-│  browser audio+camera  →  dialogue lane  →  speech  │
-└────────────────────────┬────────────────────────────┘
-                         │ authenticated turn
-          ┌──────────────▼──────────────┐
-          │      SemanticTurnRouter      │  one call → intents + Skill choice
-          │            ↓                 │
-          │        SkillRuntime          │  active Skill, task, checkpoints
-          └──────┬──────────────┬────────┘
-                 │              │
-        ┌────────▼───┐  ┌───────▼────────┐
-        │  MCP Tools  │  │ SkillToolExec  │  external connectors + local tools
-        └────────────┘  └───────┬────────┘
-                                │
-          ┌─────────────────────▼──────────────────────┐
-          │              TimelineMemory                 │
-          │       SQLite WAL, FTS5 trigram, FAISS       │
-          │  memory/adapters.py  │  HierarchicalMemory  │
-          └─────────────────────────────────────────────┘
+```mermaid
+flowchart LR
+    UI[Browser audio / controls] --> Server[HTTP / WebSocket session]
+    Server --> Router[Semantic router + activation evidence]
+    Router --> Runtime[SkillRuntime / TaskSession]
+    Router --> Memory[TimelineMemory: scoped write / recall]
+    Runtime --> Tools[Authorized tool executor]
+    Runtime --> Harness[ContextHarness]
+    Memory --> Harness
+    Tools --> Harness
+    Harness --> Qwen[Qwen realtime dialogue]
+    Qwen --> UI
+    Camera[Camera frames] --> Perception[Bound perception evidence]
+    Perception --> Runtime
+    Server --> Journal[Journal / work ledger / console]
 ```
 
 There is no autonomous think→act loop. What replaces it is deliberate: every
-turn is classified once by `SemanticTurnRouter`, dispatched against an explicit
-task/checkpoint state machine, and every context assembly is bounded by
-`ContextHarness`. Nothing advances a task except a structured user confirmation.
+semantic turn is classified by `SemanticTurnRouter`, then accepted controls are
+applied to runtime state. Procedural Skills use checkpoints; conversational
+Skills can operate without fixed tasks. `ContextHarness` assembles policy,
+authoritative state and evidence within a budget. Checkpoint advancement requires
+user confirmation; it does not prove physical completion.
 
 ---
 
@@ -50,12 +45,13 @@ task/checkpoint state machine, and every context assembly is bounded by
 
 | Layer | Path | What it does |
 |---|---|---|
-| **Memory** | `egoassist/memory/timeline.py` | `TimelineMemory` — SQLite WAL, FTS5 trigram full-text, optional FAISS vector index, in-place schema migration to v3 |
+| **Memory** | `egoassist/memory/timeline.py` | `TimelineMemory`: SQLite WAL, FTS5 and structured scope/time/entity constraints; current realtime retrieval does not use FAISS |
 | **Memory adapters** | `egoassist/memory/adapters.py` | Import external visual/text items into memory cards without the caller touching the store |
 | **Retrieval** | `egoassist/retrieval/` | `VectorIndex` protocol (`FlatIndex` / `FAISSIndex`), temporal localisation, semantic router |
 | **MCP** | `egoassist/realtime/mcp_provider.py` | `MCPToolProvider` — stdio and HTTP/SSE transports; `providers_from_env()` config parsing |
 | **Context** | `egoassist/realtime/context_harness.py` | `ContextHarness` — token-bounded context assembly, retrieval injection, trajectory record |
 | **Routing** | `egoassist/realtime/semantic.py`, `skills.py` | `SemanticTurnRouter` (one call → speech control, task control, preferences, Skill choice) and `SkillRuntime` |
+| **Skill packages** | `egoassist/realtime/skill_package.py`, `egoassist/skills/` | Validated YAML policy, version/hash, resources and optional task specs; distinct from session state and tool execution |
 | **Work** | `egoassist/realtime/work_ledger.py` | `CaseWorkLedger` — durable intents, jobs, and the result inbox |
 | **Perception** | `egoassist/realtime/perception.py`, `ambient.py` | Checkpoint-bound frame validation ([ADR 005](docs/ADR_005_CHECKPOINT_BOUND_PERCEPTION.md)) and task-free ambient observation ([ADR 007](docs/ADR_007_AMBIENT_OBSERVATION.md)) |
 | **Habits** | `egoassist/habits/` | von Mises circular time-of-day induction; observation-gated reminder decisions |
@@ -141,13 +137,25 @@ startup — `run_egoassist.py` does not call `providers_from_env()` for you.
 
 ```
 egoassist/skills/my-domain/
-├── SKILL.md          # system prompt
+├── SKILL.md          # YAML name/description + domain workflow policy
 ├── skill.json        # manifest: name, description, tools[], tasks[]
 ├── tasks/*.json
 └── references/*.md
 ```
 
-Bundled skills are the reference implementation in `egoassist/skills/`.
+The four bundled Skills contain seven fixed tasks:
+
+| Skill | Workflow | Example |
+|---|---|---|
+| `kitchen-coach` | Tomato eggs, fruit salad, oatmeal | Cooking steps, confirmation, pause and rollback |
+| `assembly-coach` | Stool assembly, water filter | Assembly steps and authorized reference PDF |
+| `packing-coach` | Commuting check, short trip packing | Confirm list, gather items, confirm carrying |
+| `field-notes` | Conversational, no fixed task | Dictated field note, uncertainty and factual corrections |
+
+These are bundled domain workflows. A Skill does not supply a model, hardware
+recognition, durable reminder delivery or external submission by itself. Memory
+and reports remain platform capabilities. See the latest review for exactly
+which paths received real-provider tests.
 
 ---
 

@@ -49,11 +49,14 @@ reporting somebody else's completion, or merely planning to do it.
 preferenceIntent: propose-durable only for an explicit reusable future preference.
 skillControl: deactivate only for an explicit request to exit the current domain,
 not stopping speech/tasks. skill: select exactly one catalog name only for a
-concrete matching task; use ambiguous for multiple matches. Greetings, capability
+concrete matching activity (including conversational workflows without physical steps);
+use ambiguous for multiple matches. Greetings, capability
 questions and casual chat select none. Never select a skill when deactivating.
 Selecting a Skill requires requesting its actual domain activity. Writing a note,
 recalling a number, or mentioning furniture/devices/food is not doing assembly or
 cooking. A request to draft a message to a front desk selects no Skill.
+Organizing dictated field notes is a writing workflow, NOT a request to save a
+durable memory. Do not emit memoryDraft for drafting, formatting or summarizing.
 
 Memory:
 Only current-turn assertions can produce memoryAtoms (0-3). Questions, greetings,
