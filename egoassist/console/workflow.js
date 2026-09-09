@@ -1,5 +1,6 @@
 /* Durable turn state is the source of truth, including after a page reload. */
 let inspectedTurnId = null;
+let inspectedSessionId = null;
 const workStatusLabel = value => ({received: "已接收", classifying: "分析请求与说话人", ready: "等待执行",
   processing: "处理请求", responding: "正在回答", completed: "已完成", queued: "等待执行", running: "执行中",
   "waiting-result": "等待外部结果", suspended: "已挂起", paused: "已暂停", cancelled: "已取消",
@@ -13,21 +14,37 @@ const workKindLabel = value => ({"foreground-dialogue": "回答问题", "backgro
 function renderTurnWorkflow() {
   const root = document.querySelector("#liveWorkflow");
   if (!root) return;
+  if (inspectedSessionId !== selectedSessionId) {
+    inspectedSessionId = selectedSessionId;
+    inspectedTurnId = null;
+  }
   const turns = state?.workLedger?.turnInbox || [];
-  const turn = turns.find(t => t.turnId === inspectedTurnId) || turns.at(-1);
-  if (!turn) { root.innerHTML = "<p class='empty-state'>尚未收到问题</p>"; return; }
+  const turn = inspectedTurnId ? turns.find(t => t.turnId === inspectedTurnId) : turns.at(-1);
+  document.querySelector("#workflowSelection").textContent = inspectedTurnId ? "· 已选对话" : "· 最新对话";
+  document.querySelectorAll("[data-inspect-turn]").forEach(button => {
+    button.setAttribute("aria-pressed", String(button.dataset.inspectTurn === turn?.turnId));
+  });
+  if (!turn) {
+    updateDisclosureHTML(root, "<p class='empty-state'>" + (inspectedTurnId ? "所选对话未包含在当前记录中" : "尚未收到问题") + "</p>", selectedSessionId);
+    return;
+  }
   const scene = state?.sharedScene?.utterances?.find(row => row.turnId === turn.turnId);
   const answer = turn.answer, speaker = scene?.speaker;
   const semantic = turn.semantic;
   const pendingVision = state.sharedScene?.questionVisionPending?.find(p => p.turnId === turn.turnId);
   const events = (state.events || []).filter(e => e.payload?.turnId === turn.turnId ||
     e.payload?.origin?.turnId === turn.turnId || (answer?.responseId && e.responseId === answer.responseId));
+  const models = [...new Set([
+    semantic?.model,
+    ...events.flatMap(e => [e.model, e.payload?.model, e.payload?.request?.model]),
+    answer?.model,
+    scene?.model,
+  ].filter(Boolean))];
   const elapsed = answer?.startedAt && answer.status === "running" ?
     " · 已等待 " + Math.max(0, (Date.now() - Date.parse(answer.startedAt)) / 1000).toFixed(1) + " 秒 / 上限 " + answer.timeoutSeconds + " 秒" : "";
   const row = (label, detail) => "<div class='workflow-fact'><b>" + esc(label) + "</b><span>" + esc(detail) + "</span></div>";
-  root.innerHTML = "<label class='workflow-select'>查看问题<select id='workflowTurnSelect'><option value=''>跟随最新问题</option>" +
-    turns.map(t => "<option value='" + esc(t.turnId) + "'" + (t.turnId === inspectedTurnId ? " selected" : "") + ">" + esc(t.text) + "</option>").join("") +
-    "</select></label><blockquote>" + esc(turn.text) + "</blockquote>" +
+  const html = (inspectedTurnId ? "<button id='workflowFollowLatest' type='button'>返回最新对话</button>" : "") +
+    "<blockquote>" + esc(turn.text) + "</blockquote>" +
     row("当前进度", (!answer && pendingVision && turn.status !== "completed" ? "等待画面描述 · " + pendingVision.model + " · " + pendingVision.elapsedMs + " ms" : !answer && turn.status === "completed" && semantic?.interaction?.action === "listen" ? "现场对话已记录，无需助手回答" : workStatusLabel(answer?.status || turn.delivery?.status || turn.status)) + elapsed) +
     row("说话人", speaker?.status === "account-input" ? "账号提交的文字" : speaker?.status === "pending" ? "本地模型正在分析声音" : speaker?.name || speaker?.speakerId || "现场声音，身份未确认") +
     row("声画证据", (scene?.audio ? "原始语音已保留" : "无对应语音片段") + " · " +
@@ -39,21 +56,24 @@ function renderTurnWorkflow() {
     row("记忆与权限", semantic?.speakerRestricted ? "身份未确认：禁止个人记忆和任务变更" :
       semantic?.memoryQuery ? "本轮请求检索记忆" : semantic?.memoryText ? "本轮包含记忆候选" : "本轮没有显式记忆请求") +
     row("回答模型", answer?.model || "尚无该问题的回答模型记录") +
+    row("经手模型", models.length ? models.join(" → ") : "尚无模型记录") +
     row("分类耗时", semantic?.latencyMs != null ? semantic.latencyMs + " ms" : "尚未完成测量") +
     row("接收到首字", answer?.inputToFirstTextMs != null ? answer.inputToFirstTextMs + " ms" : "尚未收到文字") +
     row("接收到首音频", answer?.inputToFirstAudioMs != null ? answer.inputToFirstAudioMs + " ms" : "尚未收到音频") +
     row("接收到完整回答", answer?.inputToCompleteMs != null ? answer.inputToCompleteMs + " ms" : "尚未完成") +
     row("回答耗时", answer?.durationMs != null ? answer.durationMs + " ms" : answer?.generationMs != null ? answer.generationMs + " ms（响应创建至完成）" : "尚未完成测量") +
     (answer?.error ? row("失败原因", answer.error) : "") +
-    (semantic ? "<details><summary>分类结果与依据</summary><pre>" + esc(JSON.stringify(semantic, null, 2)) + "</pre></details>" : "") +
-    "<details><summary>本问题运行记录（" + events.length + "）</summary><ol class='workflow-event-list'>" +
+    (semantic ? "<details data-disclosure='semantic'><summary>分类结果与依据</summary><pre>" + esc(JSON.stringify(semantic, null, 2)) + "</pre></details>" : "") +
+    "<details data-disclosure='events'><summary>本问题运行记录（" + events.length + "）</summary><ol class='workflow-event-list'>" +
     events.map(e => "<li><time>" + esc(eventTime(e)) + "</time> <button type='button' data-workflow-event='" + esc(e.eventId) + "'>" + esc(e.type) +
       "</button>" + (e.latencyMs != null ? " · " + esc(e.latencyMs) + " ms" : "") + "</li>").join("") +
     "</ol></details>";
-  root.querySelector("select").onchange = event => { inspectedTurnId = event.target.value || null; renderTurnWorkflow(); };
+  updateDisclosureHTML(root, html, selectedSessionId + ":" + turn.turnId);
+  const followButton = root.querySelector("#workflowFollowLatest");
+  if (followButton) followButton.onclick = () => { inspectedTurnId = null; renderTurnWorkflow(); };
   root.querySelectorAll("[data-workflow-event]").forEach(button => button.onclick = () => {
     const event = events.find(e => e.eventId === button.dataset.workflowEvent);
-    if (event) { document.querySelector(".inspector-panel").open = true; inspect(event); }
+    if (event) { location.hash = "/audit"; document.querySelector(".inspector-panel").open = true; inspect(event); }
   });
 }
 

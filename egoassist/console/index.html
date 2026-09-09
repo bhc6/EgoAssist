@@ -6,8 +6,8 @@
   <title>EgoAssist 智能眼镜助手</title>
   <link rel="icon" href="data:,">
   <link rel="stylesheet" href="styles.css">
-  <link rel="stylesheet" href="memory-controls.css?v=20260813-workflow">
   <link rel="stylesheet" href="responsive.css?v=20260909-text-input">
+  <link rel="stylesheet" href="memory-controls.css?v=20260909-workspace">
 </head>
 <body class="auth-required">
   <div id="authGate" class="auth-gate">
@@ -26,15 +26,16 @@
   </div>
   <header>
     <div class="brand"><b>EgoAssist</b><span>智能眼镜助手</span></div>
-    <label>助手能力<select id="skillSelect"></select></label>
-    <label>当前任务<select id="taskSelect"></select></label>
-    <button id="newTask">新建任务</button>
-    <span id="mode" class="model-pill"></span>
-    <button id="reset">重置会话</button>
+    <nav class="workspace-nav" aria-label="主导航">
+      <a href="#/conversation" aria-current="page">对话与记忆</a>
+      <a href="#/reports">报告</a>
+      <a href="#/tasks">任务</a>
+      <a href="#/audit">运行审计</a>
+    </nav>
     <div class="identity-controls">
       <b id="currentUser">-</b>
-      <label>实验案例<select id="sessionSelect"></select></label>
-      <button id="newSession" title="创建独立实验案例">新建案例</button>
+      <label>会话<select id="sessionSelect"></select></label>
+      <button id="newSession" title="创建独立会话">新建会话</button>
       <button id="logout" title="退出当前账号">退出</button>
     </div>
   </header>
@@ -42,8 +43,6 @@
   <main>
 
     <section class="session-strip">
-      <div><span>会话编号</span><b id="sessionId">-</b></div>
-      <div><span>提示词版本</span><b id="promptHash">-</b></div>
       <div><span>当前能力与任务</span><b id="skillName">-</b></div>
       <div><span>实时连接</span><b id="duplexState">未连接</b></div>
       <div><span>语音播报</span><b id="outputPermission">可播报</b></div>
@@ -60,6 +59,7 @@
       <div id="performanceUsage" class="performance-usage"></div>
     </section>
 
+    <div data-view="conversation">
     <section class="research-grid">
       <aside class="source-panel panel">
         <div class="panel-head"><div><h1>现场与对话</h1></div><b id="cameraState">设备离线</b></div>
@@ -83,28 +83,40 @@
           <article><span>现场语音转写</span><p id="transcript">等待语音</p></article>
           <article id="assistantCaption"><span>助手正在说</span><p>等待语音输出</p></article>
         </div>
-        <details open><summary>问题与回答</summary><div id="turnHistory" aria-live="polite"></div></details>
-        <div class="quick">
-          <button data-say="完成了" data-requires-task>目标达成</button><button data-say="再说一遍">重复</button>
-          <button data-say="怎么做">请求帮助</button><button data-say="暂停" data-requires-task>暂停</button>
-        </div>
-        <details id="taskDebug"><summary>可复现实验输入</summary><div class="manual"><button data-replay="progress">持续操作</button><button data-replay="complete">可能达成</button><button data-replay="wrong_step">意外路径</button><button data-replay="occluded">视野遮挡</button><button data-replay="hazard">现场风险</button></div><div id="manualSteps" class="manual"></div></details>
+        <h2 class="history-heading">对话记录</h2><div id="turnHistory" aria-label="全部对话记录" tabindex="0"></div>
       </aside>
 
-      <section class="pipeline-panel panel">
-        <div class="panel-head"><div><h1>这句话如何处理</h1></div></div>
-        <div id="liveWorkflow" class="live-workflow" aria-live="polite"></div>
-        <details><summary>任务动作与依据</summary><div class="decision-block"><div id="decision"></div></div></details>
+      <section class="memory-workspace panel" aria-labelledby="memoryTitle">
+        <div class="panel-head"><h1 id="memoryTitle">记忆</h1><span id="memoryScope"></span></div>
+        <details id="memorySettings"><summary>记忆设置</summary>
+          <div class="memory-controls">
+            <label>记忆配置<select id="memoryProfile"></select></label>
+            <label class="memory-switch"><input id="timelineEnabled" type="checkbox">启用记忆</label>
+            <label>保存范围<select id="timelineScope"><option value="case">当前会话</option><option value="participant">我的全部会话</option></select></label>
+            <span id="memoryPolicyStatus" role="status"></span>
+          </div>
+        </details>
         <div id="memoryCandidate"></div>
+        <div id="timelineRetrievalSummary" class="timeline-retrieval-summary"></div>
+        <div class="memory-toolbar">
+          <label>搜索已加载记录<input id="memorySearch" type="search" placeholder="原文、人物、地点" autocomplete="off"></label>
+          <label>范围<select id="memoryFilterScope"><option value="">全部</option><option value="case">当前会话</option><option value="participant">跨会话</option></select></label>
+          <span id="memoryCount" role="status"></span>
+        </div>
+        <div id="timelineCards" class="timeline-cards"></div>
+        <details id="turnWorkflowDetails"><summary>对话处理记录 <span id="workflowSelection"></span></summary>
+          <div id="liveWorkflow" class="live-workflow"></div>
+        </details>
       </section>
-
-      <details class="inspector-panel panel"><summary>运行事件详情</summary>
-        <div class="panel-head"><div><h2>事件详情</h2></div><b id="eventCount">0 events</b></div>
-        <div id="eventInspector" class="event-inspector"><p>选择管线节点或时间线事件</p></div>
-        <details class="context-details"><summary>当前模型上下文</summary><pre id="promptContext"></pre></details>
-      </details>
     </section>
+    </div>
 
+    <div data-view="tasks" hidden>
+    <div class="task-controls">
+      <label>助手能力<select id="skillSelect"></select></label>
+      <label>当前任务<select id="taskSelect"></select></label>
+      <button id="newTask">新建任务</button>
+    </div>
     <section class="work-center panel" aria-labelledby="workCenterTitle">
       <div class="panel-head">
         <div><h2 id="workCenterTitle">待办与已完成事项</h2></div>
@@ -128,21 +140,24 @@
         <details><summary>当前任务参考资料</summary><div id="artifactList" class="work-list"></div></details>
       </div>
     </section>
+    <section class="panel"><div class="panel-head"><h2 id="taskTitle">当前任务步骤</h2><b id="mapStatus"></b></div><div id="steps" class="checkpoint-list"></div><div id="perceptionEvidence" class="perception-evidence"></div><div id="knowledge" class="knowledge-box"></div></section>
+    <details><summary>任务动作与依据</summary><div class="decision-block"><div id="decision"></div></div></details>
+    </div>
 
-    <section class="insights-panel panel" aria-labelledby="insightTitle">
+    <section data-view="reports" hidden class="insights-panel panel" aria-labelledby="insightTitle">
       <div class="panel-head"><h2 id="insightTitle">记录报告与建议</h2><span id="insightStatus" role="status"></span></div>
       <form id="insightForm" class="insight-controls">
         <label>周期<select id="insightKind"><option value="daily">日报</option><option value="weekly">周报</option><option value="monthly">月报</option><option value="suggestions">当前建议</option></select></label>
         <label>日期<input id="insightDate" type="date" required></label>
-        <label>来源范围<select id="insightScope"><option value="case">当前案例</option><option value="account">我的全部案例</option></select></label>
+        <label>来源范围<select id="insightScope"><option value="case">当前会话</option><option value="account">我的全部会话</option></select></label>
         <button id="insightGenerate" type="submit">生成</button>
         <label class="memory-switch"><input id="proactiveSuggestions" type="checkbox">在线主动建议</label>
       </form>
-      <div id="insightJobs" aria-live="polite"></div>
-      <div id="insightResults" aria-live="polite"></div>
+      <div class="reports-layout"><section><h3>生成记录</h3><div id="insightJobs" aria-live="polite"></div></section>
+      <section><h3 id="insightResultTitle">尚未选择报告</h3><div id="insightResults" aria-live="polite"></div></section></div>
     </section>
 
-    <section class="shared-scene-band" aria-labelledby="sharedSceneTitle">
+    <section data-view="conversation" class="shared-scene-band" aria-labelledby="sharedSceneTitle">
       <div class="panel-head"><h2 id="sharedSceneTitle">共享现场与说话人</h2><span id="sharedSceneStatus">等待音视频</span></div>
       <div class="shared-scene-grid">
         <div id="sharedSceneVisual"></div>
@@ -159,6 +174,13 @@
       <div id="sharedUtterances" class="shared-utterances"></div>
     </section>
 
+    <div data-view="audit" hidden>
+    <div class="audit-session"><span id="mode" class="model-pill"></span><span>会话 <b id="sessionId">-</b></span><span>提示词版本 <b id="promptHash">-</b></span><button id="reset">重置会话</button></div>
+    <details class="inspector-panel panel"><summary>运行事件详情</summary>
+      <div class="panel-head"><h2>事件详情</h2><b id="eventCount">0 events</b></div>
+      <div id="eventInspector" class="event-inspector"><p>尚未选择事件</p></div>
+      <details class="context-details"><summary>当前模型上下文</summary><pre id="promptContext"></pre></details>
+    </details>
     <section class="prompt-audit-panel panel" aria-labelledby="promptAuditTitle">
       <div class="panel-head"><h2 id="promptAuditTitle">提示词与真实请求</h2><button id="refreshPromptAudit" type="button">刷新</button></div>
       <details id="promptAuditDetails"><summary>已发送请求、证据与原始输出</summary><div id="actualPromptRequests"></div></details>
@@ -178,25 +200,8 @@
       <div id="timeline" class="timeline"></div>
     </details>
 
-    <details class="supporting-evidence"><summary>记忆记录、任务步骤与调度详情</summary><section class="analysis-grid">
-      <section class="panel">
-        <div class="panel-head">
-          <div><span>TIMELINE MEMORY SYSTEM</span><h2>TimelineMemory 统一记忆</h2></div>
-          <b id="memoryScope"></b>
-        </div>
-        <div class="memory-controls">
-          <label>记忆配置<select id="memoryProfile"></select></label>
-          <label class="memory-switch"><input id="timelineEnabled" type="checkbox"><span>记忆开关</span></label>
-          <label>范围<select id="timelineScope"><option value="case">案例</option><option value="participant">参与者</option></select></label>
-          <span id="memoryPolicyStatus"></span>
-        </div>
-        <div id="timelineRetrievalSummary" class="timeline-retrieval-summary"></div>
-        <div id="timelineCards" class="timeline-cards"></div>
-      </section>
-      <section class="panel"><div class="panel-head"><div><span>TASK HYPOTHESES</span><h2 id="taskTitle">Checkpoint Ledger</h2></div><b id="mapStatus"></b></div><div id="steps" class="checkpoint-list"></div><div id="perceptionEvidence" class="perception-evidence"></div><div id="knowledge" class="knowledge-box"></div></section>
       <section class="panel"><div class="panel-head"><div><span>RUNTIME CONTROL</span><h2>路由、归因与调度</h2></div></div><details open><summary>意图候选与激活证据</summary><pre id="intentRouting"></pre></details><details><summary>用户/助手声道归因</summary><pre id="audioAttribution"></pre></details><div id="scheduler" class="scheduler"></div><p class="tools-title">当前 Skill 工具</p><div id="skillTools" class="quick"></div><p id="toolResult"></p><div id="toolAudit" class="archive"></div><div id="trace" hidden></div></section>
-    </section>
-  </details>
+    </div>
   </main>
 
   <footer>研究原型 · 界面只展示可观测事件、显式策略和结构化状态，不展示或声称访问模型隐藏思维链。</footer>
@@ -240,7 +245,9 @@
   <script src="vendor/vad/bundle.min.js"></script>
   <script src="local_vad.js?v=20260909"></script>
   <script src="shared_scene.js?v=20260909"></script>
-  <script src="workflow.js?v=20260909"></script>
-  <script src="app.js?v=20260909-shared-scene"></script>
+  <script src="workspace.js?v=20260909"></script>
+  <script src="memory_view.js?v=20260909"></script>
+  <script src="workflow.js?v=20260909-workspace"></script>
+  <script src="app.js?v=20260909-workspace"></script>
 </body>
 </html>

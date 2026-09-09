@@ -15,6 +15,7 @@
 - [记忆机制](MEMORY_ARCHITECTURE.md)：保存、检索、时间理解、报告和失败边界。
 - [文档导航](docs/README.md)：架构决策、代码审查和历史实验。
 - [提示词](egoassist/prompts/README.md)：模板、调参方法和实际请求审计。
+- [记忆与声画边界验收](docs/MEMORY_OPERATIONAL_BOUNDARIES_2026-09-09.md)：无口述观测、相对时间、声画指代和真实 Qwen 结果。
 
 ## 启动
 

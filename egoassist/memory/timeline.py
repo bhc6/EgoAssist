@@ -883,8 +883,21 @@ class TimelineMemory:
         query_subject = normalize_identity(query_spec.get("subject"))
         query_predicate = normalize_identity(query_spec.get("predicate"))
         query_context = ground_context(query_spec.get("context"), query, clock)
+        # LLMs occasionally attach a nested phrase ("昨天讨论的前天约定") to
+        # the preceding time reference. Keep that interpretation auditable, but
+        # also evaluate the independent civil-day reading. This prevents a
+        # parser choice from hiding an otherwise matching dated memory.
+        independent_context = query_context
+        raw_context = query_spec.get("context") if isinstance(query_spec.get("context"), Mapping) else None
+        if raw_context and any(str(item.get("anchor")) not in {"turn", "ambiguous"}
+                               for item in raw_context.get("times", []) if isinstance(item, Mapping)):
+            independent_raw = dict(raw_context)
+            independent_raw["times"] = [dict(item, anchor="turn") for item in raw_context.get("times", [])]
+            independent_context = ground_context(independent_raw, query, clock)
         query_entities = [normalize_identity(item) for item in query_context["entities"]]
         query_times = [item for item in query_context["times"] if item["status"] == "resolved"]
+        independent_times = [item for item in independent_context["times"] if item["status"] == "resolved"]
+        time_variants = [query_times] + ([independent_times] if independent_times != query_times else [])
         temporal_status = "resolved" if query_times else "not-requested"
         if any(item["status"] != "resolved" for item in query_context["times"]) or (
             not query_context["times"] and resolve_time_semantics(query, clock, kind=None)["ambiguous"]
@@ -976,18 +989,20 @@ class TimelineMemory:
             evidence = card.get("metadata", {}).get("evidenceContext", {})
             card_times = [item for item in evidence.get("times", []) if item.get("start")]
             temporal_support = "not-requested"
-            if query_times:
+            if any(variant for variant in time_variants):
                 temporal_support = "unresolved"
                 if card_times:
-                    time_eligible = all(any(time_matches(requested, item) for item in (
-                        [item for item in card_times if normalize_identity(item.get("relation")) ==
-                         normalize_identity(requested["relation"])] or card_times
-                    )) for requested in query_times)
+                    def matches(variant):
+                        return all(any(time_matches(requested, item) for item in (
+                            [item for item in card_times if normalize_identity(item.get("relation")) ==
+                             normalize_identity(requested["relation"])] or card_times
+                        )) for requested in variant)
+                    time_eligible = any(matches(variant) for variant in time_variants if variant)
                     temporal_support = "matching-references" if time_eligible else "conflicting-references"
-                elif len(query_times) == 1 and card.get("effectiveAt"):
-                    time_eligible = time_matches(query_times[0], {
+                elif card.get("effectiveAt"):
+                    time_eligible = any(len(variant) == 1 and time_matches(variant[0], {
                         "start": card["effectiveAt"], "end": card.get("effectiveEnd"),
-                    })
+                    }) for variant in time_variants if variant)
                     temporal_support = "legacy-event-time" if time_eligible else "conflicting-event-time"
             card_entities = {normalize_identity(item) for item in evidence.get("entities", [])}
             entity_eligible = all(item in card_entities or item in normalize_identity(card["text"])

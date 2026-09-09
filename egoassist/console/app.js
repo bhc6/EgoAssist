@@ -21,6 +21,10 @@ let mediaGeneration = 0;
 let selectedEventId = null;
 let currentUser = null, selectedSessionId = null, authMode = "login";
 let sessionCatalog = [], memoryPolicySaving = false;
+// Keep a submitted text turn visible while the next state snapshot is in flight.
+// The server remains authoritative; entries are removed as soon as its ledger
+// contains the same turn id.
+const localSubmittedTurns = new Map();
 let ambientState = null;
 let insightSession = null, insightBusy = false, insightTurn = null, insightLastAttempt = 0;
 let insightJobs = [], selectedInsightJob = null, insightPolling = false, displayedInsightResult = null;
@@ -77,6 +81,7 @@ function showLogin() {
   $("#insightJobs").replaceChildren();
   insightTurn = null;
   state = null;
+  localSubmittedTurns.clear();
   $("#proactiveSuggestions").checked = false;
   $("#insightResults").replaceChildren();
   $("#actualPromptRequests").replaceChildren();
@@ -370,7 +375,10 @@ function renderWorkCenter() {
   const turnStates = {received: "已接收，等待处理", responding: "正在回答", completed: "回答已完成",
     interrupted: "回答已打断", classifying: "正在分析问题", processing: "正在处理", ready: "等待执行",
     deferred: "排队中", failed: "处理失败", cancelled: "已取消"};
-  const turns = ledger.turnInbox || [];
+  const serverTurns = ledger.turnInbox || [];
+  serverTurns.forEach(turn => localSubmittedTurns.delete(turn.turnId));
+  const turns = [...serverTurns, ...[...localSubmittedTurns.values()].filter(turn => !serverTurns.some(item => item.turnId === turn.turnId))]
+    .sort((a, b) => (a.sequence || 0) - (b.sequence || 0));
   const history = $("#turnHistory");
   const historySessionChanged = history.dataset.session !== selectedSessionId;
   const followLatest = historySessionChanged || history.scrollHeight - history.scrollTop - history.clientHeight < 48;
@@ -381,15 +389,25 @@ function renderWorkCenter() {
     const answer = turn.answer;
     const answerLabels = {queued: "后台补全排队中", running: "正在后台补全", paused: "已暂停计算", failed: "后台补全失败", cancelled: "已取消或被更正",
       completed: answer?.channel === "background-text" ? "已在后台回答" : status === "completed" && turn.delivery?.channel === "device-playback" ? "设备已播完" : "已生成 · 播放未确认"};
-    const label = !answer && turn.status === "completed" && turn.semantic?.interaction?.action === "listen" ? "现场对话已记录，无需助手回答" : answer && answer.status !== "foreground" ? answerLabels[answer.status]
+    const label = turn.delivery?.channel === "memory-receipt" && turn.delivery?.memoryStatus === "committed" ? "记忆已保存" : !answer && turn.status === "completed" && turn.semantic?.interaction?.action === "listen" ? "现场对话已记录，无需助手回答" : answer && answer.status !== "foreground" ? answerLabels[answer.status]
       : !turn.delivery && status === "completed" ? "已处理，查看任务结果" : turnStates[status] || status;
     return "<div class='turn-history-row' data-turn-id='" + esc(turn.turnId) + "'><p>" + esc(turn.text) +
-      "</p><small>" + esc(label) + " · " + esc(turn.turnId) + "</small>" +
+      "</p><small>" + esc(label) + "</small>" +
       (answer?.text && answer.status === "completed" ? "<p class='completed-answer'>" + esc(answer.text) + "</p>" : "") +
       (answer && ["queued", "running", "failed"].includes(answer.status) ? "<small>" + esc(answer.model +
         (answer.status === "running" ? " · 已等待 " + Math.max(0, (Date.now() - Date.parse(answer.startedAt)) / 1000).toFixed(1) +
         " s · 请求上限 " + answer.timeoutSeconds + " s" : "") + (answer.error ? " · " + answer.error : "")) + "</small>" : "") +
-      (answer?.durationMs != null ? "<small>" + esc(answer.durationMs + " ms · " + (answer.providerRequestId || "")) + "</small>" : "") +
+      (answer?.durationMs != null ? "<small>回答耗时 " + esc(answer.durationMs) + " ms</small>" : "") +
+      (() => {
+        const models = [...new Set([
+          turn.semantic?.model,
+          ...(state.events || []).filter(e => e.payload?.turnId === turn.turnId || e.payload?.origin?.turnId === turn.turnId)
+            .flatMap(e => [e.model, e.payload?.model, e.payload?.request?.model]),
+          answer?.model,
+        ].filter(Boolean))];
+        return models.length ? "<small>经手模型：" + esc(models.join(" → ")) + "</small>" : "";
+      })() +
+      "<button type='button' class='inspect-turn' data-inspect-turn='" + esc(turn.turnId) + "'>查看处理记录</button>" +
       (answer && ["queued", "running"].includes(answer.status) ? "<button type='button' data-answer-action='cancel' data-answer-turn='" + esc(turn.turnId) + "'>取消这个问题</button>" : "") +
       (answer?.status === "failed" ? "<button type='button' data-answer-action='retry' data-answer-turn='" + esc(turn.turnId) + "'>重试回答</button>" : "") +
       (!answer && ["interrupted", "failed"].includes(status) ? "<button type='button' data-reask-turn='" + esc(turn.turnId) + "'>重新提问</button>" : "") + "</div>";
@@ -469,109 +487,6 @@ function renderWorkCenter() {
   $$('[data-open-artifact]').forEach(button => button.onclick = () => openArtifact(button.dataset.openArtifact));
 }
 
-// ── TimelineMemory helpers ───────────────────────────────────────────────────
-
-const KIND_LABELS = {
-  "scene": "场景", "event": "事件", "fact": "事实", "state": "状态",
-  "preference": "偏好", "task-preference": "任务偏好", "observation": "观测",
-  "tool-effect": "工具效果", "legacy": "旧格式",
-};
-const KIND_CLASS = {
-  "scene": "kind-scene", "event": "kind-event", "fact": "kind-fact",
-  "state": "kind-state", "preference": "kind-pref", "observation": "kind-obs",
-  "tool-effect": "kind-tool",
-};
-const kindLabel = kind => KIND_LABELS[kind] || kind || "?";
-const kindClass = kind => KIND_CLASS[kind] || "kind-other";
-
-function fmtBeijing(isoStr) {
-  if (!isoStr) return "";
-  try {
-    const d = new Date(isoStr);
-    return d.toLocaleString("zh-CN", {
-      timeZone: "Asia/Shanghai", hour12: false,
-      year: "numeric", month: "2-digit", day: "2-digit",
-      hour: "2-digit", minute: "2-digit", second: "2-digit",
-    }).replace(/\//g, "-") + " 北京";
-  } catch (_) { return isoStr; }
-}
-
-function renderTimelineCards(episodic) {
-  const timelineViews = episodic.timelineViews || {};
-  const allCards = [
-    ...(timelineViews.participant?.recent || []),
-    ...(timelineViews.case?.recent || []),
-    ...(episodic.recent || []),
-  ].filter((c, i, arr) => arr.findIndex(x => x.id === c.id) === i)
-   .sort((a, b) => ((b.happenedAt || b.recordedAt || "") > (a.happenedAt || a.recordedAt || "") ? 1 : -1));
-
-  const candidates = episodic.retrieval?.candidates || [];
-  const injection = episodic.retrieval?.injection || {status: "not-injected", episodeIds: []};
-  const selectedIds = new Set((injection.evidence || []).map(ev => ev.episodeId || ev.cardId));
-
-  // Retrieval summary panel
-  const summaryEl = $("#timelineRetrievalSummary");
-  if (summaryEl) {
-    const method = episodic.retrieval?.method || "none";
-    const scope = episodic.retrieval?.scope || {};
-    const injEvidence = injection.evidence || [];
-    summaryEl.innerHTML =
-      "<header class='tl-retrieval-header'><b>当前轮次 TimelineMemory 检索</b>" +
-      " <code>" + esc(method) + "</code>" +
-      " · 范围 <b>" + esc(scope.memoryScope || scope.session || "—") + "</b></header>" +
-      "<div class='tl-retrieval-stats'>" +
-        "<span>候选 <b>" + candidates.length + "</b></span>" +
-        "<span>注入 <b>" + injEvidence.length + "</b></span>" +
-        // current-turn injection: retrieval feeds THIS turn's context only; prior
-        // turns are never re-generated (context injection, not regeneration).
-        "<span class='tl-inject-status tl-status-" + esc(injection.status.replace(/[^a-z-]/g, "")) + "' title='current-turn injection'>" + esc(injection.status) + "</span>" +
-      "</div>" +
-      (injEvidence.length ? "<ul class='tl-evidence-list'>" + injEvidence.map(ev =>
-        "<li><span class='kind-badge " + kindClass(ev.kind) + "'>" + esc(kindLabel(ev.kind)) + "</span>" +
-        "<time class='tl-time'>" + esc(fmtBeijing(ev.timestamp)) + "</time>" +
-        "<span class='tl-ev-text'>" + esc((ev.summary || "").slice(0, 100)) + "</span>" +
-        "<small class='tl-ev-meta'>score " + Number(ev.score || 0).toFixed(2) + " · " + esc(ev.source || "") + "</small></li>"
-      ).join("") + "</ul>" : "<p class='tl-no-evidence'>本轮无注入证据</p>") +
-      (candidates.length > 0 ? "<details class='tl-candidates-detail'><summary>全部候选 (" + candidates.length + ")</summary><ul class='tl-candidates'>" +
-        candidates.slice(0, 12).map(c =>
-          "<li class='" + (c.selected ? "tl-selected" : "") + "'>" +
-          "<span class='kind-badge " + kindClass(c.record?.kind) + "'>" + esc(kindLabel(c.record?.kind)) + "</span>" +
-          "<span class='tl-cand-text'>" + esc((c.record?.summary || "").slice(0, 80)) + "</span>" +
-          "<small>score " + Number(c.score || 0).toFixed(2) +
-            (c.selected ? " · 已注入" : " · " + esc((c.rejectionReasons || []).join("/"))) + "</small></li>"
-        ).join("") + "</ul></details>" : "");
-  }
-
-  // Cards panel
-  const cardsEl = $("#timelineCards");
-  if (!cardsEl) return;
-  if (!allCards.length) {
-    cardsEl.innerHTML = "<p class='empty-state'>TimelineMemory 暂无活动卡片</p>";
-    return;
-  }
-  cardsEl.innerHTML =
-    "<div class='tl-cards-header'><b>RECENT CARDS</b><span class='tl-card-count'>" + allCards.length + " 条</span></div>" +
-    allCards.slice(0, 24).map(card => {
-      const isInjected = selectedIds.has(card.id);
-      const ts = card.happenedAt || card.recordedAt || card.timestamp;
-      return "<article class='tl-card" + (isInjected ? " tl-card--injected" : "") + "'>" +
-        "<div class='tl-card-top'>" +
-          "<span class='kind-badge " + kindClass(card.kind) + "'>" + esc(kindLabel(card.kind)) + "</span>" +
-          (ts ? "<time class='tl-card-time'>" + esc(fmtBeijing(ts)) + "</time>" : "") +
-          (isInjected ? "<span class='tl-injected-badge'>已注入</span>" : "") +
-        "</div>" +
-        "<p class='tl-card-text'>" + esc((card.text || card.summary || "").slice(0, 140)) + "</p>" +
-        "<div class='tl-card-meta'>" +
-          "<small>" + esc(card.scope || "case") + " · " + esc(card.tier || "short") + "</small>" +
-          "<button data-delete-card='" + esc(card.id) + "' class='tl-delete'>删除</button>" +
-        "</div>" +
-        "<details class='tl-evidence-detail'><summary>原文、关联与时间证据</summary><pre>" + esc(JSON.stringify({
-          cardId: card.id, sourceIds: card.sourceIds, recordedAt: card.recordedAt,
-          effectiveAt: card.effectiveAt, effectiveEnd: card.effectiveEnd, timezone: card.timezone,
-          text: card.text || card.summary, evidence: card.evidenceContext || card.metadata?.evidenceContext || {},
-        }, null, 2)) + "</pre></details></article>";
-    }).join("");
-}
 
 function renderPerformance(audit = {}) {
   const labels = {
@@ -602,7 +517,7 @@ function render(next) {
   renderPerformance(state.performance);
   syncInsightSession();
   maybeSuggest();
-  const task = state.task, memory = state.memory, mechanism = state.memoryMechanism;
+  const task = state.task, memory = state.memory;
   const interaction = state.interaction;
   $("#outputPermission").textContent = interaction?.paused ? "暂让声音 · 等待意图" : interaction?.quiet
     ? "免打扰" + (interaction.until ? " · 至 " + new Date(interaction.until).toLocaleTimeString() : " · 等待解除")
@@ -642,26 +557,22 @@ function render(next) {
   $("#vision").textContent = task?.observation
     ? task.observation.step + " · accepted · age " + task.observation.frameAgeMs + " ms"
     : latestRejection ? "证据未采纳 · " + latestRejection.reason : stream && state.sharedScene?.camera === "receiving" ? "现场画面接收中" : "";
-  $("#memoryScope").textContent = "exact-trigger-lookup · " + (mechanism.scope.skill || "general") + " / " + (mechanism.scope.task || "unscoped");
+  $("#memoryScope").textContent = state.memoryPolicy?.components?.timeline?.enabled ? "TimelineMemory · 已启用" : "TimelineMemory · 已关闭";
   renderMemoryPolicy(state.memoryPolicy, state.memoryProfiles || []);
   const episodic = state.episodicMemory || {recent: [], retrieval: {candidates: []}};
   renderTimelineCards(episodic);
   $("#toolAudit").innerHTML = state.toolAudit.length ? state.toolAudit.map(item => "<article><b>" + esc(item.tool || item.action || "tool") + "</b><p>" + esc(JSON.stringify(item.arguments || item.result || {})) + "</p><small>" + esc(item.time || item.timestamp || "") + "</small></article>").join("") : "<span class='muted'>暂无工具调用</span>";
-  $$("[data-delete-card]").forEach(button => button.onclick = () => runMemoryMutation(button, post("/api/memory/delete", {id: button.dataset.deleteCard, sessionId: selectedSessionId})));
   $("#memoryCandidate").innerHTML = memory.candidate ? "<div class='candidate'><b>要记住这个提示偏好吗？</b><p>" + esc(memory.candidate.preference) + "</p><button data-accept='true'>确认保存</button><button data-accept='false'>不要保存</button></div>" : "";
   $$("[data-accept]").forEach(button => button.onclick = () => runMemoryMutation(button, post("/api/candidate", {accepted: button.dataset.accept === "true", sessionId: selectedSessionId})));
   const scheduler = state.scheduler;
   $("#scheduler").innerHTML = "<b>Response scheduler</b><br>active: " + esc((scheduler.activeResponseIds || []).join(", ") || "none") + "<br>queued: " + esc(JSON.stringify(scheduler.queued)) + "<br>inflight: " + esc(JSON.stringify(scheduler.inflight)) + "<br>barge-in pending: " + esc(scheduler.bargeInPending) + "<br><b>Policy source</b>: " + esc(state.turnTakingPolicy.source) + "<br>selected: " + esc(JSON.stringify(state.turnTakingPolicy.currentSelection)) + "<br>protected max: " + esc(state.turnTakingPolicy.maxProtectionMs) + " ms";
   $("#intentRouting").textContent = JSON.stringify(state.intentRouting, null, 2);
   $("#audioAttribution").textContent = JSON.stringify(state.audioAttribution, null, 2);
-  $$('[data-requires-task]').forEach(button => button.disabled = !task);
-  $("#taskDebug").hidden = !task;
   renderWorkCenter();
   renderTurnWorkflow();
   renderTimeline(state.events || []);
   renderPerceptionEvidence(task);
   renderAmbient();
-  renderManualSteps();
 }
 
 // Ambient observation must be visible for as long as it is running. ADR 005/007:
@@ -763,16 +674,6 @@ function renderPerceptionEvidence(task) {
     (audit.length ? "<div class='perception-audit'><small>LATEST REJECTION</small>" + esc(audit[0].reason + " · " + (audit[0].frameId || "no frame")) + "</div>" : "");
 }
 
-function renderManualSteps() {
-  if (!state) return;
-  const allowed = new Set(state.task ? [state.task.currentCheckpointId, ...(state.task.perception?.allowedTransitions || [])] : []);
-  $("#manualSteps").innerHTML = state.task ? state.task.steps.map(item => "<button data-step='" + esc(item.id) + "' " + (allowed.has(item.id) ? "" : "disabled title='不在当前允许路径'") + ">研究证据：" + esc(item.title) + "</button>").join("") : "";
-  $$("[data-step]").forEach(button => button.onclick = () => run(button, post("/api/task/observe", {
-    step: button.dataset.step, completed: false, confidence: 0.92,
-    summary: "外部感知：" + button.dataset.step, hazards: [], source: "manual/ui",
-    sessionId: selectedSessionId
-  })));
-}
 
 async function run(button, promise) {
   if (button) button.disabled = true;
@@ -1298,21 +1199,12 @@ function disconnectRealtime() {
   $("#realtimeButton").textContent = "启动全双工陪练";
 }
 
-async function sendControl(button) {
-  button.disabled = true;
-  try {
-    await connectRealtime();
-    if (!socket || socket.readyState !== WebSocket.OPEN) throw Error("实时会话尚未就绪");
-    socket.send(JSON.stringify({type: "control", transcript: button.dataset.say}));
-  } catch (error) { alert(error.message); }
-  finally { button.disabled = false; }
-}
 
 $("#textTurnForm").onsubmit = async event => {
   event.preventDefault();
   const input = $("#textTurnInput"), button = $("#textTurnSend");
-  const transcript = input.value.trim();
-  if (!transcript) return;
+  const draft = input.value, transcript = draft.trim();
+  if (!transcript || button.disabled) return;
   button.disabled = true;
   $("#textTurnError").textContent = "";
   try {
@@ -1325,15 +1217,35 @@ $("#textTurnForm").onsubmit = async event => {
     captionResponseId = null;
     stopPlayback();
     const pending = {type: "control", transcript, clientRequestId: currentTurnId};
+    localSubmittedTurns.set(currentTurnId, {
+      turnId: currentTurnId, text: transcript, sequence: Number.MAX_SAFE_INTEGER,
+      status: "received", delivery: {status: "received"}, source: "explicit-control",
+    });
+    renderWorkCenter();
     turnOutbox().add(pending);
-    input.value = "";
+    if (input.value === draft) input.value = "";
     sendVideoFrame();
     socket.send(JSON.stringify(pending));
   } catch (error) { $("#textTurnError").textContent = error.message; }
   finally { button.disabled = false; }
 };
 
+$("#textTurnInput").addEventListener("keydown", event => {
+  if (event.key !== "Enter" || event.shiftKey || event.isComposing || event.keyCode === 229) return;
+  event.preventDefault();
+  if (!event.repeat && !$("#textTurnSend").disabled) $("#textTurnForm").requestSubmit();
+});
+
 $("#turnHistory").onclick = async event => {
+  const inspectButton = event.target.closest("[data-inspect-turn]");
+  if (inspectButton) {
+    inspectedTurnId = inspectButton.dataset.inspectTurn;
+    renderTurnWorkflow();
+    $("#turnWorkflowDetails").open = true;
+    $("#turnWorkflowDetails").scrollIntoView({block: "nearest"});
+    $("#turnWorkflowDetails > summary").focus({preventScroll: true});
+    return;
+  }
   const action = event.target.closest("[data-answer-action]");
   if (action) {
     action.disabled = true;
@@ -1378,7 +1290,6 @@ $("#mirrorCamera").onchange = event => {
   applyCameraOrientation();
   if (socket?.readyState === WebSocket.OPEN) sendMediaConfiguration(socket);
 };
-$$("[data-say]").forEach(button => button.onclick = () => sendControl(button));
 $("#reset").onclick = event => switchRuntime(event.currentTarget, "/api/task/reset", {});
 $("#skillSelect").onchange = event => switchRuntime(event.currentTarget, "/api/skills/activate", {skill: event.currentTarget.value});
 $("#taskSelect").onchange = event => { if (event.currentTarget.value) switchRuntime(event.currentTarget, "/api/tasks/select", {task: event.currentTarget.value}); };
@@ -1396,9 +1307,6 @@ $("#privacyDelete").onclick = async () => {
     showLogin();
   } catch (error) { alert(error.message); }
 };
-$$('[data-replay]').forEach(button => button.onclick = () => run(button, post("/api/replay/observe", {
-  kind: button.dataset.replay, sessionId: selectedSessionId
-})));
 $("#newTask").onclick = () => $("#taskDialog").showModal();
 $("#cancelTask").onclick = () => $("#taskDialog").close();
 $("#taskDialog").onclose = () => $("#taskForm").reset();
@@ -1544,6 +1452,8 @@ $("#sessionSelect").onchange = async event => {
   else render(await request(selectedStatePath()));
 };
 function renderInsight(result) {
+  const kind = {daily: "日报", weekly: "周报", monthly: "月报", suggestions: "当前建议"};
+  $("#insightResultTitle").textContent = [kind[result.kind] || "报告", result.window?.start || result.anchor || ""].filter(Boolean).join(" · ");
   const coverage = result.coverage || {};
   $("#insightStatus").textContent = [result.status, result.cached ? "复用已生成结果" : result.latencyMs != null ? result.latencyMs + " ms" : "",
     "记录 " + (coverage.includedRecords || 0) + "/" + (coverage.totalRecords || 0),
@@ -1571,6 +1481,7 @@ async function syncInsightSession() {
   promptAuditSignature = "";
   $("#proactiveSuggestions").checked = false;
   $("#insightResults").replaceChildren();
+  $("#insightResultTitle").textContent = "尚未选择报告";
   $("#insightStatus").textContent = "";
   $("#actualPromptRequests").replaceChildren();
   const local = new Date(Date.now() - new Date().getTimezoneOffset() * 60000);
@@ -1625,8 +1536,7 @@ function renderInsightJobs(jobs) {
   insightJobs = jobs;
   const labels = {queued: "排队中", running: "生成中", completed: "已完成", empty: "无记录", failed: "失败", cancelled: "已取消"};
   const kinds = {daily: "日报", weekly: "周报", monthly: "月报", suggestions: "建议"};
-  const visible = [...jobs.filter(job => !["queued", "running"].includes(job.status)).slice(-6),
-    ...jobs.filter(job => ["queued", "running"].includes(job.status))];
+  const visible = [...jobs];
   $("#insightJobs").innerHTML = visible.reverse().map(job => "<div class='insight-job' data-insight-job='" + esc(job.jobId) + "'>" +
     "<span>" + esc(kinds[job.specification.kind] + " · " + job.specification.anchor) + "</span><b>" + esc(labels[job.status] || job.status) +
     "</b><small>" + esc(!["queued", "running"].includes(job.status)
