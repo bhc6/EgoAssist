@@ -126,6 +126,25 @@ def test_compound_stop_cannot_suppress_a_reply_bearing_decision():
         assert result["status"] == "classified"
         assert result["speechControl"] is None
         assert "compound-stop-preserved-reply" in result["protocolNormalizations"]
+
+
+def test_cancellation_after_silence_targets_supplied_question_not_stop_turn():
+    payload = {"v": 1, "speechControl": "stop-speaking", "revision": {
+        "type": "cancellation", "supersedesTurnId": "question"}}
+    calls = []
+
+    def generate(**kwargs):
+        calls.append(kwargs)
+        return provider_response(json.dumps(payload))
+
+    router = SemanticTurnRouter("test-key", generation_call=generate)
+    router.set_turn_context(clock_context=None, memory_draft=None,
+                            previous_turn={"turnId": "silence"}, previous_answer={"turnId": "question"})
+    result = asyncio.run(router.classify("I no longer need that answer.", []))
+    assert result["revision"]["supersedesTurnId"] == "question"
+    assert '"previousAnswer": {"turnId": "question"}' in calls[0]["messages"][0]["content"]
+    payload["revision"]["supersedesTurnId"] = "unrelated"
+    assert asyncio.run(router.classify("I no longer need that answer.", []))["status"] == "invalid"
     assert result["taskControl"] is None
     assert result["selectedSkill"] is None
 

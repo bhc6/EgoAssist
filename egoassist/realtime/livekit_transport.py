@@ -209,7 +209,7 @@ class LiveKitInteractionTransport:
         if payload.get("type") == "audio" and payload.get("audio"):
             await self._publish_audio(session, str(payload["audio"]))
             return
-        if payload.get("type") == "interrupted" and session.output_source is not None:
+        if payload.get("type") in {"interrupted", "playback_stop"} and session.output_source is not None:
             session.output_source.clear_queue()
         await session.room.local_participant.publish_data(
             json.dumps(payload, ensure_ascii=False, separators=(",", ":")),

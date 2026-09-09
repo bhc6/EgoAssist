@@ -139,6 +139,9 @@ def test_livekit_audio_output_and_barge_in_use_one_published_source():
         assert source.frames[0].data.cast("B").tobytes() == pcm
         assert source.frames[0].sample_rate == 24_000
         assert source.cleared is True
+        source.cleared = False
+        await transport.publish("case-2", {"type": "playback_stop"})
+        assert source.cleared is True
         await transport.close("case-2")
     asyncio.run(run())
 

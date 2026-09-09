@@ -6,6 +6,7 @@ let livekitRoom = null, livekitAudioElements = [];
 let interactionTransport = "websocket-fallback";
 let playbackTime = 0, assistantText = "";
 let captionResponseId = null, currentTurnId = null;
+const stoppedSpeechResponses = new Set();
 let detachedStatePolling = false, lastDetachedStatePoll = 0;
 const turnOutbox = () => new TurnOutbox(sessionStorage, currentUser.id, selectedSessionId);
 let connectingPromise = null;
@@ -1112,6 +1113,7 @@ function playPcm24(base64Audio) {
 }
 
 function stopPlayback() {
+  livekitAudioElements.forEach(element => { element.muted = true; });
   playbackSources.forEach(source => { try { source.stop(); } catch (_) {} });
   playbackSources.clear();
   playbackTime = audioContext ? audioContext.currentTime : 0;
@@ -1174,9 +1176,10 @@ async function connectRealtimeSession(generation, media, retryAttempt) {
   ws.onmessage = event => {
     if (socket !== ws || generation !== connectionGeneration) return;
     const message = JSON.parse(event.data);
+    if (["audio", "assistant_transcript"].includes(message.type) && stoppedSpeechResponses.has(message.responseId)) return;
     if (["audio", "assistant_transcript", "response_status"].includes(message.type) &&
         message.origin?.turnId && currentTurnId && message.origin.turnId !== currentTurnId && !message.origin.background) return;
-    if (message.type === "memory_status" && message.turnId && currentTurnId && message.turnId !== currentTurnId) return;
+    if (["memory_status", "speech_control"].includes(message.type) && message.turnId && currentTurnId && message.turnId !== currentTurnId) return;
     if (message.type === "ready") {
       if (message.lanes?.dialogue?.connected === false || providerUnavailable) {
         rejectReady(Error("实时模型尚未连接"));
@@ -1208,13 +1211,24 @@ async function connectRealtimeSession(generation, media, retryAttempt) {
     } else if (message.type === "audio" && interactionTransport !== "livekit" && ["conversation", "proactive-utterance"].includes(message.purpose)) {
       $("#duplexState").textContent = "助手正在说 · 你可以随时打断";
       playPcm24(message.audio);
+    } else if (message.type === "playback_stop") {
+      if (captionResponseId) stoppedSpeechResponses.add(captionResponseId);
+      for (const id of message.responseIds || []) stoppedSpeechResponses.add(id);
+      while (stoppedSpeechResponses.size > 128) stoppedSpeechResponses.delete(stoppedSpeechResponses.values().next().value);
+      stopPlayback();
+      $("#duplexState").textContent = "已停播 · 正在听你说";
+    } else if (message.type === "speech_control") {
+      stopPlayback();
+      $("#duplexState").textContent = message.action === "cancel-answer" ? "已停止回答 · 正在听" : "已停止播报 · 正在听";
+      setWorkflowStage("delivery", "complete", "语音控制已生效");
+      workflow.active = false;
     } else if (message.type === "interrupted") {
       stopPlayback();
       assistantText = "";
       captionResponseId = null;
       $("#duplexState").textContent = "已打断旧响应，正在处理你的请求";
     } else if (message.type === "barge_in_policy") {
-      $("#duplexState").textContent = message.action === "protected" ? "安全句保护播报中 · 仍在听你说话" : "将在当前短句边界停止 · 仍在听你说话";
+      $("#duplexState").textContent = "已停播 · 正在处理语音交接";
     } else if (message.type === "user_transcript") {
       if (message.channel === "explicit_control" && currentTurnId && message.turnId !== currentTurnId) return;
       currentTurnId = message.turnId || null;
@@ -1227,6 +1241,7 @@ async function connectRealtimeSession(generation, media, retryAttempt) {
       setWorkflowStage("reasoning", "active", "正在进行意图路由与上下文编排");
       setWorkflowStage("memory", "active", "正在查询当前范围的 TimelineMemory");
     } else if (message.type === "assistant_transcript" && ["conversation", "proactive-utterance"].includes(message.purpose)) {
+      livekitAudioElements.forEach(element => { element.muted = false; });
       if (captionResponseId !== message.responseId) assistantText = "";
       captionResponseId = message.responseId;
       assistantText = message.done ? message.text : assistantText + message.text;
@@ -1339,6 +1354,7 @@ function stopAudioCapture() {
 }
 
 function disconnectRealtime() {
+  stoppedSpeechResponses.clear();
   currentTurnId = null;
   captionResponseId = null;
   assistantText = "";

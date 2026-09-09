@@ -998,6 +998,14 @@ class OmniBrowserBridge:
 
     def handle_user_speech_started(self, *, trigger: str = "provider-speech-started") -> str:
         """Apply an explicit barge-in policy while continuing microphone capture."""
+        started = time.perf_counter()
+        with self._response_lock:
+            response_ids = list(self._active_response_ids)
+        # Provider completion can precede playback completion. Always stop the
+        # device queue, even when no cloud generation remains to cancel.
+        self._schedule({"type": "playback_stop", "trigger": trigger, "responseIds": response_ids})
+        self._trace("playback.stop.requested", {"trigger": trigger,
+                    "dispatchMs": round((time.perf_counter() - started) * 1000, 3)})
         with self._response_lock:
             response_keys = set(self._active_response_ids)
             if self._response_pending and not response_keys:

@@ -17,7 +17,7 @@ from egoassist.prompts import prompt_text
 from .router_protocol import EVENT_CONTENT_FIELDS, ROUTER_PROMPT, expand_decision
 
 
-TURN_ROUTER_POLICY_VERSION = "semantic-turn-router-v14"
+TURN_ROUTER_POLICY_VERSION = "semantic-turn-router-v15"
 TASK_CONTROLS = {
     "none", "confirm-step", "rollback", "repeat",
     "pause-task", "resume-task", "request-help", "show-reference",
@@ -326,11 +326,7 @@ class TurnAccumulator:
         self._do_flush()
 
     def discard(self) -> None:
-        """Cancel the pending debounce timer and silently drop buffered fragments.
-
-        Used when a stop command is detected early in transcript_received so
-        that any preceding partial utterance does not fire as a stale turn.
-        """
+        """Discard fragments only during an explicit case reset or shutdown."""
         self._cancel_handle()
         self._buffer.clear()
 
@@ -385,24 +381,14 @@ class SemanticTurnRouter:
         clock_context: dict[str, Any] | None,
         memory_draft: dict[str, Any] | None,
         previous_turn: dict[str, Any] | None = None,
+        previous_answer: dict[str, Any] | None = None,
     ) -> None:
         self._turn_context.set({
             "clock": dict(clock_context or {}) or None,
             "memoryDraft": dict(memory_draft or {}) or None,
             "previousTurn": dict(previous_turn or {}) or None,
+            "previousAnswer": dict(previous_answer or {}) or None,
         })
-
-    # Stop-speaking commands. Used by the input handler (run_egoassist.py) to
-    # cancel an in-progress answer the instant a barge-in stop arrives, bypassing
-    # the TurnAccumulator debounce. This is input-side cancellation only; it does
-    # NOT short-circuit classification — every turn is still routed through the
-    # model so the router keeps no local decision vocabulary (see class docstring
-    # and test_semantic_control_has_no_local_phrase_override).
-    _STOP_RE = re.compile(
-        r"^(?:停+|别说了?|闭嘴|住口|安静+|噤声|停一下|停下来?|不用说了?|不用了"
-        r"|stop|shut up|be quiet|stop (?:talking|speaking)|quiet(?:ly)?|silence|enough)$",
-        re.IGNORECASE,
-    )
 
     # ── Main classifier ─────────────────────────────────────────────────────
 
@@ -519,6 +505,10 @@ class SemanticTurnRouter:
                 raise ValueError("invalid intent lifecycle label")
             intents = self._normalize_intents(parsed.get("intents"), str(text))
             revision = self._normalize_revision(parsed.get("revision"))
+            cancellation_only = bool(revision and revision["type"] == "cancellation" and not parsed.get("intents")
+                                     and task_control == "none" and not memory_query_spec and not memory_atoms)
+            if cancellation_only:
+                speech_control = "stop-speaking"
             # A reply-bearing clause must survive a simultaneous audio stop.
             compound_stop = speech_control == "stop-speaking" and bool(
                 parsed.get("intents") or task_control != "none" or memory_query_spec
@@ -536,6 +526,7 @@ class SemanticTurnRouter:
                     + (["memoryEvents-to-source-events"] if "memoryEvents" in wire_decision else [])
                     + (["ignored-top-level-event-content"] if "memoryEvents" in wire_decision and set(wire_decision) & EVENT_CONTENT_FIELDS else [])
                     + (["compound-stop-preserved-reply"] if compound_stop else [])
+                    + (["cancellation-only-silent"] if cancellation_only else [])
                 ),
                 "speechControl": None if speech_control == "none" else speech_control,
                 "taskControl": None if task_control == "none" else task_control,
@@ -614,7 +605,8 @@ class SemanticTurnRouter:
         context = self._turn_context.get()
         context_data = ({"clock": context.get("clock"),
                          "pendingMemoryDraft": context.get("memoryDraft"),
-                         "previousTurn": context.get("previousTurn")}
+                         "previousTurn": context.get("previousTurn"),
+                         "previousAnswer": context.get("previousAnswer")}
                         if any(context.values()) else {})
         arguments = dict(
             model=self.model,
@@ -690,10 +682,12 @@ class SemanticTurnRouter:
             raise ValueError("invalid revision fields")
         if value.get("type") not in {"correction", "cancellation"}:
             raise ValueError("invalid revision type")
-        previous_id = str((self._turn_context.get().get("previousTurn") or {}).get("turnId", ""))
-        if not previous_id or str(value.get("supersedesTurnId")) != previous_id:
-            raise ValueError("revision must target the supplied previous turn")
-        return {"type": value["type"], "supersedesTurnId": previous_id}
+        context = self._turn_context.get()
+        allowed = {str((context.get(key) or {}).get("turnId", "")) for key in ("previousTurn", "previousAnswer")} - {""}
+        target = str(value.get("supersedesTurnId", ""))
+        if target not in allowed:
+            raise ValueError("revision must target a supplied previous turn")
+        return {"type": value["type"], "supersedesTurnId": target}
 
     @staticmethod
     def _normalize_atoms(value: Any, source_text: str = "") -> list[dict[str, Any]]:

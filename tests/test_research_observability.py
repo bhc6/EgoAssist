@@ -69,6 +69,8 @@ def speech_bridge(policy):
     bridge._trace_sink = None
     bridge._assistant_transcript_buffers = {}
     bridge.conversation = Conversation()
+    bridge.playback_events = []
+    bridge._schedule = bridge.playback_events.append
     return bridge
 
 
@@ -76,10 +78,12 @@ def test_speech_policies_distinguish_immediate_clause_and_protected():
     immediate = speech_bridge("immediate")
     assert immediate.handle_user_speech_started() == "cancelled"
     assert immediate.conversation.cancelled == 1
+    assert immediate.playback_events[0]["type"] == "playback_stop"
 
     clause = speech_bridge("finish-clause")
     assert clause.handle_user_speech_started() == "deferred"
     assert clause.conversation.cancelled == 0
+    assert clause.playback_events[0]["type"] == "playback_stop"
     clause._schedule = lambda payload: None
     clause.note_assistant_transcript("这一句结束。")
     assert clause.conversation.cancelled == 1
@@ -87,6 +91,7 @@ def test_speech_policies_distinguish_immediate_clause_and_protected():
     protected = speech_bridge("protected")
     assert protected.handle_user_speech_started() == "protected"
     assert protected.conversation.cancelled == 0
+    assert protected.playback_events[0]["type"] == "playback_stop"
 
 
 def test_turn_taking_policy_is_skill_configurable_and_decision_overridable():

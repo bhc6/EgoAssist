@@ -76,6 +76,16 @@ def harness_at(path):
     )
 
 
+def test_speech_onset_stops_device_playback_even_after_cloud_finished(tmp_path):
+    bridge = make_bridge(harness_at(tmp_path / "device-stop.jsonl"))
+    messages = []
+    bridge._schedule = messages.append
+    assert bridge.handle_user_speech_started() == "idle"
+    assert messages[0]["type"] == "playback_stop"
+    assert messages[0]["responseIds"] == []
+    assert bridge.conversation.cancelled == 0
+
+
 def test_provider_projection_replays_durable_context(tmp_path):
     harness = harness_at(tmp_path / "session.jsonl")
     harness.record_user("remember this", source="test", turn_id="one")

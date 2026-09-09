@@ -282,6 +282,13 @@ def test_text_retries_and_newer_input_do_not_block_behind_slow_routing(tmp_path,
             await instances[0].emit({"type": "audio", "audio": "stale", "origin": {"turnId": "first", "generation": 1}})
             await instances[0].emit({"type": "audio", "audio": "current", "origin": {"turnId": "second", "generation": 2}})
             assert (await until("audio"))["audio"] == "current"
+            await instances[0].emit({"type": "playback_stop", "responseIds": ["muted"]})
+            await until("playback_stop")
+            await instances[0].emit({"type": "audio", "audio": "must-not-resume", "responseId": "muted",
+                                     "origin": {"turnId": "second", "generation": 2}})
+            await instances[0].emit({"type": "audio", "audio": "new-response", "responseId": "new",
+                                     "origin": {"turnId": "second", "generation": 2}})
+            assert (await until("audio"))["audio"] == "new-response"
             await instances[0].emit({"type": "response_status", "status": "responding", "responseId": "r2",
                                      "origin": {"turnId": "second", "generation": 2}})
             await until("response_status")
@@ -1193,21 +1200,22 @@ def test_quick_control_uses_the_realtime_websocket(tmp_path, monkeypatch):
             instances[0].requests.clear()
             await ws.send_json({"type": "control", "transcript": "请停止当前语音输出"})
             explicit_stop = [await _recv(ws) for _ in range(3)]
-            assert [item["type"] for item in explicit_stop] == ["user_transcript", "state", "interrupted"]
-            assert explicit_stop[1]["state"]["task"]["paused"] is False
-            assert explicit_stop[1]["state"]["intentRouting"]["method"] == "semantic-turn-router-v3"
-            assert explicit_stop[1]["state"]["intentRouting"]["status"] == "suppressed-control"
+            assert [item["type"] for item in explicit_stop] == ["user_transcript", "speech_control", "state"]
+            assert explicit_stop[2]["state"]["task"]["paused"] is False
+            assert explicit_stop[2]["state"]["intentRouting"]["method"] == "semantic-turn-router-v3"
+            assert explicit_stop[2]["state"]["intentRouting"]["status"] == "suppressed-control"
             assert instances[0].requests == []
-            assert instances[0].cancellations[-1]["reason"] == "stop-speaking-control"
+            assert instances[0].cancellations[-1]["reason"] == "semantic-stop-speaking"
 
             instances[0].requests.clear()
             instances[0].on_transcript("您别说了。")
             stopped = await _recv(ws)
-            assert stopped["type"] == "state"
+            assert stopped["type"] == "speech_control"
+            assert (await _recv(ws))["type"] == "state"
             assert instances[0].requests == []
             assert instances[0].cancellations[-1] == {
                 "drop_queued_below": 101,
-                "reason": "stop-speaking-transcript",
+                "reason": "semantic-stop-speaking",
             }
             await ws.close()
 

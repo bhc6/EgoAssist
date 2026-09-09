@@ -139,7 +139,7 @@ flowchart LR
 .venv\Scripts\python.exe scripts/compare_memory_mechanisms.py --output outputs/new-memory-comparison
 .venv\Scripts\python.exe scripts/verify_insight_recovery.py --output outputs/new-report-recovery --source outputs/new-memory-comparison/dataset.json
 
-# 统一真实软件验收：17 组独立运行，失败继续记录，不自动重试
+# 统一真实软件验收：19 组独立运行，失败继续记录，不自动重试
 .venv\Scripts\python.exe scripts/verify_real_acceptance.py --output outputs/new-full-real --source outputs/new-memory-comparison/dataset.json
 ```
 
@@ -150,6 +150,10 @@ flowchart LR
 视频全链路研究另用 `run_egolife_benchmark.py --help`。它的采样、图像编码、视觉回答和定位开销不同，不能把旧视频评测的分钟级耗时当作当前实时延迟。少于两段视频时没有独立测试集，必须检查 `split_status` 和 `n_test`。
 
 ## 性能与限制
+
+自然停止交互不使用停止关键词表。检测到用户开口后先停止设备播放，语义路由再区分停止声音、撤销回答、新问题和引述/否定。纯停止不检索记忆、不产生口头确认。“先别出声”保留后台补答，“这个答案不需要了”取消对应问题，换话题不自动取消。提示词集中在 `egoassist/prompts/answer_completion.json`。
+
+真实 Qwen TTS 音频经实时 ASR 测试，开始发送音频到停播通知约 288-299 ms；真实 Edge 播放队列清零约 313 ms。识别整句话及语义判断仍需另外等待；这是合成语音的软件链路实测，不是眼镜或真人麦克风数据。详见[自然语音停止审查](docs/NATURAL_VOICE_STOP_2026-09-09.md)。
 
 2026-09-09 的四轮真实 Qwen 文本控制验收中，从发送文本到首音频约 **1.01-1.42 秒**，四轮均通过。样本很小，不代表 P95/P99 或硬件延迟。对应本地产物为 `outputs/async-realtime-latency-20260909/summary.json`。
 

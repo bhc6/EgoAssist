@@ -4372,11 +4372,18 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
 
         livekit_active = False
         unattributed_outputs = set()
+        muted_response_ids = set()
 
         async def emit(payload):
             if owner.socket_token is not socket_token or owner.epoch != connection_epoch:
                 return
             origin = payload.get("origin") or {}
+            if payload.get("type") == "playback_stop":
+                muted_response_ids.update(payload.get("responseIds") or [])
+            if payload.get("type") == "audio" and payload.get("responseId") in muted_response_ids:
+                return
+            if payload.get("type") == "response_status":
+                muted_response_ids.discard(payload.get("responseId"))
             if payload.get("type") in {"audio", "assistant_transcript", "response_status"}:
                 if payload.get("type") in {"audio", "assistant_transcript"} and payload.get("purpose") == "conversation" and not origin.get("turnId"):
                     response_id = payload.get("responseId")
@@ -4392,7 +4399,7 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                     (owner.work_ledger or CaseWorkLedger(owner.journal)).set_turn_delivery(
                         origin["turnId"], payload["status"], responseId=payload.get("responseId"))
             if livekit_active and livekit_transport is not None:
-                if payload.get("type") in {"audio", "interrupted"}:
+                if payload.get("type") in {"audio", "interrupted", "playback_stop"}:
                     try:
                         await livekit_transport.publish(session_id, payload)
                     except Exception:
@@ -5057,8 +5064,8 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
             turn_clock = clock_for_session(user_id, session_id)
             turns = (owner.work_ledger or CaseWorkLedger(harness.journal)).turns()
             previous = None
+            current_sequence = int(turns.get(str(turn_id), {}).get("sequence") or 0)
             if turn_id:
-                current_sequence = int(turns.get(str(turn_id), {}).get("sequence") or 0)
                 previous = max(
                     (item for item in turns.values() if str(item.get("turnId")) != str(turn_id) and int(item.get("sequence") or 0) < current_sequence),
                     key=lambda item: int(item.get("sequence") or 0),
@@ -5068,6 +5075,12 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                 clock_context=turn_clock.prompt_payload(),
                 memory_draft=timeline.pending_draft(user_id=user_id, case_id=session_id),
                 previous_turn=previous,
+                previous_answer=next((
+                    {"turnId": item["turnId"], "text": item["question"], "status": item["status"]}
+                    for item in reversed(list(answer_jobs(harness.journal).values()))
+                    if item["turnId"] != turn_id and item["status"] != "cancelled"
+                    and int(turns.get(item["turnId"], {}).get("sequence") or 0) < current_sequence
+                ), None),
             )
             return await semantic_router.classify(text, catalog)
 
@@ -5303,6 +5316,23 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                     previous_id = str(revision["supersedesTurnId"])
                     if previous_id in answer_jobs(harness.journal):
                         answer_executor.cancel(harness.journal, previous_id, reason="explicit-" + str(revision["type"]))
+                if semantic.get("speechControl") == "stop-speaking":
+                    # A semantic stop has no retrieval, memory write, or spoken receipt.
+                    bridge.cancel_response(drop_queued_below=101, reason="semantic-stop-speaking")
+                    session_routing = {**session_routing, "method": semantic.get("method"),
+                                       "status": "suppressed-control", "selectedSkill": None,
+                                       "selectedTask": None, "suppressedBy": "stop-speaking"}
+                    owner.routing = session_routing
+                    resolve_semantic_turn(text, {}, semantic)
+                    session_trace("user.control.stop_speaking", "semantic-turn-router",
+                                  {"text": text, "turnId": turn_id, "responseRequested": False})
+                    work_ledger.set_turn_status(turn_id, "completed")
+                    work_ledger.set_turn_delivery(turn_id, "completed", channel="speech-control")
+                    if turn_sequence == owner.latest_input_sequence and not ws.closed:
+                        await ws.send_json({"type": "speech_control", "turnId": turn_id,
+                                            "action": "cancel-answer" if revision else "stop-speaking"})
+                        await ws.send_json({"type": "state", "state": scoped_state_for_user(user_id, session_id)})
+                    return {"control": "stop-speaking", "semanticDecision": semantic}
                 pending_draft_before = timeline.pending_draft(
                     user_id=user_id, case_id=session_id,
                 )
@@ -6022,13 +6052,7 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
             normalized = str(text).strip()
             if not normalized:
                 return
-            # Stop commands: cancel immediately — do not wait for the 1200 ms
-            # TurnAccumulator debounce window. drop_queued_below=101 also clears
-            # priority-100 user turns sitting in the response queue, so the AI
-            # cannot resume after the stop command is processed.
-            if SemanticTurnRouter._STOP_RE.match(" ".join(normalized.split())):
-                bridge.cancel_response(drop_queued_below=101, reason="stop-command-early")
-                _turn_accumulator.discard()  # drop any preceding partial fragment
+            # Every fragment is retained; semantic routing decides its meaning.
             _turn_accumulator.push(normalized)
 
         def proactive_interval_for() -> float:

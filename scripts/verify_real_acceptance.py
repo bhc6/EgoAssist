@@ -26,6 +26,8 @@ def verify(output, source):
         ("attribution-" + scenario, "verify_real_turn_attribution.py", ["--scenario", scenario])
         for scenario in ("rapid", "barge-in", "correction", "duplicate-reconnect", "disconnect-inflight", "automatic-completion", "cancellation")
     ] + [
+        ("voice-stop", "verify_real_voice_stop.py", []),
+        ("voice-stop-browser", "verify_real_voice_stop_browser.py", []),
         ("answer-recovery", "verify_real_answer_recovery.py", []),
         ("latency", "benchmark_realtime_latency.py", ["--repeats", "3"]),
         ("memory", "verify_real_memory.py", []),
