@@ -30,7 +30,7 @@ def restrict_unverified_speaker(semantic):
     value["intents"] = [i for i in value.get("intents", []) if i.get("kind") == "foreground-dialogue"]
     value["intentKind"] = "foreground-dialogue"
     control = value.get("interaction") or {}
-    if control.get("action") in {"cancel", "pause"}:
+    if not control or control.get("action") in {"cancel", "pause"}:
         value["interaction"] = {"audience": "uncertain", "action": "uncertain", "output": "silent"}
     value["speakerRestricted"] = True
     value["executionBoundary"] = "Unconfirmed microphone speaker: conversation evidence only; no owner-memory or task mutation"
@@ -58,6 +58,8 @@ class SharedScene:
         self.enriching = set()
         self.restored = False
         self.visual_questions = VisualQuestions(self)
+        self._http = None
+        self.transcription_limit = asyncio.Semaphore(2)
         for row in journal.entries():
             if row.get("type") == "scene.result":
                 self.last_vision = (0, row)
@@ -73,6 +75,11 @@ class SharedScene:
         if not path.exists():
             path.write_bytes(data)
         return {"assetId": path.name, "sha256": digest, "mime": mime, "bytes": len(data)}
+
+    def http(self):
+        if self._http is None or self._http.closed:
+            self._http = aiohttp.ClientSession(trust_env=True, connector=aiohttp.TCPConnector(limit=6))
+        return self._http
 
     def media(self, ref):
         name = ref["assetId"]
@@ -193,16 +200,26 @@ class SharedScene:
         except RuntimeError:
             return
         self.restored = True
+        if MODELS.available() and MODELS.diarizer is None:
+            task = asyncio.create_task(self.warm_speakers(), name="scene-speaker-warmup")
+            self.tasks.add(task)
+            task.add_done_callback(self.tasks.discard)
         for row in self.turns.values():
             if row.get("audio") and not row.get("utterances") and len({s.get("cluster") for s in row["speaker"].get("segments", [])}) > 1:
                 self.start_transcription(row["turnId"])
+
+    async def warm_speakers(self):
+        try:
+            result = await asyncio.to_thread(MODELS.warmup)
+        except Exception as exc:
+            result = {"status": "unavailable", "reason": type(exc).__name__}
+        self.journal.append("speaker.warmup", result)
 
     async def transcribe_segments(self, turn_id):
         row = self.turns[turn_id]
         with wave.open(io.BytesIO(self.media(row["audio"]))) as wav:
             pcm = wav.readframes(wav.getnframes())
         segments = row["speaker"].get("segments", [])
-        semaphore = asyncio.Semaphore(2)
 
         async def transcribe(segment):
             if any(other["cluster"] != segment["cluster"] and max(other["startMs"], segment["startMs"]) < min(other["endMs"], segment["endMs"])
@@ -220,8 +237,9 @@ class SharedScene:
             started = time.perf_counter()
             try:
                 import dashscope
-                async with semaphore, aiohttp.ClientSession(trust_env=True, timeout=aiohttp.ClientTimeout(total=10)) as http:
-                    async with http.post(dashscope.base_http_api_url.rstrip("/") + "/services/aigc/multimodal-generation/generation",
+                async with asyncio.timeout(10), self.transcription_limit:
+                    async with self.http().post(dashscope.base_http_api_url.rstrip("/") + "/services/aigc/multimodal-generation/generation",
+                        timeout=aiohttp.ClientTimeout(total=10),
                         headers={"Authorization": "Bearer " + self.api_key}, json={"model": request["model"],
                         "input": {"messages": [{"role": "system", "content": [{"text": request["prompt"]}]},
                                                 {"role": "user", "content": [{"audio": "data:audio/wav;base64," + base64.b64encode(output.getvalue()).decode()}]}]},
@@ -271,8 +289,9 @@ class SharedScene:
                 messages = [{"role": "system", "content": [{"text": request["prompt"]}]},
                             {"role": "user", "content": [{"image": "data:image/jpeg;base64," + base64.b64encode(self.media(ref)).decode()},
                                                             {"text": "Describe this frame. Frame ID: " + ref["frameId"]}]}]
-                async with aiohttp.ClientSession(trust_env=True, timeout=aiohttp.ClientTimeout(total=8)) as http:
-                    async with http.post(dashscope.base_http_api_url.rstrip("/") + "/services/aigc/multimodal-generation/generation",
+                async with asyncio.timeout(8):
+                    async with self.http().post(dashscope.base_http_api_url.rstrip("/") + "/services/aigc/multimodal-generation/generation",
+                        timeout=aiohttp.ClientTimeout(total=8),
                         headers={"Authorization": "Bearer " + self.api_key}, json={"model": model, "input": {"messages": messages},
                         "parameters": {"temperature": 0, "enable_thinking": False, "max_tokens": 600, "response_format": {"type": "json_object"}}}) as response:
                         response.raise_for_status()
@@ -352,4 +371,7 @@ class SharedScene:
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
+        if self._http is not None:
+            await self._http.close()
+            self._http = None
         self.restored = False

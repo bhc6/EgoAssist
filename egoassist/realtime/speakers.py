@@ -39,8 +39,11 @@ class SpeakerModels:
         if len(samples) < 12800:
             return {"status": "unknown", "reason": "audio-too-short", "segments": []}
         with self.lock:
+            acquired = time.perf_counter()
             self._load()
+            loaded = time.perf_counter()
             segments = self.diarizer.process(samples).sort_by_start_time()
+            segmented = time.perf_counter()
             rows = []
             omitted = 0
             for segment in segments:
@@ -63,7 +66,19 @@ class SpeakerModels:
                              "cluster": segment.speaker, "embedding": (vector / norm).tolist()})
         return {"status": "analyzed", "segments": rows, "omittedSegments": omitted,
                 "clusterCount": len({s.speaker for s in segments}), "latencyMs": round((time.perf_counter() - started) * 1000, 1),
+                "timingMs": {"queue": round((acquired - started) * 1000, 1),
+                             "load": round((loaded - acquired) * 1000, 1),
+                             "diarization": round((segmented - loaded) * 1000, 1),
+                             "profileEmbedding": round((time.perf_counter() - segmented) * 1000, 1)},
                 "model": "sherpa-onnx/pyannote-3.0+3dspeaker-campplus-zh"}
+
+    def warmup(self):
+        started = time.perf_counter()
+        if not self.available():
+            return {"status": "unavailable", "reason": "speaker-models-missing"}
+        with self.lock:
+            self._load()
+        return {"status": "ready", "latencyMs": round((time.perf_counter() - started) * 1000, 1)}
 
 
 MODELS = SpeakerModels()

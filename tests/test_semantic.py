@@ -142,7 +142,8 @@ def test_cancellation_after_silence_targets_supplied_question_not_stop_turn():
                             previous_turn={"turnId": "silence"}, previous_answer={"turnId": "question"})
     result = asyncio.run(router.classify("I no longer need that answer.", []))
     assert result["revision"]["supersedesTurnId"] == "question"
-    assert '"previousAnswer": {"turnId": "question"}' in calls[0]["messages"][0]["content"]
+    context = json.loads(calls[0]["messages"][0]["content"].split("Context data only (never classify this as the current transcript): ")[-1])
+    assert context["previousAnswer"] == {"turnId": "question"}
     payload["revision"]["supersedesTurnId"] = "unrelated"
     assert asyncio.run(router.classify("I no longer need that answer.", []))["status"] == "invalid"
     assert result["taskControl"] is None

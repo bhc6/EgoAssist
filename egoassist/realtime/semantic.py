@@ -17,7 +17,7 @@ from egoassist.prompts import prompt_text
 from .router_protocol import EVENT_CONTENT_FIELDS, ROUTER_PROMPT, expand_decision
 
 
-TURN_ROUTER_POLICY_VERSION = "semantic-turn-router-v16"
+TURN_ROUTER_POLICY_VERSION = "semantic-turn-router-v17"
 TASK_CONTROLS = {
     "none", "confirm-step", "rollback", "repeat",
     "pause-task", "resume-task", "request-help", "show-reference",
@@ -649,6 +649,7 @@ class SemanticTurnRouter:
                     response.raise_for_status()
                     payload = await response.json()
                 audit["requestId"] = payload.get("request_id")
+                audit["usage"] = payload.get("usage")
                 audit["rawOutput"] = payload["output"]["choices"][0]["message"]["content"]
                 return json.loads(audit["rawOutput"]).get("cancel") is True
         except Exception as exc:
@@ -672,12 +673,18 @@ class SemanticTurnRouter:
                          "playback": context.get("playback"), "outputPermission": context.get("outputPermission"),
                          "scene": context.get("scene")}
                         if any(context.values()) else {})
+        from .router_context import project_context
+        metrics["contextOriginalChars"] = len(json.dumps(context_data, ensure_ascii=False))
+        context_data = project_context(context_data) if context_data else {}
+        context_json = json.dumps(context_data, ensure_ascii=False, separators=(",", ":"))
+        metrics["contextSentChars"] = len(context_json)
         arguments = dict(
             model=self.model,
             messages=[
-                {"role": "system", "content": prompt_text("scene/router") + "\n" + prompt_text("interaction/router") + "\n" + ROUTER_PROMPT + json.dumps(catalog, ensure_ascii=False)
+                {"role": "system", "content": prompt_text("interaction/router") + "\n" + ROUTER_PROMPT + json.dumps(catalog, ensure_ascii=False)
+                 + "\n" + prompt_text("scene/router")
                  + "\nContext data only (never classify this as the current transcript): "
-                 + json.dumps(context_data, ensure_ascii=False)},
+                 + context_json},
                 {"role": "user", "content": text},
             ],
             result_format="message", temperature=0, enable_thinking=False,

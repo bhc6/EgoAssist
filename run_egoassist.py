@@ -6225,8 +6225,10 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                 image_value = str(payload.get("image", ""))
                 owner.scene.append_frame(image_value, payload.get("capture"))
                 media_audit.record_video(len(image_value))
-                if bridge.append_video(image_value):
-                    bridge.maybe_check_proactively(proactive_interval_for())
+                bridge.append_video(image_value)
+                # The isolated task observer has its own audio ordering token;
+                # observation must also work while the wearer is silent.
+                bridge.maybe_check_proactively(proactive_interval_for())
                 return True
             if kind == "media_gap":
                 media = str(payload.get("media", "unknown"))

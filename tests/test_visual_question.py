@@ -103,3 +103,32 @@ def test_end_to_end_latency_belongs_to_original_turn_and_updates_while_streaming
     assert second["answer"]["inputToFirstAudioMs"] == 2000
     assert first["answer"]["model"] == "actual-model"
     assert "inputToCompleteMs" not in first["answer"]
+
+
+def test_scene_http_connection_reused_across_visual_lanes_and_closed(tmp_path, monkeypatch):
+    import dashscope
+
+    async def run():
+        scene = scene_with_frame(tmp_path)
+        transports = []
+
+        async def answer(request):
+            body = await request.json()
+            transports.append(request.transport)
+            text = '{"description":"red","people":[]}' if body["parameters"].get("response_format") else "red"
+            return web.json_response({"output": {"choices": [{"message": {"content": [{"text": text}]}, "finish_reason": "stop"}]}})
+
+        app = web.Application()
+        app.router.add_post("/services/aigc/multimodal-generation/generation", answer)
+        async with TestServer(app) as server:
+            monkeypatch.setattr(dashscope, "base_http_api_url", str(server.make_url("")))
+            for turn in ("question-one", "question-two"):
+                result = await scene.context(turn, describe_frame=True, question="color")
+                assert result["visual"]["status"] == "observed"
+            assert (await scene.describe(scene.turns["question-one"]["frame"]))["status"] == "observed"
+            assert len(transports) == 3 and len(set(transports)) == 1
+            http = scene.http()
+            await scene.close()
+            assert http.closed
+        await scene.close()
+    asyncio.run(run())

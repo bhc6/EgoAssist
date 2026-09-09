@@ -45,9 +45,10 @@ class VisualQuestions:
             "turnId": turn_id, "frame": frame, "model": model, "prompt": prompt, "question": question})
         result = {"turnId": turn_id, "frame": frame, "model": model, "scope": "question-specific"}
         try:
-            async with asyncio.timeout(self.timeout), self.limit, aiohttp.ClientSession(trust_env=True, timeout=aiohttp.ClientTimeout(total=self.timeout)) as http:
+            async with asyncio.timeout(self.timeout), self.limit:
                 self.progress[turn_id]["status"] = "waiting-provider"
-                async with http.post(dashscope.base_http_api_url.rstrip("/") + "/services/aigc/multimodal-generation/generation",
+                async with self.scene.http().post(dashscope.base_http_api_url.rstrip("/") + "/services/aigc/multimodal-generation/generation",
+                    timeout=aiohttp.ClientTimeout(total=self.timeout),
                     headers={"Authorization": "Bearer " + self.scene.api_key}, json={"model": model,
                     "input": {"messages": [{"role": "system", "content": [{"text": prompt}]},
                         {"role": "user", "content": [{"image": "data:image/jpeg;base64," + base64.b64encode(self.scene.media(frame)).decode()},

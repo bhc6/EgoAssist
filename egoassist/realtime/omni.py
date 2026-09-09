@@ -225,6 +225,8 @@ class _OmniPerceptionLane:
         self._generation = 0
         self._connect_lock = asyncio.Lock()
         self._reconnect_scheduled = False
+        self._request_started = None
+        self._response_starts = {}
 
     def _new_conversation(self, generation: int):
         lane = self
@@ -243,15 +245,27 @@ class _OmniPerceptionLane:
                     return
                 event_type = str(response.get("type", ""))
                 if event_type == "response.created":
+                    lane._response_starts[lane._response_id(response)] = lane._request_started
                     lane.trace("perception.response.created", {"lane": "perception"}, response_id=lane._response_id(response))
                 elif event_type in {"response.text.delta", "response.audio_transcript.delta"}:
                     lane._buffer += str(response.get("delta", ""))
                 elif event_type in {"response.text.done", "response.audio_transcript.done"}:
-                    lane._finish(str(response.get("text") or response.get("transcript") or lane._buffer))
+                    # The text event is not terminal; the previous response.done
+                    # must not consume a subsequently dispatched frame.
+                    lane._buffer = str(response.get("text") or response.get("transcript") or lane._buffer)
                 elif event_type == "response.done":
+                    response_id = lane._response_id(response)
+                    started = lane._response_starts.pop(response_id, None)
+                    lane.trace("perception.response.finished", {
+                        "lane": "perception", "model": lane.model,
+                        "usage": OmniBrowserBridge._response_usage(response),
+                        "providerStatus": (response.get("response") or {}).get("status"),
+                        "latencyMs": round((time.monotonic() - started) * 1000, 1) if started is not None else None,
+                    }, response_id=response_id)
                     if lane.active:
                         lane._finish(lane._buffer)
                 elif event_type in {"response.failed", "response.cancelled"}:
+                    lane._response_starts.pop(lane._response_id(response), None)
                     lane._finish("")
                 elif event_type == "error":
                     if _is_response_idle_timeout(response):
@@ -318,6 +332,7 @@ class _OmniPerceptionLane:
         self.active = True
         self.active_context = context
         self._buffer = ""
+        self._request_started = time.monotonic()
         try:
             # Qwen Omni requires audio to precede an image. This lane uses a
             # deterministic silent ordering token, never user microphone data.
@@ -331,6 +346,7 @@ class _OmniPerceptionLane:
             )
             self.trace("perception.response.requested", {
                 "lane": "perception", "imageBase64Bytes": len(frame), "microphoneShared": False,
+                "model": self.model, "instructions": instructions,
                 "frameId": context.get("frame_id") if context else None,
                 "contextId": context.get("context_id") if context else None,
                 "schemaVersion": context.get("schema_version") if context else None,
@@ -370,6 +386,8 @@ class _OmniPerceptionLane:
     def _schedule_reconnect(self, reason: str) -> None:
         if self.closed or self._reconnect_scheduled or not self.loop.is_running():
             return
+        if not self.active and self.pending_frame is None:
+            return
         self._reconnect_scheduled = True
         asyncio.run_coroutine_threadsafe(self._recover(reason), self.loop)
 
@@ -383,6 +401,7 @@ class _OmniPerceptionLane:
             self.active = False
             self.active_context = None
             self._generation += 1
+            self._response_starts.clear()
             if old:
                 try:
                     await asyncio.to_thread(old.close)
@@ -398,6 +417,8 @@ class _OmniPerceptionLane:
     def snapshot(self) -> dict[str, Any]:
         return {
             "connected": self.connected,
+            "connectionPolicy": "on-demand",
+            "connectionState": "ready" if self.connected else "connecting" if self._reconnect_scheduled else "idle",
             "active": self.active,
             "pendingFrame": bool(self.pending_frame),
             "activeContextId": self.active_context.get("context_id") if self.active_context else None,
@@ -629,10 +650,7 @@ class OmniBrowserBridge:
             await self.emit({"type": "provider_unavailable", "lane": "dialogue", "reason": message})
             await self.emit({"type": "ready", "lanes": self.provider_lanes_snapshot()})
             return
-        try:
-            await self.perception.connect()
-        except Exception as exc:
-            self._trace("provider.session.connect_failed", {"lane": "perception", "error": str(exc)})
+        # The isolated observation lane connects when its first frame is requested.
         self.connecting = False
         await self.emit({"type": "ready", "lanes": self.provider_lanes_snapshot()})
         for call_id, pending in getattr(self, "_pending_tool_calls", {}).items():

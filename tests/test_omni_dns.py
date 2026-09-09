@@ -369,6 +369,47 @@ def test_silent_or_malformed_gate_never_schedules_user_visible_response():
         assert bridge._last_assistant_utterance == ""
 
 
+def test_perception_text_done_does_not_release_next_frame_before_terminal_event():
+    async def scenario():
+        decisions, traces, requests = [], [], []
+
+        class Conversation:
+            def __init__(self, **kwargs):
+                self.callback = kwargs["callback"]
+
+            def append_audio(self, value):
+                pass
+
+            def append_video(self, value):
+                requests.append(value)
+
+            def commit(self):
+                pass
+
+            def create_response(self, **kwargs):
+                pass
+
+        lane = _OmniPerceptionLane(api_key="test", model="test", voice="Ethan", loop=asyncio.get_running_loop(),
+            conversation_cls=Conversation, callback_cls=object, modalities=FakeModalities,
+            on_decision=lambda decision: decisions.append(decision), trace=lambda event, payload, **kw: traces.append((event, payload)))
+        assert lane.snapshot()["connectionState"] == "idle"
+        lane.conversation = lane._new_conversation(0)
+        lane.connected = True
+        callback = lane.conversation.callback
+        lane.request("first-frame")
+        callback.on_event({"type": "response.created", "response": {"id": "one"}})
+        lane.request("second-frame")
+        callback.on_event({"type": "response.text.done", "text": '{"speak":false,"utterance":"","reason":"none","urgency":"low"}'})
+        await asyncio.sleep(0)
+        assert requests == ["first-frame"] and lane.active and not decisions
+        callback.on_event({"type": "response.done", "response": {"id": "one", "status": "completed", "usage": {"input_tokens": 8, "output_tokens": 3}}})
+        await asyncio.sleep(0)
+        assert requests == ["first-frame", "second-frame"] and lane.active and len(decisions) == 1
+        finished = next(p for e, p in traces if e == "perception.response.finished")
+        assert finished["usage"]["inputTokens"] == 8 and finished["latencyMs"] >= 0
+    asyncio.run(scenario())
+
+
 def test_exact_response_id_controls_conversation_visibility():
     bridge = scheduler_bridge()
     bridge.perception = type("Perception", (), {"active": True})()
