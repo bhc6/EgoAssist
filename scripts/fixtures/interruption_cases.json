@@ -1,0 +1,29 @@
+{
+  "description": "Authored Chinese text probes, not recorded human speech. Expectations describe control semantics, not overall product acceptance. Audio mode synthesizes selected cases with real Qwen TTS.",
+  "context": {
+    "previousTurn": {"turnId": "question-b", "text": "请解释乘法原理。", "status": "completed"},
+    "previousAnswer": {"turnId": "question-b", "text": "请解释乘法原理。", "status": "foreground"}
+  },
+  "cases": [
+    {"id": "silence-indirect", "text": "耳边有点吵，给我留点安静吧。", "stop": true, "cancel": false},
+    {"id": "silence-social", "text": "我得先听清对面的人说什么，你先不要出声。", "stop": true, "cancel": false},
+    {"id": "silence-politeness", "text": "能不能让我清静一会儿？", "stop": true, "cancel": false},
+    {"id": "withdraw-need", "text": "刚才的问题我已经弄明白了，不需要你再回答。", "stop": true, "cancel": true},
+    {"id": "withdraw-effort", "text": "这个问题别再花时间算了，我已经不需要这个答案。", "stop": true, "cancel": true},
+    {"id": "negation", "text": "我没有让你停止回答，请继续。", "stop": false, "cancel": false},
+    {"id": "quotation", "text": "如果别人对我说别讲了，我应该怎么回应？", "stop": false, "cancel": false},
+    {"id": "self-correction-continue", "text": "不要再说了，啊我说错了，你继续讲。", "stop": false, "cancel": false},
+    {"id": "self-correction-stop", "text": "继续，等等，我改主意了，先别出声。", "stop": true, "cancel": false},
+    {"id": "compound-new", "text": "先停一下，直接告诉我九乘九的结果。", "stop": false, "cancel": false},
+    {"id": "compound-withdraw", "text": "乘法原理不用解释了，改为告诉我今天是星期几。", "stop": false, "withdrawn": true},
+    {"id": "continue", "text": "接着你刚才没讲完的地方往下说。", "stop": false, "cancel": false, "unsupportedRequirement": "Resume the original answer at the played boundary, not a new independent answer."},
+    {"id": "backchannel", "text": "嗯嗯。", "cancel": false, "unsupportedRequirement": "Distinguish listener backchannel from a new turn using speech/context, and recover paused playback."},
+    {"id": "third-party-explicit", "text": "小王，你先别说话。助手你接着解释。", "stop": false, "cancel": false},
+    {"id": "third-party-only", "text": "小王，你先别说话。", "stop": false, "cancel": false, "unsupportedRequirement": "Do not produce an assistant response to speech addressed to another person."},
+    {"id": "older-target", "text": "不要再回答之前那个订酒店的问题，乘法这个问题继续。", "stop": false, "cancel": false, "unsupportedRequirement": "Cancel the older hotel answer; do not cancel supplied question-b. Current context/schema cannot target the older answer."},
+    {"id": "quiet-duration", "text": "接下来五分钟不要主动说话，等我问你再回答。", "cancel": false, "unsupportedRequirement": "Persist output permission through proactive events and reconnect; preserve the explicit duration and release condition."},
+    {"id": "text-only-result", "text": "别念出来，继续整理好后放到屏幕上。", "cancel": false, "unsupportedRequirement": "Complete work silently while allowing text delivery; current compound-stop normalization can remove the silence flag."},
+    {"id": "ambiguous-enough", "text": "够了。", "unsupportedRequirement": "Context and prosody can imply silence, acknowledgement, or withdrawal; do not invent a single ground-truth label."},
+    {"id": "ambiguous-forget", "text": "算了。", "unsupportedRequirement": "Needs the actual assistant utterance and task context; preserve evidence when intent remains ambiguous."}
+  ]
+}
