@@ -606,7 +606,7 @@ function renderAmbient() {
       ? esc((latest.observed ? "已看到 " + (latest.activityId || "") : "本帧未看到该行为") +
           " · " + (latest.locationId || "unknown"))
       : "尚无观测结果") + "</span>" +
-    "<span class='ambient-note'>不判断是否吞下、不判断药物种类；原始画面不留存。</span>" +
+    "<span class='ambient-note'>不判断是否吞下、不判断药物种类；不确定时会先提一个澄清问题，确认后才保存；原始画面不留存。</span>" +
     "<button id='ambientRevoke'>撤回授权</button>";
   $("#ambientRevoke").onclick = () => setAmbientConsent(false);
 }
