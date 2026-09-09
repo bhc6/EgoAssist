@@ -2,6 +2,11 @@ const memoryKinds = {scene: "场景", event: "事件", fact: "事实", state: "�
   "task-preference": "任务偏好", observation: "观测", "tool-effect": "工具结果", legacy: "旧记录"};
 const memoryScopeLabel = value => ({case: "当前会话", participant: "跨会话"}[value] || value || "未记录");
 let memoryViewSession = null;
+const memoryEventLabels = {
+  "episodic.memory.retrieved": "检索完成", "episodic.memory.injected": "证据已注入",
+  "episodic.memory.written": "记忆已写入", "response.served.memory_transaction": "记忆事务完成",
+  "memory.candidate": "等待记忆确认", "memory_status": "记忆状态更新",
+};
 
 function memoryTime(value, timezone) {
   if (!value) return "未记录";
@@ -41,6 +46,28 @@ function renderMemoryRetrieval(episodic) {
   updateDisclosureHTML(document.querySelector("#timelineRetrievalSummary"), html, selectedSessionId);
 }
 
+function renderMemoryActivity() {
+  const root = document.querySelector("#memoryActivity");
+  const status = document.querySelector("#memoryActivityStatus");
+  if (!root) return;
+  const events = (state?.events || []).filter(event => {
+    const type = event.type || event.eventType || event.payload?.type;
+    return type && (memoryEventLabels[type] || type.includes("memory"));
+  }).slice(-12).reverse();
+  if (status) status.textContent = events.length ? "最近 " + events.length + " 个事件" : "暂无记忆事件";
+  const html = events.length ? events.map(event => {
+    const type = event.type || event.eventType || event.payload?.type;
+    const payload = event.payload || event;
+    const turnId = payload.turnId || payload.origin?.turnId;
+    const detail = payload.status || payload.reason || payload.storageScope || payload.method || "已记录";
+    return "<li><time>" + esc(eventTime(event)) + "</time><b>" + esc(memoryEventLabels[type] || type) +
+      "</b><span>" + esc(detail) + (turnId ? " · 对话 " + esc(turnId.slice(0, 8)) : "") +
+      "</span><details data-disclosure='activity-" + esc(event.eventId || event.id || type) + "'><summary>原始事件</summary><pre>" +
+      esc(JSON.stringify(event, null, 2)) + "</pre></details></li>";
+  }).join("") : "<li class='memory-activity-empty'>尚未发生记忆写入或检索</li>";
+  updateDisclosureHTML(root, html, selectedSessionId);
+}
+
 function memoryCardHTML(card, injected) {
   const evidence = card.evidenceContext || card.metadata?.evidenceContext || {};
   const field = (label, value) => "<dt>" + esc(label) + "</dt><dd>" + esc(value) + "</dd>";
@@ -69,6 +96,7 @@ function renderTimelineCards(episodic = {}) {
     document.querySelector("#memoryFilterScope").value = "";
   }
   renderMemoryRetrieval(episodic);
+  renderMemoryActivity();
   const cards = memoryRecords(episodic);
   const query = document.querySelector("#memorySearch").value.trim().toLocaleLowerCase();
   const scope = document.querySelector("#memoryFilterScope").value;
