@@ -686,6 +686,25 @@ def test_generic_start_routes_skill_then_task_without_default_recipe(tmp_path):
     asyncio.run(scenario())
 
 
+@pytest.mark.parametrize("scoped", [False, True])
+def test_repeated_skill_activation_keeps_selected_task(tmp_path, scoped):
+    async def scenario():
+        app = create_app(str(BUILTIN_SKILLS_ROOT), None, str(tmp_path / "memory.json"), "test-realtime", "Ethan")
+        async with TestClient(TestServer(app)) as client:
+            await register_client(client)
+            scope = {}
+            if scoped:
+                sid = (await (await client.post("/api/sessions")).json())["session"]["id"]
+                scope = {"sessionId": sid}
+            await client.post("/api/skills/activate", json={**scope, "skill": "kitchen-coach"})
+            await client.post("/api/tasks/select", json={**scope, "task": "fruit-salad"})
+            repeated = await (await client.post(
+                "/api/skills/activate", json={**scope, "skill": "kitchen-coach"},
+            )).json()
+            assert repeated["task"]["task"]["id"] == "fruit-salad"
+    asyncio.run(scenario())
+
+
 def test_case_scoped_skill_lifecycle_is_durable_and_isolated(tmp_path):
     async def scenario():
         app = create_app(
@@ -1358,6 +1377,58 @@ def test_websocket_sessions_isolate_runtime_memory_and_resume_from_journal(tmp_p
     asyncio.run(scenario())
 
 
+def test_rejected_skill_proposal_preserves_runtime_and_exit_clears_bridge(tmp_path, monkeypatch):
+    instances = install_queue_test_bridge(monkeypatch)
+
+    async def classify(_self, text, catalog):
+        result = semantic_result(text, selected_skill=(
+            "assembly-coach" if text == "assemble flat pack stool" else "kitchen-coach"
+        ))
+        if text == "exit current skill":
+            result.update(selectedSkill=None, skillControl="deactivate")
+        return result
+
+    monkeypatch.setattr(run_egoassist.SemanticTurnRouter, "classify", classify)
+
+    async def scenario():
+        app = create_app(str(BUILTIN_SKILLS_ROOT), None, str(tmp_path / "memory.json"), "test-realtime", "Ethan")
+        async with TestClient(TestServer(app)) as client:
+            await register_client(client)
+            sid = (await (await client.post("/api/sessions")).json())["session"]["id"]
+            async with client.ws_connect(f"/ws/realtime?session={sid}") as ws:
+                await _recv(ws)
+                await _recv(ws)
+
+                async def spoken(text):
+                    instances[0].on_transcript(text)
+                    return (await _recv_wait(ws, timeout=2))["state"]
+
+                active = await spoken("assemble flat pack stool")
+                assert {item["name"] for item in instances[0].declarations} == {"show_reference"}
+                unchanged = await spoken("Write a note to the front desk")
+                assert unchanged["activeSkill"] == active["activeSkill"]
+                assert unchanged["task"]["currentCheckpointId"] == "inventory"
+                assert unchanged["intentRouting"]["status"] == "unverified-domain-intent"
+                assert '<skill name="assembly-coach">' in instances[0].instructions
+                assert '<skill name="kitchen-coach">' not in instances[0].instructions
+
+                exited = await spoken("exit current skill")
+                assert exited["task"] is None
+                assert exited["activeSkill"] is None
+                assert instances[0].declarations == []
+                assert '<skill name=' not in instances[0].instructions
+                assert '<runtime_state>' not in instances[0].instructions
+                rejected = await spoken("Write another note to the front desk")
+                assert rejected["activeSkill"] is None
+                assert rejected["task"] is None
+                assert instances[0].declarations == []
+                restarted = await spoken("assemble flat pack stool")
+                assert restarted["task"]["currentCheckpointId"] == "inventory"
+                assert restarted["task"]["stepIndex"] == 0
+
+    asyncio.run(scenario())
+
+
 def test_realtime_transcripts_are_classified_and_committed_in_fifo_order(tmp_path, monkeypatch):
     instances = install_queue_test_bridge(monkeypatch)
     first_started = asyncio.Event()
@@ -1626,7 +1697,8 @@ def test_result_inbox_item_can_be_explicitly_dismissed(tmp_path):
     asyncio.run(scenario())
 
 
-def test_reset_cancels_pending_semantic_turn_before_durable_deactivation(tmp_path, monkeypatch):
+@pytest.mark.parametrize("endpoint", ["/api/task/reset", "/api/skills/activate"])
+def test_reset_cancels_pending_semantic_turn_before_durable_deactivation(tmp_path, monkeypatch, endpoint):
     instances = install_queue_test_bridge(monkeypatch)
     classification_started = asyncio.Event()
     classification_cancelled = asyncio.Event()
@@ -1661,12 +1733,12 @@ def test_reset_cancels_pending_semantic_turn_before_durable_deactivation(tmp_pat
             await ws.receive_json()
             await ws.receive_json()
 
-            instances[0].on_transcript("slow old turn")
+            instances[0].on_transcript("assemble flat pack stool")
             await asyncio.wait_for(classification_started.wait(), timeout=1)
 
             async def reset_case():
                 return await (await client.post(
-                    "/api/task/reset", json={"sessionId": session_id},
+                    endpoint, json={"sessionId": session_id, "skill": ""},
                 )).json()
 
             reset_task = asyncio.create_task(reset_case())
@@ -1683,17 +1755,28 @@ def test_reset_cancels_pending_semantic_turn_before_durable_deactivation(tmp_pat
             assert restored["activeSkill"] is None
             assert restored["task"] is None
 
+            reopened = await client.ws_connect(f"/ws/realtime?session={session_id}")
+            await _recv(reopened)
+            reopened_state = (await _recv(reopened))["state"]
+            assert reopened_state["activeSkill"] is None
+            assert reopened_state["task"] is None
+            assert instances[-1].declarations == []
+            await reopened.close()
+
         journal = tmp_path / "users" / user["id"] / "sessions" / f"{session_id}.jsonl"
         entries = [json.loads(line) for line in journal.read_text(encoding="utf-8").splitlines()]
         checkpoints = [item for item in entries if item.get("type") == "state_checkpoint"]
         assert checkpoints[-1]["state"]["skill"] is None
         assert any(
-            item.get("type") == "message" and item.get("message", {}).get("content") == "slow old turn"
+            item.get("type") == "message" and item.get("message", {}).get("content") == "assemble flat pack stool"
             for item in entries
         )
         inbox = [item for item in entries if item.get("type") == "turn_inbox"]
-        assert inbox[-1]["text"] == "slow old turn"
+        assert inbox[-1]["text"] == "assemble flat pack stool"
         assert inbox[-1]["status"] == "received"
+        restored_ledger = CaseWorkLedger(SessionJournal(journal, session_id=session_id))
+        assert restored_ledger.recoverable_turns() == []
+        assert restored_ledger.turns()[inbox[-1]["turnId"]]["status"] == "cancelled"
 
     asyncio.run(scenario())
 

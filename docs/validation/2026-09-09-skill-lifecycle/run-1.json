@@ -1,0 +1,35 @@
+{
+  "mock": false,
+  "model": "qwen3.5-omni-flash-realtime",
+  "passed": false,
+  "error": "KeyError: 'id'",
+  "sessionId": "fadd94b20a3843a8",
+  "turns": [
+    {
+      "input": "我要做番茄炒蛋，请告诉我第一步。",
+      "passed": false,
+      "firstAudioMs": 1178,
+      "transcript": "好的，我们先来准备食材。你需要准备鸡蛋、番茄、少量油和盐。请确认这些材料和工具是否都在操作区？",
+      "terminal": {
+        "sequence": 1,
+        "status": "response.done",
+        "usage": {
+          "inputTokens": 2102,
+          "outputTokens": 130,
+          "totalTokens": 2232,
+          "inputTokenDetails": {
+            "text_tokens": 2102
+          },
+          "outputTokenDetails": {
+            "text_tokens": 29,
+            "audio_tokens": 101
+          }
+        },
+        "fragmentCommitted": true,
+        "interrupted": false,
+        "localCancelRequested": false
+      }
+    }
+  ],
+  "classification": "Acceptance script used id instead of artifact_id; fixed before run 2."
+}

@@ -202,6 +202,11 @@ class CaseWorkLedger:
                     self.set_job_status(job_id, "cancelled", detail={"reason": "turn-superseded", "supersededBy": str(turn_id)})
         return entry
 
+    def cancel_pending_turns(self, *, reason: str) -> None:
+        """Keep transcripts for audit but prevent replay after explicit reset/exit."""
+        for turn in self.recoverable_turns():
+            self.set_turn_status(turn["turnId"], "cancelled", detail={"reason": reason})
+
     def recoverable_turns(self) -> list[dict[str, Any]]:
         turns = [item for item in self.turns().values() if item.get("status") in TURN_OPEN_STATUSES]
         for item in turns:

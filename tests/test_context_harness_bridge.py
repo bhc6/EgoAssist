@@ -123,6 +123,19 @@ def test_completed_transcript_buffer_is_not_recommitted_at_response_end(tmp_path
     assert messages[0]["message"]["content"] == "durable answer"
 
 
+def test_skill_exit_sends_empty_tools_and_general_context_to_provider(tmp_path):
+    bridge = make_bridge(harness_at(tmp_path / "exit.jsonl"))
+    bridge.set_tools([{
+        "name": "show_reference", "description": "Reference",
+        "arguments": {"type": "object", "properties": {}},
+    }], lambda *args: {})
+    assert bridge.conversation.sessions[-1]["tools"]
+    bridge.set_tools([], lambda *args: {})
+    bridge.apply_context_projection("General assistant; no active Skill.", {})
+    assert bridge.conversation.sessions[-1]["tools"] == []
+    assert bridge.conversation.sessions[-1]["instructions"] == "General assistant; no active Skill."
+
+
 def test_declared_tool_executes_and_commits_result_before_continuation(tmp_path):
     harness = harness_at(tmp_path / "tool.jsonl")
     bridge = make_bridge(harness)

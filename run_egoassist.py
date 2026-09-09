@@ -1089,6 +1089,8 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
         target_skill = str(skill_name or '').strip() or None
         if target_skill:
             registry.get(target_skill)
+        CaseWorkLedger(journal).cancel_pending_turns(reason=f'skill-lifecycle:{source}')
+        if target_skill:
             if previous_skill == target_skill:
                 action = 'unchanged'
             else:
@@ -2530,6 +2532,8 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
         user_id = request[user_key]["id"]
         payload = await request.json()
         skill_name = str(payload.get("skill", "")).strip()
+        if skill_name:
+            registry.get(skill_name)
         session_id = str(payload.get("sessionId", "")).strip() or None
         if session_id:
             identity.get_context_session(user_id, session_id)
@@ -2549,8 +2553,7 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
         await invalidate_live_sessions(user_id)
         if not skill_name:
             active_runtime.deactivate()
-        else:
-            registry.get(skill_name)
+        elif not active_runtime.skill or active_runtime.skill.name != skill_name:
             active_runtime.activate(skill_name, select_default=False)
         user_routing[user_id] = registry.route("")
         return await get_state(request)
