@@ -19,7 +19,7 @@ function renderTurnWorkflow() {
   const scene = state?.sharedScene?.utterances?.find(row => row.turnId === turn.turnId);
   const answer = turn.answer, speaker = scene?.speaker;
   const semantic = turn.semantic;
-  const pendingVision = state.sharedScene?.visionPending?.find(p => p.frameId === scene?.frame?.frameId);
+  const pendingVision = state.sharedScene?.questionVisionPending?.find(p => p.turnId === turn.turnId);
   const events = (state.events || []).filter(e => e.payload?.turnId === turn.turnId ||
     e.payload?.origin?.turnId === turn.turnId || (answer?.responseId && e.responseId === answer.responseId));
   const elapsed = answer?.startedAt && answer.status === "running" ?
@@ -40,6 +40,9 @@ function renderTurnWorkflow() {
       semantic?.memoryQuery ? "本轮请求检索记忆" : semantic?.memoryText ? "本轮包含记忆候选" : "本轮没有显式记忆请求") +
     row("回答模型", answer?.model || "尚无该问题的回答模型记录") +
     row("分类耗时", semantic?.latencyMs != null ? semantic.latencyMs + " ms" : "尚未完成测量") +
+    row("接收到首字", answer?.inputToFirstTextMs != null ? answer.inputToFirstTextMs + " ms" : "尚未收到文字") +
+    row("接收到首音频", answer?.inputToFirstAudioMs != null ? answer.inputToFirstAudioMs + " ms" : "尚未收到音频") +
+    row("接收到完整回答", answer?.inputToCompleteMs != null ? answer.inputToCompleteMs + " ms" : "尚未完成") +
     row("回答耗时", answer?.durationMs != null ? answer.durationMs + " ms" : answer?.generationMs != null ? answer.generationMs + " ms（响应创建至完成）" : "尚未完成测量") +
     (answer?.error ? row("失败原因", answer.error) : "") +
     (semantic ? "<details><summary>分类结果与依据</summary><pre>" + esc(JSON.stringify(semantic, null, 2)) + "</pre></details>" : "") +

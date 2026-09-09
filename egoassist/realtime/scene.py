@@ -18,6 +18,7 @@ from PIL import Image
 
 from egoassist.prompts import prompt_text
 from .speakers import MODELS, SpeakerRegistry
+from .visual_question import VisualQuestions
 
 
 def restrict_unverified_speaker(semantic):
@@ -56,6 +57,7 @@ class SharedScene:
         self.vision_progress = {}
         self.enriching = set()
         self.restored = False
+        self.visual_questions = VisualQuestions(self)
         for row in journal.entries():
             if row.get("type") == "scene.result":
                 self.last_vision = (0, row)
@@ -296,7 +298,7 @@ class SharedScene:
                     self.vision_by_frame.pop(next(iter(self.vision_by_frame)))
             return result
 
-    async def context(self, turn_id, *, describe_frame=False):
+    async def context(self, turn_id, *, describe_frame=False, question=None):
         row = self.turns.get(turn_id)
         if not row:
             return None
@@ -306,7 +308,10 @@ class SharedScene:
         ref = row.get("frame")
         visual = self.vision_by_frame.get(ref["frameId"], {"status": "frame-available", "frame": ref}) if ref else {"status": "no-frame"}
         if ref and describe_frame and self.api_key:
-            visual = await self.describe(ref)
+            if question and os.getenv("EGOASSIST_VISUAL_QUESTION_MODE", "focused") == "focused":
+                visual = await self.visual_questions.observe(turn_id, question, ref)
+            else:
+                visual = await self.describe(ref)
         if ref:
             visual = {**visual, "descriptionFrameReceivedAt": (visual.get("frame") or {}).get("receivedAt"), "frame": ref}
         row = self.turns.get(turn_id, row)
@@ -330,6 +335,10 @@ class SharedScene:
     def snapshot(self):
         return {"camera": "receiving" if self.frames and time.monotonic() - self.frames[-1]["monotonic"] < 5 else "no-fresh-frame",
                 "vision": self.last_vision[1] if self.last_vision else None,
+                "questionVisionPending": [{"turnId": p["turnId"], "frameId": p["frameId"], "status": p["status"],
+                    "elapsedMs": round((time.monotonic() - p["started"]) * 1000),
+                    "model": os.getenv("EGOASSIST_VISUAL_QUESTION_MODEL", "qwen3-vl-flash")}
+                    for p in self.visual_questions.progress.values()],
                 "visionPending": [{"frameId": p["frameId"], "status": p["status"],
                                    "elapsedMs": round((time.monotonic() - p["started"]) * 1000),
                                    "model": os.getenv("EGOASSIST_SCENE_MODEL", "qwen3-vl-flash"), "requestTimeoutMs": 8000}

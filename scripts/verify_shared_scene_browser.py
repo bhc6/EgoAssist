@@ -49,6 +49,8 @@ async def verify(output):
                     tid = await page.evaluate("currentTurnId")
                     await page.wait_for_function("id => state?.workLedger?.turnInbox.some(t => t.turnId === id && t.answer?.status === 'completed' && t.answer?.text)", arg=tid, timeout=60000)
                     turn = await page.evaluate("id => state.workLedger.turnInbox.find(t => t.turnId === id)", tid)
+                    assert turn["answer"]["inputToFirstAudioMs"] > 0
+                    assert turn["answer"]["inputToCompleteMs"] >= turn["answer"]["inputToFirstAudioMs"]
                     return {"turn": turn, "wallMs": round((time.perf_counter() - started) * 1000, 1)}
 
                 report["textFirst"] = await question("七乘八是多少？只回答数字。")

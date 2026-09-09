@@ -2262,7 +2262,7 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
         identity.get_context_session(user_id, session_id)
         owner = case_owner(user_id, session_id)
         rows = owner.journal.entries()
-        actual = [row for row in rows if row.get("type") in {"control_decision", "interaction.classification_retry", "scene.request", "scene.result", "scene.transcription.request", "scene.transcription.result", "insight.request", "insight.result", "insight.job", "answer.request", "answer.result"}
+        actual = [row for row in rows if row.get("type") in {"control_decision", "interaction.classification_retry", "scene.request", "scene.result", "scene.question.request", "scene.question.result", "scene.transcription.request", "scene.transcription.result", "insight.request", "insight.result", "insight.job", "answer.request", "answer.result"}
                   or row.get("eventType") in {"model.prompt", "response.dispatched", "episodic.memory.injected"}]
         return web.json_response({"templates": prompt_catalog(), "requests": actual[-30:],
                                   "sessionId": session_id, "totalAuditEvents": len(actual)})
@@ -5396,7 +5396,7 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                 session_trace("audio.transcript.ignored", "realtime-user", {"reason": "empty-transcript"})
                 return {}
             work_ledger = owner.work_ledger or CaseWorkLedger(harness.journal)
-            scene_task = asyncio.create_task(owner.scene.context(turn_id, describe_frame=explicit))
+            scene_task = asyncio.create_task(owner.scene.context(turn_id, describe_frame=explicit, question=text))
             try:
                 semantic = await semantic_task if semantic_task is not None else await classify_persisted_turn(turn_id, text)
                 control_only = (semantic.get("interaction") or {}).get("action") in {"listen", "pause", "cancel", "uncertain"} or semantic.get("speechControl")

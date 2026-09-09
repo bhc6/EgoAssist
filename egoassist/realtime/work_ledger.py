@@ -594,9 +594,14 @@ class CaseWorkLedger:
         completed_text = {}
         decisions = {}
         responses = {}
+        response_turns = {}
+        turns = self.turns()
         for entry in self.journal.entries():
-            if entry.get("eventType") in {"response.created", "response.finished"} and entry.get("responseId"):
+            if entry.get("eventType") in {"response.created", "response.finished", "response.first_audio", "response.first_transcript", "response.first_text"} and entry.get("responseId"):
                 responses.setdefault(entry["responseId"], {}).update({entry["eventType"]: entry})
+                origin = entry.get("payload", {}).get("origin", {})
+                if entry.get("eventType") == "response.created" and origin.get("turnId"):
+                    response_turns[origin["turnId"]] = entry
             if entry.get("type") == "control_decision" and entry.get("turnId"):
                 decisions[entry["turnId"]] = {k: v for k, v in (entry.get("decision") or {}).items()
                                              if k not in {"requestMetrics", "rawOutput"}}
@@ -607,6 +612,19 @@ class CaseWorkLedger:
             elif entry.get("type") == "answer.job":
                 answers[entry["turnId"]] = {k: v for k, v in entry.items() if k not in {"instructions", "question", "context"}}
         for answer in answers.values():
+            created = response_turns.get(answer["turnId"])
+            if answer.get("status") == "foreground" and created:
+                answer["responseId"] = created["responseId"]
+                answer["model"] = created.get("model")
+            response = responses.get(answer.get("responseId"), {})
+            received_at = turns.get(answer["turnId"], {}).get("timestamp")
+            if received_at:
+                for event, metric in (("response.first_audio", "inputToFirstAudioMs"),
+                                      ("response.first_transcript", "inputToFirstTextMs"),
+                                      ("response.first_text", "inputToFirstTextMs"),
+                                      ("response.finished", "inputToCompleteMs")):
+                    if response.get(event) and (event != "response.finished" or answer.get("status") == "completed"):
+                        answer[metric] = round((datetime.fromisoformat(response[event]["timestamp"]) - datetime.fromisoformat(received_at)).total_seconds() * 1000, 1)
             if answer.get("status") == "completed" and answer.get("channel") in {"speech", "generated-audio"}:
                 answer["text"] = completed_text.get(answer.get("responseId"), "")
                 response = responses.get(answer.get("responseId"), {})
@@ -619,7 +637,7 @@ class CaseWorkLedger:
         return {
             "turnInbox": [{**turn, "delivery": deliveries.get(turn["turnId"]), "answer": answers.get(turn["turnId"]),
                            "semantic": decisions.get(turn["turnId"])}
-                          for turn in self.turns().values()],
+                          for turn in turns.values()],
             "intents": list(self.intents().values()),
             "foregroundIntentId": self.foreground_intent_id(),
             "jobs": list(self.jobs().values()),
