@@ -54,6 +54,12 @@ function renderMemoryActivity() {
     const type = event.type || event.eventType || event.payload?.type;
     return type && (memoryEventLabels[type] || type.includes("memory"));
   }).slice(-12).reverse();
+  if (state?.memory?.candidate) {
+    events.unshift({
+      type: "memory.candidate", eventId: "live-candidate",
+      timestamp: new Date().toISOString(), payload: {status: "等待用户确认", turnId: state.memory.candidate.turnId},
+    });
+  }
   if (status) status.textContent = events.length ? "最近 " + events.length + " 个事件" : "暂无记忆事件";
   const html = events.length ? events.map(event => {
     const type = event.type || event.eventType || event.payload?.type;
