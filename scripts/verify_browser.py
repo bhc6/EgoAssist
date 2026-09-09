@@ -59,6 +59,15 @@ async def verify(output, real_turn=False):
                 report['conversationalSkillReady'] = True
                 assert await page.locator('[data-performance="routerMs"]').text_content() == '-'
                 if real_turn:
+                    async def wait_for_report(accepted):
+                        job = accepted['job']
+                        await page.wait_for_function("id => { const row = document.querySelector('[data-insight-job=\"' + id + '\"]'); return row && /已完成|无记录|失败/.test(row.textContent); }", arg=job['jobId'], timeout=60000)
+                        payload = await (await page.request.get(str(server.make_url('/api/insights')) + '?session=' + await page.evaluate('selectedSessionId'))).json()
+                        final_job = next(item for item in payload['jobs'] if item['jobId'] == job['jobId'])
+                        assert final_job['status'] == 'completed', final_job
+                        result = await (await page.request.get(str(server.make_url('/api/insights')) + '?session=' + payload['sessionId'] + '&result=' + final_job['resultEventId'])).json()
+                        return {**result['results'][0], 'acceptedMs': accepted['acceptedMs'], 'job': final_job}
+
                     await page.locator('#textTurnInput').fill('请整理现场记录：今天张岚在会议室确认样机已经收到，验收尚未完成。')
                     await page.locator('#textTurnSend').click()
                     await page.wait_for_function("document.querySelector('[data-performance=\"responseFirstAudioMs\"]').textContent.includes('ms')", timeout=45000)
@@ -77,7 +86,20 @@ async def verify(output, real_turn=False):
                         async with page.expect_response(lambda response: response.url.endswith('/api/insights') and response.request.method == 'POST', timeout=60000) as pending:
                             await page.locator('#insightGenerate').click()
                         response = await pending.value
-                        result = await response.json()
+                        assert response.status == 202
+                        accepted = await response.json()
+                        if kind == 'daily':
+                            active = await (await page.request.get(str(server.make_url('/api/insights')) + '?session=' + await page.evaluate('selectedSessionId'))).json()
+                            report['concurrentReportStatus'] = next(j['status'] for j in active['jobs'] if j['jobId'] == accepted['job']['jobId'])
+                            assert report['concurrentReportStatus'] in {'queued', 'running'}
+                            previous = await page.evaluate('state.performance.latestUsage.responseId')
+                            await page.locator('#textTurnInput').fill('刚才的现场记录里，验收完成了吗？')
+                            await page.locator('#textTurnSend').click()
+                            await page.wait_for_function('previous => state.performance.latestUsage?.responseId !== previous', arg=previous, timeout=45000)
+                            report['concurrentDialoguePerformance'] = await page.evaluate('state.performance')
+                            report['concurrentDialogueAnswer'] = await page.locator('#assistantCaption p').text_content()
+                            assert '未' in report['concurrentDialogueAnswer']
+                        result = await wait_for_report(accepted)
                         report['insights'].append(result)
                         assert result['status'] == 'completed', result
                         assert result['coverage']['complete']
@@ -85,7 +107,7 @@ async def verify(output, real_turn=False):
                         assert '验收' in ''.join(item['text'] for item in result['summary']), result
                     async with page.expect_response(lambda response: response.url.endswith('/api/insights') and response.request.method == 'POST', timeout=60000) as pending:
                         await page.locator('#proactiveSuggestions').check()
-                    suggestions = await (await pending.value).json()
+                    suggestions = await wait_for_report(await (await pending.value).json())
                     report['automaticSuggestions'] = suggestions
                     assert suggestions['status'] == 'completed', suggestions
                     assert suggestions['suggestions'], suggestions
@@ -93,9 +115,20 @@ async def verify(output, real_turn=False):
                     await page.locator('#promptAuditDetails').evaluate('(node) => { node.open = true; }')
                     await page.wait_for_function("document.querySelector('#actualPromptRequests').textContent.includes('insight.request')")
                     report['realPromptAuditVisible'] = True
+                    original_session = await page.evaluate('selectedSessionId')
+                    await page.evaluate("socket.close(4001, 'acceptance-disconnect')")
+                    await page.wait_for_function('providerReady && socket?.readyState === WebSocket.OPEN', timeout=30000)
+                    assert await page.evaluate('selectedSessionId') == original_session
+                    await page.locator('#textTurnInput').fill('刚才的现场记录里，验收完成了吗？')
+                    previous_response = await page.evaluate('state.performance.latestUsage.responseId')
+                    await page.locator('#textTurnSend').click()
+                    await page.wait_for_function('previous => state.performance.latestUsage?.responseId !== previous', arg=previous_response, timeout=45000)
+                    assert '未' in await page.locator('#assistantCaption p').text_content(), await page.locator('#assistantCaption').text_content()
+                    report['reconnectedWithoutLosingSession'] = True
                 for width in (1440, 390):
                     await page.set_viewport_size({'width': width, 'height': 1000})
                     await page.evaluate('scrollTo(0, 0)')
+                    await page.screenshot(path=str(output / f'viewport-{width}.png'))
                     await page.screenshot(path=str(output / f'ui-{width}.png'), full_page=True)
                     layout = await page.evaluate('''() => ({width: innerWidth,
                         scrollWidth: document.documentElement.scrollWidth,

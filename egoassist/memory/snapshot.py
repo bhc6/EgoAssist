@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Mapping
 
 import numpy as np
 
 from .store import HierarchicalMemory, MemoryItem
+from ..retrieval.index import build_index
 
 
 FORMAT_VERSION = 2
@@ -19,6 +21,11 @@ def save_memory(
     *,
     provenance: Mapping[str, Any] | None = None,
 ) -> Path:
+    with memory._lock:
+        return _save_memory(memory, directory, provenance=provenance)
+
+
+def _save_memory(memory, directory, *, provenance=None) -> Path:
     from PIL import Image
 
     root = Path(directory)
@@ -57,6 +64,8 @@ def save_memory(
             "id": item.id,
             "t_start": item.t_start,
             "t_end": item.t_end,
+            "wall_start": item.wall_start.isoformat() if item.wall_start else None,
+            "wall_end": item.wall_end.isoformat() if item.wall_end else None,
             "caption": item.caption,
             "tier": item.tier,
             "child_ids": list(item.child_ids),
@@ -162,6 +171,8 @@ def load_memory(
                 id=item_id,
                 t_start=t_start,
                 t_end=t_end,
+                wall_start=datetime.fromisoformat(record["wall_start"]) if record.get("wall_start") else None,
+                wall_end=datetime.fromisoformat(record["wall_end"]) if record.get("wall_end") else None,
                 embedding=embedding,
                 caption=str(record["caption"]),
                 keyframes=frames,
@@ -171,17 +182,25 @@ def load_memory(
                 tier=str(record.get("tier", record.get("level", "short"))),
                 child_ids=[int(value) for value in record["child_ids"]],
             )
-    memory.current = _resolve_ids(by_id, manifest["current_ids"], "current")
-    memory.short_term = _resolve_ids(by_id, manifest["short_term_ids"], "short_term")
-    memory.long_term = _resolve_ids(by_id, manifest["long_term_ids"], "long_term")
+    current = _resolve_ids(by_id, manifest["current_ids"], "current")
+    short_term = _resolve_ids(by_id, manifest["short_term_ids"], "short_term")
+    long_term = _resolve_ids(by_id, manifest["long_term_ids"], "long_term")
     if version == FORMAT_VERSION:
-        for item in memory.long_term:
+        for item in long_term:
             _resolve_ids(by_id, item.child_ids, f"children of memory {item.id}")
-    memory._items_by_id = by_id
-    memory._next_id = int(manifest["next_id"])
-    if by_id and memory._next_id <= max(by_id):
+    next_id = int(manifest["next_id"])
+    if by_id and next_id <= max(by_id):
         raise ValueError("next_id must be greater than every memory id")
-    memory._since_consolidate = int(manifest["since_consolidate"])
+    since_consolidate = int(manifest["since_consolidate"])
+    index = build_index(memory.backend.dim)
+    for item in short_term + long_term:
+        index.add(item.id, item.embedding)
+    with memory._lock:
+        memory.current, memory.short_term, memory.long_term = current, short_term, long_term
+        memory._items_by_id = by_id
+        memory._next_id = next_id
+        memory._since_consolidate = since_consolidate
+        memory._index = index
     return len(by_id)
 
 

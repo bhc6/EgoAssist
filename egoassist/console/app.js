@@ -7,6 +7,7 @@ let interactionTransport = "websocket-fallback";
 let playbackTime = 0, assistantText = "";
 let connectingPromise = null;
 let connectionGeneration = 0;
+let providerReady = false;
 let mediaPromise = null;
 let mediaGeneration = 0;
 let selectedEventId = null, pipelineDetails = [];
@@ -14,6 +15,7 @@ let currentUser = null, selectedSessionId = null, authMode = "login";
 let sessionCatalog = [], memoryPolicySaving = false;
 let ambientState = null;
 let insightSession = null, insightBusy = false, insightTurn = null, insightLastAttempt = 0;
+let insightJobs = [], selectedInsightJob = null, insightPolling = false, displayedInsightResult = null;
 let promptAuditSignature = "";
 let pdfjs = null, artifactDocument = null, artifactPageNumber = 1, artifactScale = 1;
 let artifactRenderGeneration = 0, artifactRenderTask = null, pendingHumanHelpPreview = null;
@@ -104,6 +106,9 @@ function showLogin() {
   currentUser = null;
   selectedSessionId = null;
   insightSession = null;
+  insightJobs = [];
+  selectedInsightJob = null;
+  $("#insightJobs").replaceChildren();
   insightTurn = null;
   state = null;
   $("#proactiveSuggestions").checked = false;
@@ -1075,17 +1080,19 @@ function stopPlayback() {
   playbackTime = audioContext ? audioContext.currentTime : 0;
 }
 
-async function connectRealtime({media = true} = {}) {
-  if (socket && socket.readyState === WebSocket.OPEN && !connectingPromise) return;
+async function connectRealtime({media = true, retryAttempt = 0} = {}) {
+  if (socket && socket.readyState === WebSocket.OPEN && providerReady && !connectingPromise) return;
   if (connectingPromise) return connectingPromise;
   const generation = ++connectionGeneration;
-  const attempt = connectRealtimeSession(generation, media);
+  if (socket) socket.close();
+  providerReady = false;
+  const attempt = connectRealtimeSession(generation, media, retryAttempt);
   connectingPromise = attempt;
   try { await attempt; }
   finally { if (connectingPromise === attempt) connectingPromise = null; }
 }
 
-async function connectRealtimeSession(generation, media) {
+async function connectRealtimeSession(generation, media, retryAttempt) {
   if (!selectedSessionId) await refreshSessionList();
   if (generation !== connectionGeneration) return;
   const connectionSessionId = selectedSessionId;
@@ -1107,8 +1114,16 @@ async function connectRealtimeSession(generation, media) {
   socket = ws;
   let ready = false;
   let restartAfterClose = false;
+  let providerUnavailable = false;
   let resolveReady, rejectReady;
   const readyPromise = new Promise((resolve, reject) => { resolveReady = resolve; rejectReady = reject; });
+  const connectTimer = setTimeout(() => {
+    if (!ready && generation === connectionGeneration) {
+      rejectReady(Error("实时连接超时"));
+      ws.close(4000, "ready-timeout");
+    }
+  }, 15000);
+  readyPromise.then(() => clearTimeout(connectTimer), () => clearTimeout(connectTimer));
   ws.onopen = () => {
     if (socket !== ws || generation !== connectionGeneration) { ws.close(); return; }
     $("#duplexState").textContent = "正在连接实时模型…";
@@ -1123,7 +1138,13 @@ async function connectRealtimeSession(generation, media) {
     if (socket !== ws || generation !== connectionGeneration) return;
     const message = JSON.parse(event.data);
     if (message.type === "ready") {
+      if (message.lanes?.dialogue?.connected === false || providerUnavailable) {
+        rejectReady(Error("实时模型尚未连接"));
+        ws.close(4000, "provider-not-ready");
+        return;
+      }
       ready = true;
+      providerReady = true;
       selectedSessionId = message.contextSessionId || selectedSessionId;
       if (currentUser) localStorage.setItem("egoassist.session." + currentUser.id, selectedSessionId);
       refreshSessionList(selectedSessionId).catch(() => {});
@@ -1134,6 +1155,9 @@ async function connectRealtimeSession(generation, media) {
       $("#duplexState").textContent = media ? (interactionTransport === "livekit" ? "LiveKit" : "WebSocket fallback") + " · 直接说话，可随时打断" : "文本会话在线";
       $("#realtimeButton").textContent = "结束会话";
     } else if (message.type === "provider_unavailable") {
+      providerUnavailable = true;
+      providerReady = false;
+      rejectReady(Error(message.reason || "实时模型不可用"));
       $("#duplexState").textContent = "Provider offline · local console remains available";
       $("#assistantCaption").innerHTML = "<span>REALTIME PROVIDER UNAVAILABLE</span><p>" + esc(message.reason || "network or DNS unavailable") + "</p>";
     } else if (message.type === "audio" && interactionTransport !== "livekit" && ["conversation", "proactive-utterance"].includes(message.purpose)) {
@@ -1209,15 +1233,25 @@ async function connectRealtimeSession(generation, media) {
     }
   };
   ws.onerror = () => { if (!ready && generation === connectionGeneration) rejectReady(Error("实时 WebSocket 连接失败")); };
-  ws.onclose = () => {
+  ws.onclose = event => {
+    clearTimeout(connectTimer);
     if (generation !== connectionGeneration) { resolveReady(); return; }
     if (!ready && generation === connectionGeneration) rejectReady(Error("实时模型连接在就绪前关闭"));
     if (socket !== ws) return;
     $("#duplexState").textContent = "实时会话已结束";
     $("#realtimeButton").textContent = "启动全双工陪练";
     socket = null;
-    if (restartAfterClose && stream && generation === connectionGeneration) {
-      setTimeout(() => connectRealtime().catch(error => alert("重连失败：" + error.message)), 0);
+    providerReady = false;
+    stopPlayback();
+    const nextAttempt = ready ? 1 : retryAttempt + 1;
+    // Intentional disconnects invalidate generation before closing the socket.
+    if ((restartAfterClose || !providerUnavailable) && nextAttempt <= 3 && currentUser) {
+      $("#duplexState").textContent = "连接中断，正在恢复 · " + nextAttempt + "/3";
+      setTimeout(() => {
+        if (generation === connectionGeneration && connectionSessionId === selectedSessionId && currentUser) {
+          connectRealtime({media, retryAttempt: nextAttempt}).catch(error => { $("#duplexState").textContent = error.message; });
+        }
+      }, Math.min(4000, 500 * 2 ** (nextAttempt - 1)));
     }
   };
   return readyPromise;
@@ -1231,6 +1265,7 @@ function stopAudioCapture() {
 
 function disconnectRealtime() {
   connectionGeneration += 1;
+  providerReady = false;
   if (mediaPromise) mediaGeneration += 1;
   stopPlayback();
   disconnectLiveKit();
@@ -1481,6 +1516,10 @@ async function syncInsightSession() {
   if (!currentUser || !sid || insightSession === sid) return;
   insightSession = sid;
   insightTurn = null;
+  insightJobs = [];
+  selectedInsightJob = null;
+  displayedInsightResult = null;
+  $("#insightJobs").replaceChildren();
   promptAuditSignature = "";
   $("#proactiveSuggestions").checked = false;
   $("#insightResults").replaceChildren();
@@ -1492,6 +1531,7 @@ async function syncInsightSession() {
     const data = await request("/api/insights?session=" + encodeURIComponent(sid));
     if (sid !== selectedSessionId || !currentUser) return;
     $("#proactiveSuggestions").checked = data.proactiveEnabled;
+    renderInsightJobs(data.jobs || []);
     if (data.results.length) renderInsight(data.results.at(-1));
   } catch (error) { if (sid === selectedSessionId) $("#insightStatus").textContent = error.message; }
 }
@@ -1508,18 +1548,83 @@ async function generateInsight(automatic = false) {
       kind: automatic ? "suggestions" : $("#insightKind").value,
       anchor: automatic ? null : $("#insightDate").value,
       scope: automatic ? "case" : $("#insightScope").value});
-    if (sid === selectedSessionId && currentUser) renderInsight(result);
+    if (sid === selectedSessionId && currentUser) {
+      selectedInsightJob = result.job.jobId;
+      $("#insightStatus").textContent = "已受理 · " + result.acceptedMs + " ms";
+      renderInsightJobs([...insightJobs.filter(job => job.jobId !== result.job.jobId), result.job]);
+      refreshInsightJobs();
+    }
   } catch (error) { if (sid === selectedSessionId) $("#insightStatus").textContent = error.message; }
   finally { insightBusy = false; $("#insightGenerate").disabled = false; }
 }
 
 function maybeSuggest() {
   if (!currentUser || !state || !$("#proactiveSuggestions").checked || insightBusy || Date.now() - insightLastAttempt < 30000) return;
+  if (insightJobs.some(job => ["queued", "running"].includes(job.status) && job.specification.kind === "suggestions")) return;
   const turn = [...(state.events || [])].reverse().find(item => item.type === "message" && item.payload?.message?.role === "user");
   if (!turn || turn.eventId === insightTurn || workflow.active) return;
   insightTurn = turn.eventId;
   generateInsight(true);
 }
+
+function renderInsightJobs(jobs) {
+  insightJobs = jobs;
+  const labels = {queued: "排队中", running: "生成中", completed: "已完成", empty: "无记录", failed: "失败", cancelled: "已取消"};
+  const kinds = {daily: "日报", weekly: "周报", monthly: "月报", suggestions: "建议"};
+  $("#insightJobs").innerHTML = jobs.slice(-6).reverse().map(job => "<div class='insight-job' data-insight-job='" + esc(job.jobId) + "'>" +
+    "<span>" + esc(kinds[job.specification.kind] + " · " + job.specification.anchor) + "</span><b>" + esc(labels[job.status] || job.status) +
+    "</b><small>" + esc(job.durationMs != null ? job.durationMs.toFixed(0) + " ms" : job.reason || "") + "</small>" +
+    (job.resultEventId ? "<button data-insight-result='" + esc(job.resultEventId) + "'>查看</button>" : "") +
+    (["queued", "running"].includes(job.status) ? "<button data-insight-cancel='" + esc(job.jobId) + "'>取消</button>" : "") +
+    (["failed", "cancelled"].includes(job.status) ? "<button data-insight-retry='" + esc(job.jobId) + "'>重试</button>" : "") +
+    (job.error ? "<p>" + esc(job.error) + "</p>" : "") + "</div>").join("");
+}
+
+async function loadInsightResult(id) {
+  const sid = selectedSessionId;
+  const data = await request("/api/insights?session=" + encodeURIComponent(sid) + "&result=" + encodeURIComponent(id));
+  if (sid === selectedSessionId && currentUser && data.results.length) {
+    displayedInsightResult = id;
+    renderInsight(data.results[0]);
+  }
+}
+
+async function refreshInsightJobs() {
+  if (insightPolling || !currentUser || !selectedSessionId) return;
+  const sid = selectedSessionId;
+  insightPolling = true;
+  try {
+    const data = await request("/api/insights?session=" + encodeURIComponent(sid) + "&includeResults=false");
+    if (sid !== selectedSessionId || !currentUser) return;
+    renderInsightJobs(data.jobs || []);
+    const job = insightJobs.find(item => item.jobId === selectedInsightJob) || insightJobs.at(-1);
+    if (job?.resultEventId && job.resultEventId !== displayedInsightResult) await loadInsightResult(job.resultEventId);
+  } catch (error) { if (sid === selectedSessionId) $("#insightStatus").textContent = error.message; }
+  finally { insightPolling = false; }
+}
+
+$("#insightJobs").onclick = async event => {
+  const button = event.target.closest("button");
+  if (!button) return;
+  button.disabled = true;
+  try {
+    if (button.dataset.insightResult) {
+      selectedInsightJob = insightJobs.find(job => job.resultEventId === button.dataset.insightResult)?.jobId;
+      await loadInsightResult(button.dataset.insightResult);
+    } else if (button.dataset.insightCancel) {
+      await post("/api/insights/cancel", {sessionId: selectedSessionId, jobId: button.dataset.insightCancel});
+      await refreshInsightJobs();
+    } else if (button.dataset.insightRetry) {
+      const job = insightJobs.find(item => item.jobId === button.dataset.insightRetry);
+      $("#insightKind").value = job.specification.kind;
+      $("#insightDate").value = job.specification.anchor;
+      $("#insightScope").value = job.specification.scope;
+      await generateInsight();
+    }
+  } catch (error) { $("#insightStatus").textContent = error.message; }
+  finally { button.disabled = false; }
+};
+setInterval(() => { if (insightJobs.some(job => ["queued", "running"].includes(job.status))) refreshInsightJobs(); }, 1200);
 
 async function refreshPromptAudit() {
   const sid = selectedSessionId;

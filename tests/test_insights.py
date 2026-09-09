@@ -12,6 +12,16 @@ from egoassist.realtime.context_harness import SessionJournal
 from run_egoassist import create_app
 
 
+async def finished(client, sid, job_id):
+    async with asyncio.timeout(5):
+        while True:
+            payload = await (await client.get("/api/insights", params={"session": sid})).json()
+            job = next(item for item in payload["jobs"] if item["jobId"] == job_id)
+            if job["status"] not in {"queued", "running"}:
+                return payload
+            await asyncio.sleep(0.01)
+
+
 def test_report_calendar_uses_local_days_week_and_month():
     clock = ClockContext.current("America/New_York", now_utc=datetime(2024, 3, 10, 15, tzinfo=timezone.utc))
     daily = calendar_period("daily", None, clock)
@@ -52,11 +62,14 @@ def test_insight_endpoints_enforce_owner_and_auto_policy(tmp_path):
             await client.post("/api/auth/register", json={"username": "owner", "password": "owner-password-123"})
             sid = (await (await client.post("/api/sessions")).json())["session"]["id"]
             response = await client.post("/api/insights", json={"sessionId": sid, "kind": "daily"})
-            result = await response.json()
+            assert response.status == 202
+            job_id = (await response.json())["job"]["jobId"]
+            result = (await finished(client, sid, job_id))["results"][0]
             assert result["status"] == "empty"
             assert result["coverage"]["complete"] is True
             again = await (await client.post("/api/insights", json={"sessionId": sid, "kind": "daily"})).json()
-            assert again["cached"] is True
+            cached = await finished(client, sid, again["job"]["jobId"])
+            assert cached["jobs"][-1]["resultEventId"] == result["id"]
             response = await client.post("/api/insights", json={"sessionId": sid, "kind": "suggestions", "automatic": True})
             assert response.status == 400
             await client.post("/api/auth/logout")
@@ -84,10 +97,77 @@ def test_account_deletion_cancels_report_before_data_can_be_recreated(tmp_path, 
         async with TestClient(TestServer(app)) as client:
             await client.post("/api/auth/register", json={"username": "remove", "password": "remove-password-123"})
             sid = (await (await client.post("/api/sessions")).json())["session"]["id"]
-            pending = asyncio.create_task(client.post("/api/insights", json={"sessionId": sid}))
+            accepted = await client.post("/api/insights", json={"sessionId": sid})
+            assert accepted.status == 202
             await asyncio.wait_for(started.wait(), 2)
+            assert (await client.get("/api/state", params={"session": sid})).status == 200
             response = await client.post("/api/privacy/delete", json={"confirm": True})
             assert response.status == 200
             assert cancelled.is_set()
-            assert (await pending).status == 409
+    asyncio.run(run())
+
+
+def test_report_queue_deduplicates_cancels_and_recovers(tmp_path):
+    from egoassist.product.insight_jobs import InsightJobs, InsightQueueFull, insight_jobs
+
+    async def run():
+        journal = SessionJournal(tmp_path / "case.jsonl", session_id="case")
+        started = asyncio.Event()
+
+        class Generator:
+            async def generate(self, **kwargs):
+                started.set()
+                await asyncio.Future()
+
+        manager = InsightJobs(Generator(), lambda *args: [journal.path], capacity=2)
+        params = dict(user_id="u", session_id="case", journal=journal, scope="case", anchor=None,
+                      clock=ClockContext.current("UTC"))
+        first = manager.submit(**params, kind="daily")
+        duplicate = manager.submit(**params, kind="daily")
+        assert duplicate["jobId"] == first["jobId"]
+        second = manager.submit(**params, kind="weekly")
+        with pytest.raises(InsightQueueFull):
+            manager.submit(**params, kind="monthly")
+        await started.wait()
+        await manager.cancel(second["jobId"], journal)
+        assert insight_jobs(journal)[-1]["status"] == "cancelled"
+        await manager.close()
+        assert insight_jobs(journal)[0]["status"] == "queued"
+
+        class RecoveredGenerator:
+            async def generate(self, **kwargs):
+                return journal.append("insight.result", {"status": "completed"})
+
+        restored = InsightJobs(RecoveredGenerator(), lambda *args: [journal.path])
+        restored.recover("u", "case", journal)
+        await asyncio.gather(*list(restored._tasks.values()))
+        assert insight_jobs(journal)[0]["status"] == "completed"
+        assert insight_jobs(journal)[0]["attempt"] == 2
+        await restored.close()
+    asyncio.run(run())
+
+
+def test_report_timeout_releases_worker_for_next_job(tmp_path):
+    from egoassist.product.insight_jobs import InsightJobs, insight_jobs
+
+    async def run():
+        journal = SessionJournal(tmp_path / "case.jsonl", session_id="case")
+
+        class Generator:
+            async def generate(self, **kwargs):
+                if kwargs["kind"] == "daily":
+                    await asyncio.Future()
+                return journal.append("insight.result", {"status": "completed"})
+
+        manager = InsightJobs(Generator(), lambda *args: [journal.path])
+        manager.timeout = 0.02
+        params = dict(user_id="u", session_id="case", journal=journal, scope="case", anchor=None,
+                      clock=ClockContext.current("UTC"))
+        manager.submit(**params, kind="daily")
+        manager.submit(**params, kind="weekly")
+        await asyncio.gather(*list(manager._tasks.values()))
+        failed, completed = insight_jobs(journal)
+        assert failed["status"] == "failed" and failed["timedOut"]
+        assert completed["status"] == "completed"
+        await manager.close()
     asyncio.run(run())

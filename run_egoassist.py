@@ -5,6 +5,7 @@ from __future__ import annotations
 
 from egoassist.prompts import prompt_text, prompt_catalog, compact_audit_payload
 from egoassist.memory.insights import InsightGenerator
+from egoassist.product.insight_jobs import InsightJobs, InsightQueueFull, insight_jobs
 
 import argparse
 import asyncio
@@ -571,8 +572,14 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
         return [runtime_skill_summary(package) for package in registry.skills.values()]
     user_memory_root = Path(memory_path).with_name("users")
     insight_generator = InsightGenerator(os.getenv("QWEN_API_KEY") or os.getenv("DASHSCOPE_API_KEY") or "")
-    insight_tasks: dict[str, set[asyncio.Task]] = {}
     deleting_insight_users: set[str] = set()
+
+    def insight_sources(user_id, session_id, scope):
+        identity.get_context_session(user_id, session_id)
+        return ([case_owner(user_id, session_id).journal.path] if scope == "case" else
+                sorted((user_memory_root / user_id / "sessions").glob("*.jsonl")))
+
+    insight_executor = InsightJobs(insight_generator, insight_sources)
     user_episodics: dict[str, RealtimeEpisodeMemory] = {}
     case_episodics: dict[tuple[str, str], RealtimeEpisodeMemory] = {}
     user_runtimes: dict[str, SkillRuntime] = {}
@@ -2192,7 +2199,7 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
         identity.get_context_session(user_id, session_id)
         owner = case_owner(user_id, session_id)
         rows = owner.journal.entries()
-        actual = [row for row in rows if row.get("type") in {"control_decision", "insight.request", "insight.result"}
+        actual = [row for row in rows if row.get("type") in {"control_decision", "insight.request", "insight.result", "insight.job"}
                   or row.get("eventType") in {"model.prompt", "response.dispatched", "episodic.memory.injected"}]
         return web.json_response({"templates": prompt_catalog(), "requests": actual[-30:],
                                   "sessionId": session_id, "totalAuditEvents": len(actual)})
@@ -2201,10 +2208,27 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
         user_id = request[user_key]["id"]
         session_id = str(request.query.get("session", "")).strip()
         identity.get_context_session(user_id, session_id)
-        rows = case_owner(user_id, session_id).journal.entries()
+        journal = case_owner(user_id, session_id).journal
+        insight_executor.recover(user_id, session_id, journal)
+        rows = journal.entries()
         policy = next((row for row in reversed(rows) if row.get("type") == "insight.policy"), {})
-        return web.json_response({"results": [row for row in rows if row.get("type") == "insight.result"][-12:],
+        results = [row for row in rows if row.get("type") == "insight.result"]
+        result_id = request.query.get("result")
+        if result_id:
+            results = [row for row in results if row["id"] == result_id]
+        if request.query.get("includeResults") == "false":
+            results = []
+        return web.json_response({"results": results[-1:], "jobs": insight_jobs(journal)[-12:],
                                   "proactiveEnabled": policy.get("enabled", False), "sessionId": session_id})
+
+    async def post_insight_cancel(request):
+        payload = await request.json()
+        user_id = request[user_key]["id"]
+        session_id = str(payload.get("sessionId", ""))
+        identity.get_context_session(user_id, session_id)
+        journal = case_owner(user_id, session_id).journal
+        await insight_executor.cancel(str(payload.get("jobId", "")), journal)
+        return web.json_response({"jobs": insight_jobs(journal)[-12:]})
 
     async def post_insight_policy(request):
         payload = await request.json()
@@ -2233,18 +2257,13 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
             policy = next((row for row in reversed(owner.journal.entries()) if row.get("type") == "insight.policy"), {})
             if not policy.get("enabled") or kind != "suggestions" or scope != "case":
                 raise ValueError("automatic suggestions are not enabled for this case")
-        paths = ([owner.journal.path] if scope == "case" else sorted((user_memory_root / user_id / "sessions").glob("*.jsonl")))
-        task = asyncio.create_task(insight_generator.generate(user_id=user_id, journal=owner.journal, paths=paths,
-            kind=kind, anchor=payload.get("anchor"), clock=clock_for_session(user_id, session_id)))
-        tasks = insight_tasks.setdefault(user_id, set())
-        tasks.add(task)
+        started = time.perf_counter()
         try:
-            result = await task
-        except asyncio.CancelledError:
-            raise web.HTTPConflict(text="Insight generation was cancelled")
-        finally:
-            tasks.discard(task)
-        return web.json_response(result, status=502 if result["status"] == "failed" else 200)
+            job = insight_executor.submit(user_id=user_id, session_id=session_id, journal=owner.journal,
+                kind=kind, scope=scope, anchor=payload.get("anchor"), clock=clock_for_session(user_id, session_id))
+        except InsightQueueFull as exc:
+            raise web.HTTPTooManyRequests(text=str(exc))
+        return web.json_response({"job": job, "acceptedMs": round((time.perf_counter() - started) * 1000, 3)}, status=202)
 
     async def get_artifacts(request):
         user_id = request[user_key]["id"]
@@ -4053,11 +4072,7 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
         if payload.get("confirm") is not True:
             raise ValueError("account deletion requires confirm=true")
         deleting_insight_users.add(user_id)
-        pending_insights = list(insight_tasks.pop(user_id, set()))
-        for task in pending_insights:
-            task.cancel()
-        if pending_insights:
-            await asyncio.gather(*pending_insights, return_exceptions=True)
+        await insight_executor.delete_user(user_id)
         await invalidate_live_sessions(user_id)
         evidence = privacy_governance.delete_account(user_id)
         for session_id, owner in list(case_owners.items()):
@@ -6361,6 +6376,19 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
 
     app.cleanup_ctx.append(runtime_root_lease_context)
     app.cleanup_ctx.append(temporal_reminder_context)
+
+    async def insight_jobs_context(_app):
+        for path in sorted(user_memory_root.glob("*/sessions/*.jsonl")):
+            user_id, session_id = path.parent.parent.name, path.stem
+            try:
+                identity.get_context_session(user_id, session_id)
+                insight_executor.recover(user_id, session_id, case_owner(user_id, session_id).journal)
+            except (ValueError, KeyError, OSError):
+                LOGGER.warning("Skipped unavailable report journal during startup")
+        yield
+        await insight_executor.close()
+
+    app.cleanup_ctx.append(insight_jobs_context)
     app.add_routes([
         web.post("/api/auth/register", post_register),
         web.post("/api/auth/login", post_login),
@@ -6379,6 +6407,7 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
         web.get("/api/insights", get_insights),
         web.post("/api/insights", post_insight),
         web.post("/api/insights/policy", post_insight_policy),
+        web.post("/api/insights/cancel", post_insight_cancel),
         web.get("/api/memory/state", get_memory_state),  # Phase 1: memory observability
         web.get("/api/memory/timeline", get_timeline_memory),  # unified TimelineMemory view
         web.get("/api/background-tasks", get_background_tasks),  # Phase 2A: task queue

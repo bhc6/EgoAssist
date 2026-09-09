@@ -40,7 +40,7 @@ def performance_snapshot(events: list[dict[str, Any]]) -> dict[str, Any]:
             samples.setdefault(name, []).append(measurement["value"])
             metrics[name] = measurement
         payload = event.get("payload") or {}
-        if event.get("type") == "response.watchdog.timeout" or (event.get("type") == "insight.result" and payload.get("timedOut")) or (
+        if event.get("type") == "response.watchdog.timeout" or (event.get("type") in {"insight.result", "insight.job"} and payload.get("timedOut")) or (
             event.get("type") == "control_decision" and payload.get("decision", {}).get("timedOut")
         ):
             timeouts += 1

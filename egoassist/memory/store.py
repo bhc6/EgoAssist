@@ -140,7 +140,7 @@ class HierarchicalMemory:
         wall_ends = [m.wall_end for m in group if m.wall_end is not None]
         merged = MemoryItem(
             id=self._new_id(), t_start=group[0].t_start, t_end=group[-1].t_end,
-            embedding=emb.astype(np.float32), caption="; ".join(caps[:4]),
+            embedding=emb.astype(np.float32), caption="; ".join(caps),
             keyframes=kf, keyframe_times=kf_times, keyframe_meta=kf_meta,
             audio_events=[event for m in group for event in m.audio_events],
             tier="long",
@@ -149,10 +149,8 @@ class HierarchicalMemory:
             wall_end=max(wall_ends) if wall_ends else None,
         )
         # Batch-remove children from index (O(N) rebuild once vs O(N·k) per-item loop)
-        # and purge them from the registry to prevent unbounded memory growth.
+        # Keep source records for audit and snapshot provenance.
         child_ids = [child.id for child in group]
-        for cid in child_ids:
-            self._items_by_id.pop(cid, None)
         self._index.remove_batch(child_ids)
         self._index.add(merged.id, merged.embedding)
         return merged
@@ -160,7 +158,7 @@ class HierarchicalMemory:
     def all_items(self) -> List[MemoryItem]:
         return self.short_term + self.long_term
 
-    def retrieve_by_vector(self, query_vec: np.ndarray, k: int) -> List[MemoryItem]:
+    def retrieve_by_vector(self, query_vec: np.ndarray, k: int, *, expand_sources: bool = False) -> List[MemoryItem]:
         """Retrieve top-k most similar items using the index."""
         with self._lock:
             # If index is out of sync (e.g., test directly sets current/short_term), rebuild
@@ -168,8 +166,27 @@ class HierarchicalMemory:
                 for item in self.all_items():
                     self._items_by_id[item.id] = item
                     self._index.add(item.id, item.embedding)
+            if k <= 0:
+                return []
             hits = self._index.search(query_vec, k)
-            return [self._items_by_id[item_id] for item_id, _score in hits if item_id in self._items_by_id]
+            items = [self._items_by_id[item_id] for item_id, _score in hits if item_id in self._items_by_id]
+            if not expand_sources:
+                return items
+            # A centroid locates an episode; original evidence answers the question.
+            sources = {}
+            pending = list(items)
+            visited = set()
+            while pending:
+                item = pending.pop()
+                if item.id in visited:
+                    continue
+                visited.add(item.id)
+                children = [self._items_by_id[cid] for cid in item.child_ids if cid in self._items_by_id]
+                if children:
+                    pending.extend(children)
+                else:
+                    sources[item.id] = item
+            return sorted(sources.values(), key=lambda item: float(np.dot(query_vec, item.embedding)), reverse=True)[:k]
 
     def _new_id(self) -> int:
         i = self._next_id

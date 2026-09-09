@@ -1,4 +1,5 @@
 import json
+from datetime import datetime, timedelta, timezone
 
 import numpy as np
 import pytest
@@ -9,6 +10,51 @@ from egoassist.config import Config
 from egoassist.data import make_day
 from egoassist.memory import HierarchicalMemory, load_memory, save_memory
 from egoassist.qa import StreamingMemoryAssistant
+from egoassist.memory.store import MemoryItem
+
+
+def test_consolidation_preserves_sources_clocks_and_replaces_loaded_index(tmp_path):
+    memory = HierarchicalMemory(MockBackend(seed=4), Config(short_term_capacity=4))
+    vector = np.ones(memory.backend.dim, dtype=np.float32)
+    vector /= np.linalg.norm(vector)
+    start = datetime(2026, 9, 1, tzinfo=timezone.utc)
+    for i in range(10):
+        item = MemoryItem(id=memory._new_id(), t_start=i, t_end=i + 1,
+                          embedding=vector, caption=f"source-{i}",
+                          wall_start=start + timedelta(seconds=i),
+                          wall_end=start + timedelta(seconds=i + 1))
+        memory.short_term.append(item)
+        memory._items_by_id[item.id] = item
+        memory._index.add(item.id, vector)
+    memory.consolidate()
+    assert len(memory.long_term) == 1
+    merged = memory.long_term[0]
+    assert all(f"source-{i}" in merged.caption for i in range(8))
+    assert all(i in memory._items_by_id for i in merged.child_ids)
+    save_memory(memory, tmp_path)
+    restored = HierarchicalMemory(MockBackend(seed=4), Config())
+    restored._index.add(999, vector)
+    load_memory(restored, tmp_path)
+    assert restored.long_term[0].wall_start == start
+    assert restored.long_term[0].wall_end == start + timedelta(seconds=8)
+    assert restored._index.size() == len(restored.all_items())
+    assert len(restored.retrieve_by_vector(vector, 20)) == 3
+    assert all(i in restored._items_by_id for i in merged.child_ids)
+    sources = restored.retrieve_by_vector(vector, 20, expand_sources=True)
+    assert len(sources) == 10
+    assert not any(item.child_ids for item in sources)
+
+
+def test_invalid_snapshot_does_not_partially_replace_memory(tmp_path):
+    memory = HierarchicalMemory(MockBackend(seed=4), Config())
+    path = save_memory(memory, tmp_path)
+    manifest = json.loads(path.read_text(encoding="utf-8"))
+    manifest["short_term_ids"] = [999]
+    path.write_text(json.dumps(manifest), encoding="utf-8")
+    original = memory.current
+    with pytest.raises(ValueError, match="Unknown memory id"):
+        load_memory(memory, tmp_path)
+    assert memory.current is original
 
 
 def test_memory_snapshot_round_trip(tmp_path):

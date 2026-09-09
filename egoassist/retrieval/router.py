@@ -5,7 +5,6 @@
 
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, List
 
@@ -17,8 +16,6 @@ from ..config import Config
 if TYPE_CHECKING:
     from ..memory.store import HierarchicalMemory, MemoryItem
 
-_RECENT_HINTS = re.compile(r"\b(just now|a moment ago|recently|earlier today|just|latest)\b", re.I)
-_LONG_HINTS = re.compile(r"\b(yesterday|last week|usually|every day|habit|routine|days ago)\b", re.I)
 
 
 @dataclass
@@ -32,18 +29,8 @@ def route_and_retrieve(query: str, mem: HierarchicalMemory, backend: VLMBackend,
     q = backend.embed_text(query)
 
     # 1) 使用向量索引获取候选集（比 retrieve_topk 多拿一些，为后续过滤留空间）
-    candidates_raw = mem.retrieve_by_vector(q, cfg.retrieve_topk * 3)
-
-    # 2) 路由：根据时间线索选记忆层（对候选集进行过滤）
-    if _RECENT_HINTS.search(query):
-        pool = [m for m in candidates_raw if m in mem.current or m in mem.short_term]
-    elif _LONG_HINTS.search(query):
-        pool = [m for m in candidates_raw if m in mem.long_term or m in mem.short_term]
-    else:
-        pool = candidates_raw
-
-    if not pool:
-        pool = candidates_raw
+    # Storage tier is not an event date. Rank original evidence without keyword-to-tier guesses.
+    pool = mem.retrieve_by_vector(q, cfg.retrieve_topk * 3, expand_sources=True)
     pool = list({item.id: item for item in pool}.values())
 
     # 3) 打分：纯余弦相似度（P1 核心机制；recency bias 已移除，由层路由负责时间感知）

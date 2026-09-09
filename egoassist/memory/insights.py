@@ -103,16 +103,10 @@ class InsightGenerator:
         self.api_key = api_key
         self.model = os.getenv("EGOASSIST_INSIGHT_MODEL", "qwen-flash")
         self.timeout = float(os.getenv("EGOASSIST_INSIGHT_TIMEOUT", "30"))
-        self._locks: dict[str, asyncio.Lock] = {}
 
     async def generate(self, *, user_id: str, journal, paths: list[Path], kind: str,
                        anchor: str | None, clock: ClockContext) -> dict:
-        # Concurrent UI refreshes share the persisted result for identical input.
-        lock = self._locks.setdefault(user_id, asyncio.Lock())
-        if lock.locked():
-            return {"status": "busy", "kind": kind}
-        async with lock:
-            return await self._generate(journal, paths, kind, anchor, clock)
+        return await self._generate(journal, paths, kind, anchor, clock)
 
     async def _generate(self, journal, paths, kind, anchor, clock):
         period = calendar_period(kind, anchor, clock)
