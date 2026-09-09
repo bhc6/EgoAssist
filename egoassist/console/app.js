@@ -1573,7 +1573,8 @@ function renderInsightJobs(jobs) {
   const kinds = {daily: "日报", weekly: "周报", monthly: "月报", suggestions: "建议"};
   $("#insightJobs").innerHTML = jobs.slice(-6).reverse().map(job => "<div class='insight-job' data-insight-job='" + esc(job.jobId) + "'>" +
     "<span>" + esc(kinds[job.specification.kind] + " · " + job.specification.anchor) + "</span><b>" + esc(labels[job.status] || job.status) +
-    "</b><small>" + esc(job.durationMs != null ? job.durationMs.toFixed(0) + " ms" : job.reason || "") + "</small>" +
+    "</b><small>" + esc(job.durationMs != null ? job.durationMs.toFixed(0) + " ms" : (job.phase ? job.phase + " · " : "") + (job.reason || "等待调度")) + "</small>" +
+    (job.status === "running" ? "<small>阶段：" + esc(job.phase || "处理中") + " · 任务已持久化，刷新不会丢失</small>" : "") +
     (job.resultEventId ? "<button data-insight-result='" + esc(job.resultEventId) + "'>查看</button>" : "") +
     (["queued", "running"].includes(job.status) ? "<button data-insight-cancel='" + esc(job.jobId) + "'>取消</button>" : "") +
     (["failed", "cancelled"].includes(job.status) ? "<button data-insight-retry='" + esc(job.jobId) + "'>重试</button>" : "") +
@@ -1598,6 +1599,10 @@ async function refreshInsightJobs() {
     if (sid !== selectedSessionId || !currentUser) return;
     renderInsightJobs(data.jobs || []);
     const job = insightJobs.find(item => item.jobId === selectedInsightJob) || insightJobs.at(-1);
+    if (job && ["queued", "running"].includes(job.status)) {
+      $("#insightStatus").textContent = (job.status === "queued" ? "排队中" : "生成中") +
+        " · " + (job.phase || "等待调度") + " · 任务已保存，刷新或重启不会丢失";
+    }
     if (job?.resultEventId && job.resultEventId !== displayedInsightResult) await loadInsightResult(job.resultEventId);
   } catch (error) { if (sid === selectedSessionId) $("#insightStatus").textContent = error.message; }
   finally { insightPolling = false; }

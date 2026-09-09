@@ -27,7 +27,9 @@ class InsightQueueFull(ValueError):
 
 
 class InsightJobs:
-    def __init__(self, generator, resolve, *, concurrency=1, capacity=16):
+    def __init__(self, generator, resolve, *, concurrency=None, capacity=16):
+        if concurrency is None:
+            concurrency = int(os.getenv("EGOASSIST_INSIGHT_CONCURRENCY", "2"))
         self.generator = generator
         self.resolve = resolve
         self.capacity = capacity
@@ -76,15 +78,18 @@ class InsightJobs:
     async def _execute(self, user_id, session_id, journal, row):
         try:
             async with self._slots:
-                row = self._transition(journal, row, status="running", attempt=row["attempt"] + 1,
-                    startedAt=datetime.now(timezone.utc).isoformat())
+                row = self._transition(journal, row, status="running", phase="collecting",
+                    attempt=row["attempt"] + 1, startedAt=datetime.now(timezone.utc).isoformat(),
+                    heartbeatAt=datetime.now(timezone.utc).isoformat())
                 started = time.perf_counter()
                 spec = row["specification"]
                 paths = self.resolve(user_id, session_id, spec["scope"])
                 clock = ClockContext.current(spec["timezone"], spec["utcOffsetMinutes"])
+                row = self._transition(journal, row, phase="generating", sourceCount=len(paths),
+                                       heartbeatAt=datetime.now(timezone.utc).isoformat())
                 result = await asyncio.wait_for(self.generator.generate(user_id=user_id, journal=journal,
                     paths=paths, kind=spec["kind"], anchor=spec["anchor"], clock=clock), timeout=self.timeout)
-                self._transition(journal, row, status=result["status"], resultEventId=result.get("id"),
+                self._transition(journal, row, status=result["status"], phase="finished", resultEventId=result.get("id"),
                     error=result.get("error"), durationMs=round((time.perf_counter() - started) * 1000, 3),
                     finishedAt=datetime.now(timezone.utc).isoformat())
         except asyncio.CancelledError:
