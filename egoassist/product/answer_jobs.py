@@ -194,11 +194,26 @@ class AnswerJobs:
         messages = [{"role": "system", "content": prompt_text("answer_completion/generate")
                      + "\n" + json.dumps(context, ensure_ascii=False)},
                     {"role": "user", "content": row["question"]}]
-        request = journal.append("answer.request", {"turnId": row["turnId"], "model": self.model, "messages": messages})
-        url = dashscope.base_http_api_url.rstrip("/") + "/services/aigc/text-generation/generation"
+        scene = (row.get("context") or {}).get("sharedScene") or {}
+        frame = (scene.get("visual") or {}).get("frame")
+        model = self.model
+        endpoint = "/services/aigc/text-generation/generation"
+        audit_messages = messages
+        if frame:
+            import base64
+            from egoassist.realtime.scene import SharedScene
+            data = SharedScene(journal, self.api_key).media(frame)
+            model = os.getenv("EGOASSIST_SCENE_MODEL", "qwen3-vl-flash")
+            endpoint = "/services/aigc/multimodal-generation/generation"
+            audit_messages = messages + [{"role": "user", "content": [{"mediaEvidence": frame}]}]
+            messages = [{"role": "system", "content": [{"text": messages[0]["content"]}]},
+                        {"role": "user", "content": [{"image": "data:image/jpeg;base64," + base64.b64encode(data).decode()},
+                                                        {"text": row["question"]}]}]
+        request = journal.append("answer.request", {"turnId": row["turnId"], "model": model, "messages": audit_messages})
+        url = dashscope.base_http_api_url.rstrip("/") + endpoint
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=self.timeout), trust_env=True) as session:
             async with session.post(url, headers={"Authorization": "Bearer " + self.api_key}, json={
-                "model": self.model, "input": {"messages": messages},
+                "model": model, "input": {"messages": messages},
                 "parameters": {"result_format": "message", "temperature": 0, "enable_thinking": False, "max_tokens": 1600},
             }) as response:
                 if response.status != 200:
@@ -206,10 +221,12 @@ class AnswerJobs:
                 payload = await response.json()
         choice = payload["output"]["choices"][0]
         text = choice["message"]["content"]
+        if isinstance(text, list):
+            text = "".join(item.get("text", "") for item in text)
         if choice.get("finish_reason") not in {None, "stop"} or not isinstance(text, str) or not text.strip():
             raise ValueError("answer is empty or incomplete")
         result = {"turnId": row["turnId"], "text": text, "providerRequestId": payload.get("request_id"),
-                  "model": self.model, "usage": payload.get("usage", {})}
+                  "model": model, "usage": payload.get("usage", {}), "frameEvidence": frame}
         entry = journal.append("answer.result", result, parent_id=request["id"])
         return {**result, "resultEventId": entry["id"]}
 

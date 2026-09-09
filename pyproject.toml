@@ -44,6 +44,7 @@ gpu = [
     "opencv-python>=4.9", "faiss-cpu>=1.8", "sentencepiece",
 ]
 dev = ["pytest>=8"]
+perception = ["sherpa-onnx==1.13.7", "av>=14"]
 
 [project.scripts]
 egoassist = "run_egoassist:main"

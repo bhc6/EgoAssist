@@ -18,7 +18,7 @@ let connectionGeneration = 0;
 let providerReady = false;
 let mediaPromise = null;
 let mediaGeneration = 0;
-let selectedEventId = null, pipelineDetails = [];
+let selectedEventId = null;
 let currentUser = null, selectedSessionId = null, authMode = "login";
 let sessionCatalog = [], memoryPolicySaving = false;
 let ambientState = null;
@@ -36,51 +36,6 @@ const AUDIO_BUFFER_HIGH_WATER = 512 * 1024;
 const VIDEO_BUFFER_HIGH_WATER = 128 * 1024;
 let droppedAudioChunks = 0;
 let droppedVideoFrames = 0;
-const workflow = {turn: 0, active: false, stages: {}, activity: []};
-const workflowStages = [
-  ["input", "理解请求"],
-  ["reasoning", "思考中"],
-  ["memory", "记忆检索中"],
-  ["action", "执行与校验"],
-  ["delivery", "组织回答"],
-];
-
-function resetWorkflow(detail) {
-  workflow.turn += 1;
-  workflow.active = true;
-  workflow.stages = {input: {status: "active", detail, at: Date.now()}};
-  workflow.activity = [];
-  recordWorkflow("input", detail);
-}
-
-function setWorkflowStage(stage, status, detail) {
-  if (!workflow.active && status === "active") workflow.active = true;
-  workflow.stages[stage] = {status, detail, at: Date.now()};
-  if (detail) recordWorkflow(stage, detail);
-  renderLiveWorkflow();
-}
-
-function recordWorkflow(stage, detail) {
-  const previous = workflow.activity.at(-1);
-  if (previous?.stage === stage && previous.detail === detail) return;
-  workflow.activity.push({stage, detail, at: Date.now()});
-  workflow.activity = workflow.activity.slice(-8);
-}
-
-function renderLiveWorkflow() {
-  const root = $("#liveWorkflow");
-  if (!root) return;
-  const stages = workflowStages.map(([key, label]) => {
-    const item = workflow.stages[key] || {status: "waiting", detail: "等待前序可观测事件"};
-    const statusLabel = {active: "进行中", complete: "已完成", skipped: "未使用", failed: "失败", waiting: "等待"}[item.status] || item.status;
-    return "<article class='workflow-stage " + esc(item.status) + "'><span class='workflow-marker'></span><div><b>" + esc(label) + "</b><small>" + esc(item.detail) + "</small></div><em>" + esc(statusLabel) + "</em></article>";
-  }).join("");
-  const activity = workflow.activity.length
-    ? workflow.activity.slice().reverse().map(item => "<li><time>" + new Date(item.at).toLocaleTimeString("zh-CN", {hour12: false}) + "</time><b>" + esc(workflowStages.find(stage => stage[0] === item.stage)?.[1] || item.stage) + "</b><span>" + esc(item.detail) + "</span></li>").join("")
-    : "<li class='workflow-empty'>等待真实运行事件</li>";
-  root.innerHTML = "<div class='workflow-head'><b>当前工作流</b><span>仅展示事件、检索、工具和响应状态，不展示隐藏思维链</span></div><div class='workflow-stages'>" + stages + "</div><ol class='workflow-activity'>" + activity + "</ol>";
-}
-
 async function request(path, options = {}) {
   const response = await fetch(path, options);
   const body = await response.text();
@@ -291,53 +246,6 @@ function inspect(value) {
   $("#eventInspector").innerHTML = "<div class='event-summary'><span>SELECTED OBSERVABLE</span><h3>" + esc(title) + "</h3><div class='meta-grid'>" + Object.entries(metadata).map(([key, item]) => "<span>" + esc(key) + "</span><b>" + esc(item) + "</b>").join("") + "</div></div><pre>" + esc(JSON.stringify(event || value, null, 2)) + "</pre>";
 }
 
-function renderPipeline(task, mechanism, step) {
-  const scheduler = state.scheduler || {};
-  const lanes = state.providerLanes || {};
-  const retrieval = mechanism.retrieval || {};
-  const routing = state.intentRouting || {status: "no-match", candidates: []};
-  const decision = task?.decision || state.genericDecision || {action: "silent", confidence: 0, reason: "no-domain-intent"};
-  const conversational = state.activeSkill?.workflowMode === "conversational";
-  const taskSummary = task && step ? step.title + " · " + step.status : conversational ? "对话工作流已就绪" : state.activeSkill ? "Skill loaded · task unresolved" : "No task hypothesis";
-  pipelineDetails = [
-    {stage: "capture", title: "音频 / 视频采集", status: stream ? "live" : "idle", summary: stream ? "16 kHz PCM + latest-only JPEG" : "等待浏览器设备", claim: "原始媒体只记录大小和时间，不在账本保存 Base64"},
-    {stage: "attribution", title: "声道与说话者归因", status: stream ? "live" : "idle", summary: "input transcript ≠ spoken output transcript", claim: state.audioAttribution?.claimBoundary || "等待媒体配置"},
-    {stage: "intent", title: "意图路由", status: routing.status === "matched" ? "live" : routing.status === "ambiguous" ? "warning" : "idle", summary: routing.status + " · " + (routing.selectedSkill || "general"), claim: routing.claimBoundary},
-    {stage: "perception", title: "结构化感知", status: task?.observation ? "live" : lanes.perception?.connected ? "warning" : "idle", summary: task?.observation ? task.observation.step + " · age " + task.observation.frameAgeMs + " ms" : lanes.perception?.connected ? "等待任务绑定的新鲜帧" : "感知通道未连接", claim: "每帧绑定 task/version/checkpoint/epoch 与允许路径；模型只产出证据，用户确认才推进 checkpoint"},
-    {stage: "task", title: "Skill / 任务假设", status: task || conversational ? "live" : state.activeSkill ? "warning" : "idle", summary: taskSummary, claim: task ? "Checkpoint ledger，不规定唯一执行路径" : conversational ? "领域指令已加载；无固定步骤" : "无证据时不加载领域工作流"},
-    {stage: "knowledge", title: "知识增强", status: state.knowledgeMechanism.method === "none" ? "idle" : "warning", summary: state.knowledgeMechanism.method, claim: state.knowledgeMechanism.claimBoundary},
-    {stage: "memory", title: "TimelineMemory 检索", status: retrieval.status === "matched" || state.episodicMemory?.count ? "live" : "idle", summary: "timeline " + (state.episodicMemory?.count || 0) + " cards · 注入 " + (state.episodicMemory?.retrieval?.injection?.evidence?.length || 0) + " · " + (state.episodicMemory?.retrieval?.method || "none"), claim: "用户范围、原文实体与时间证据约束；FTS/词项排序分数不是事实正确概率"},
-    {stage: "policy", title: "主动干预策略", status: "live", summary: actionName(decision.action), claim: decision.reason},
-    {stage: "scheduler", title: "响应调度与打断", status: scheduler.pending || scheduler.activeResponseIds?.length ? "live" : "idle", summary: (lanes.dialogue?.turnDetection || "unknown") + " · " + (scheduler.activePolicies?.[0]?.speechPolicy || state.turnTakingPolicy.currentSelection.policy), claim: "转写后先检索与更新上下文，再显式创建唯一回答；Skill 可配置：" + state.turnTakingPolicy.currentSelection.basis},
-    {stage: "output", title: "语音与字幕输出", status: scheduler.activeResponseIds?.length ? "live" : "idle", summary: scheduler.activeResponseIds?.join(", ") || "等待输出", claim: "只展示可验证输出和结构化中间产物，不声称访问隐藏思维链"}
-  ];
-  // liveWorkflow is the only visible workflow renderer. Keep pipelineDetails
-  // as the inspector source so old deep links and tests remain compatible.
-  const legacyPipeline = $("#pipeline");
-  if (legacyPipeline) legacyPipeline.innerHTML = "";
-  renderLiveWorkflow();
-}
-
-function syncWorkflowFromState(task, mechanism) {
-  if (!workflow.active) return;
-  const retrieval = mechanism?.retrieval || {};
-  const candidates = retrieval.candidates || [];
-  if (retrieval.status === "matched") {
-    const selected = candidates.filter(item => item.selected).length;
-    setWorkflowStage("memory", "complete", "检索完成：候选 " + candidates.length + "，选中 " + selected);
-  } else if (["no-match", "none", "disabled"].includes(retrieval.status)) {
-    setWorkflowStage("memory", "skipped", retrieval.status === "disabled" ? "当前记忆策略已关闭" : "本轮没有可注入的匹配记忆");
-  }
-  const decision = task?.decision || state.genericDecision;
-  if (decision?.action) {
-    setWorkflowStage("reasoning", "complete", "已形成可观测决策：" + actionName(decision.action));
-    if (!state.scheduler?.pending && !(state.scheduler?.activeResponseIds || []).length) {
-      setWorkflowStage("action", "skipped", "当前决策不需要外部工具或后台任务");
-      setWorkflowStage("delivery", "active", "决策已进入响应调度器");
-    }
-  }
-}
-
 function renderTimeline(events) {
   $("#eventCount").textContent = events.length + " events";
   $("#timeline").innerHTML = events.length ? events.slice(-60).map(event => "<button class='event-chip " + eventClass(event.type) + "' data-event='" + esc(event.eventId) + "'><b>" + esc(event.type) + "</b><span>" + esc(eventTime(event) + " · " + event.source) + "</span></button>").join("") : "<span>等待事件</span>";
@@ -350,7 +258,10 @@ const terminalWorkStatus = status => ["completed", "failed", "cancelled", "deliv
 
 function workLabel(item, fallback) {
   const semantic = item.payload?.semantic || {};
-  return semantic.summary || semantic.input || item.payload?.text || item.skillRef?.task || fallback;
+  const intent = state.workLedger?.intents?.find(i => i.intentId === item.intentId);
+  const turnId = item.payload?.turnId || item.detail?.turnId || item.turnIds?.[0] || intent?.turnIds?.[0];
+  const turn = state.workLedger?.turnInbox?.find(t => t.turnId === turnId);
+  return semantic.summary || semantic.input || item.payload?.text || turn?.text || item.skillRef?.task || workKindLabel(fallback);
 }
 
 async function renderArtifactPage() {
@@ -460,14 +371,17 @@ function renderWorkCenter() {
     interrupted: "回答已打断", classifying: "正在分析问题", processing: "正在处理", ready: "等待执行",
     deferred: "排队中", failed: "处理失败", cancelled: "已取消"};
   const turns = ledger.turnInbox || [];
-  const recentTurnIds = new Set(turns.slice(-8).map(turn => turn.turnId));
-  $("#turnHistory").innerHTML = turns.filter(turn => recentTurnIds.has(turn.turnId) ||
-    !["completed", "cancelled"].includes(turn.answer?.status || turn.delivery?.status || turn.status)).reverse().map(turn => {
+  const history = $("#turnHistory");
+  const historySessionChanged = history.dataset.session !== selectedSessionId;
+  const followLatest = historySessionChanged || history.scrollHeight - history.scrollTop - history.clientHeight < 48;
+  const historyScroll = history.scrollTop;
+  history.dataset.session = selectedSessionId;
+  const historyHTML = turns.map(turn => {
     const status = turn.delivery?.status || turn.status;
     const answer = turn.answer;
     const answerLabels = {queued: "后台补全排队中", running: "正在后台补全", paused: "已暂停计算", failed: "后台补全失败", cancelled: "已取消或被更正",
       completed: answer?.channel === "background-text" ? "已在后台回答" : status === "completed" && turn.delivery?.channel === "device-playback" ? "设备已播完" : "已生成 · 播放未确认"};
-    const label = answer && answer.status !== "foreground" ? answerLabels[answer.status]
+    const label = !answer && turn.status === "completed" && turn.semantic?.interaction?.action === "listen" ? "现场对话已记录，无需助手回答" : answer && answer.status !== "foreground" ? answerLabels[answer.status]
       : !turn.delivery && status === "completed" ? "已处理，查看任务结果" : turnStates[status] || status;
     return "<div class='turn-history-row' data-turn-id='" + esc(turn.turnId) + "'><p>" + esc(turn.text) +
       "</p><small>" + esc(label) + " · " + esc(turn.turnId) + "</small>" +
@@ -480,6 +394,10 @@ function renderWorkCenter() {
       (answer?.status === "failed" ? "<button type='button' data-answer-action='retry' data-answer-turn='" + esc(turn.turnId) + "'>重试回答</button>" : "") +
       (!answer && ["interrupted", "failed"].includes(status) ? "<button type='button' data-reask-turn='" + esc(turn.turnId) + "'>重新提问</button>" : "") + "</div>";
   }).join("");
+  if (history.innerHTML !== historyHTML) {
+    history.innerHTML = historyHTML;
+    history.scrollTop = followLatest ? history.scrollHeight : historyScroll;
+  }
   const capabilities = state.capabilityCatalog?.platform || [];
   const unavailable = capabilities.filter(item => item.status !== "available");
   const timerCapability = capabilities.find(item => item.id === "timer-delivery") || {
@@ -490,43 +408,43 @@ function renderWorkCenter() {
   };
   $("#createReminder").disabled = timerCapability.status !== "available";
   $("#reminderAvailability").textContent = timerCapability.status === "available"
-    ? "Temporal · durable"
-    : timerCapability.status + " · " + timerCapability.reason;
+    ? "重启后仍保留"
+    : "提醒服务尚未就绪";
   $("#requestHumanHelp").disabled = humanHelpCapability.status !== "available";
   $("#humanHelpAvailability").textContent = humanHelpCapability.status === "available"
-    ? "webhook · consent required" : humanHelpCapability.status + " · " + humanHelpCapability.reason;
+    ? "发送前需核对内容" : "尚未配置接收方";
   $("#capabilityTruth").innerHTML = capabilities.map(item =>
     "<span class='capability-state " + esc(item.status) + "' title='" + esc(item.reason) + "'><b>" +
-    esc(item.label + " · " + item.status) + "</b></span>"
+    esc(item.label + " · " + workStatusLabel(item.status)) + "</b></span>"
   ).join("") || "<span class='muted'>能力真值尚未加载</span>";
 
   const activeJobs = ledger.jobs.filter(item => !terminalWorkStatus(item.status));
   const pendingResults = ledger.resultInbox.filter(item => !["delivered", "dismissed"].includes(item.status));
-  $("#workCenterCounts").textContent = activeJobs.length + " active · " + pendingResults.length + " results · " + unavailable.length + " limited";
+  $("#workCenterCounts").textContent = activeJobs.length + " 项进行中 · " + pendingResults.length + " 项待确认结果";
 
   $("#intentList").innerHTML = ledger.intents.length ? [...ledger.intents].reverse().map(item => {
     const focused = item.intentId === ledger.foregroundIntentId;
     const canFocus = !focused && !terminalWorkStatus(item.status) && item.detail?.runtimeCheckpoint;
     return "<article class='work-row " + esc(item.status) + "'><div><b>" + esc(workLabel(item, item.kind)) +
-      "</b><small>" + esc(item.kind + " · " + item.status) + "</small></div>" +
+      "</b><small>" + esc(workKindLabel(item.kind) + " · " + workStatusLabel(item.status)) + "</small></div>" +
       (canFocus ? "<button data-focus-intent='" + esc(item.intentId) + "'>切到前台</button>" : focused ? "<b>前台</b>" : "") +
       "</article>";
   }).join("") : "<p class='empty-state'>暂无已记录意图</p>";
 
-  $("#jobList").innerHTML = ledger.jobs.length ? [...ledger.jobs].reverse().map(item => {
+  $("#jobList").innerHTML = activeJobs.length ? [...activeJobs].reverse().map(item => {
     const cancellable = !terminalWorkStatus(item.status);
     return "<article class='work-row " + esc(item.status) + "'><div><b>" + esc(workLabel(item, item.kind)) +
-      "</b><small>" + esc(item.kind + " · " + item.status) + "</small></div>" +
+      "</b><small>" + esc(workKindLabel(item.kind) + " · " + workStatusLabel(item.status)) + "</small></div>" +
       (cancellable ? "<button class='danger' data-cancel-job='" + esc(item.jobId) + "'>取消</button>" : "") +
       "</article>";
-  }).join("") : "<p class='empty-state'>暂无可执行任务</p>";
+  }).join("") : "<p class='empty-state'>当前没有后台待办</p>";
 
   $("#resultInbox").innerHTML = ledger.resultInbox.length ? [...ledger.resultInbox].reverse().map(item => {
-    const content = typeof item.content === "string" ? item.content : JSON.stringify(item.content);
+    const content = readableResult(item.content);
     const dismissible = !["delivered", "dismissed"].includes(item.status);
     const artifact = item.content?.artifact || item.content?.result?.artifact;
     return "<article class='work-row " + esc(item.status) + "'><div><b>" + esc(content) +
-      "</b><small>" + esc(item.status + " · priority " + item.priority) + "</small></div>" +
+      "</b><details><summary>原始结果</summary><pre>" + esc(JSON.stringify(item.content, null, 2)) + "</pre></details><small>" + esc(workStatusLabel(item.status)) + "</small></div>" +
       "<div class='work-row-actions'>" +
       (artifact ? "<button data-open-artifact='" + esc(artifact.artifact_id) + "'>查看</button>" : "") +
       (dismissible ? "<button data-dismiss-result='" + esc(item.resultId) + "'>确认</button>" : "") + "</div>" +
@@ -680,6 +598,7 @@ function renderPerformance(audit = {}) {
 
 function render(next) {
   state = next;
+  renderSharedScene(state.sharedScene);
   renderPerformance(state.performance);
   syncInsightSession();
   maybeSuggest();
@@ -695,7 +614,7 @@ function render(next) {
   $("#promptHash").textContent = state.promptContext.hash;
   $("#promptContext").textContent = state.promptContext.text;
   const conversational = state.activeSkill?.workflowMode === "conversational";
-  $("#skillName").textContent = state.activeSkill ? state.activeSkill.name + " / " + (task ? task.task.title : conversational ? "对话工作流" : "待确认任务") : "General / no Skill";
+  $("#skillName").textContent = state.activeSkill ? state.activeSkill.name + " / " + (task ? task.task.title : conversational ? "对话工作流" : "待确认任务") : "通用对话";
   $("#taskTitle").textContent = task ? task.task.title + " · " + task.task.version : conversational ? "对话工作流已就绪" : "No task hypothesis";
   $("#skillSelect").innerHTML = "<option value=''>通用模式 · 按意图加载</option>" + state.skills.map(item => "<option value='" + esc(item.name) + "'>" + esc(item.name) + " · " + (item.workflowMode === "conversational" ? "对话工作流" : item.tasks.length + " tasks") + "</option>").join("");
   $("#skillSelect").value = state.activeSkill?.name || "";
@@ -722,7 +641,7 @@ function render(next) {
   const latestRejection = task?.perception?.audit?.[0];
   $("#vision").textContent = task?.observation
     ? task.observation.step + " · accepted · age " + task.observation.frameAgeMs + " ms"
-    : latestRejection ? "rejected · " + latestRejection.reason : "等待任务绑定的结构化视觉证据";
+    : latestRejection ? "证据未采纳 · " + latestRejection.reason : stream && state.sharedScene?.camera === "receiving" ? "现场画面接收中" : "";
   $("#memoryScope").textContent = "exact-trigger-lookup · " + (mechanism.scope.skill || "general") + " / " + (mechanism.scope.task || "unscoped");
   renderMemoryPolicy(state.memoryPolicy, state.memoryProfiles || []);
   const episodic = state.episodicMemory || {recent: [], retrieval: {candidates: []}};
@@ -738,8 +657,7 @@ function render(next) {
   $$('[data-requires-task]').forEach(button => button.disabled = !task);
   $("#taskDebug").hidden = !task;
   renderWorkCenter();
-  renderPipeline(task, mechanism, step);
-  syncWorkflowFromState(task, mechanism);
+  renderTurnWorkflow();
   renderTimeline(state.events || []);
   renderPerceptionEvidence(task);
   renderAmbient();
@@ -902,6 +820,11 @@ async function ensureMedia() {
     $("#cameraEmpty").hidden = true;
     $("#cameraState").textContent = "摄像头与麦克风在线";
     $("#cameraButton").textContent = "关闭设备";
+    if (socket?.readyState === WebSocket.OPEN) {
+      await activateWebSocketMediaFallback();
+      startLocalVad(stream);
+      sendMediaConfiguration(socket);
+    }
     return stream;
   })();
   mediaPromise = attempt;
@@ -1069,7 +992,8 @@ function sendVideoFrame() {
   context.drawImage(video, 0, 0, canvas.width, canvas.height);
   context.restore();
   const image = canvas.toDataURL("image/jpeg", 0.72).split(",", 2)[1];
-  socket.send(JSON.stringify({type: "video", image}));
+  socket.send(JSON.stringify({type: "video", image, capture: {capturedAt: new Date().toISOString(),
+    monotonicMs: performance.now(), mirrored: mirrorCamera, width: canvas.width, height: canvas.height}}));
 }
 
 function applyCameraOrientation() {
@@ -1130,7 +1054,10 @@ function stopPlayback() {
 }
 
 async function connectRealtime({media = true, retryAttempt = 0} = {}) {
-  if (socket && socket.readyState === WebSocket.OPEN && providerReady && !connectingPromise) return;
+  if (socket && socket.readyState === WebSocket.OPEN && providerReady && !connectingPromise) {
+    if (media && !stream) await ensureMedia();
+    return;
+  }
   if (connectingPromise) return connectingPromise;
   const generation = ++connectionGeneration;
   if (socket) socket.close();
@@ -1177,7 +1104,7 @@ async function connectRealtimeSession(generation, media, retryAttempt) {
   ws.onopen = () => {
     if (socket !== ws || generation !== connectionGeneration) { ws.close(); return; }
     $("#duplexState").textContent = "正在连接实时模型…";
-    if (media && interactionTransport !== "livekit") {
+    if (stream && interactionTransport !== "livekit") {
       startAudioCapture().catch(() => {});
       const fps = Number($("#videoFps").value);
       if (videoTimer) clearInterval(videoTimer);
@@ -1237,8 +1164,6 @@ async function connectRealtimeSession(generation, media, retryAttempt) {
     } else if (message.type === "speech_control") {
       if (message.action !== "resume") stopPlayback();
       $("#duplexState").textContent = message.action === "resume" ? "正在继续原回答" : message.action === "uncertain" ? "暂不播报 · 等待明确意图" : message.action === "cancel-answer" ? "已取消指定回答 · 正在听" : "已停止播报 · 正在听";
-      setWorkflowStage("delivery", "complete", "语音控制已生效");
-      workflow.active = false;
     } else if (message.type === "interaction_status" && (!message.turnId || !currentTurnId || message.turnId === currentTurnId)) {
       $("#duplexState").textContent = "语义服务超时 · 保持静默并重试一次";
     } else if (message.type === "interrupted") {
@@ -1253,12 +1178,8 @@ async function connectRealtimeSession(generation, media, retryAttempt) {
       currentTurnId = message.turnId || null;
       assistantText = "";
       captionResponseId = null;
-      $("#transcript").textContent = "你 · " + (message.channel || "input_audio_transcription") + "：" + message.text + (message.echoRisk === "suspected" ? " · 可能残余回声" : "");
+      $("#transcript").textContent = (message.channel === "explicit_control" ? "你的文字" : "现场语音 · 说话人待核验") + "：" + message.text + (message.echoRisk === "suspected" ? " · 可能残余回声" : "");
       $("#duplexState").textContent = media ? "正在听你说话" : "正在处理文本";
-      resetWorkflow("收到用户转写：" + String(message.text || "").slice(0, 80));
-      setWorkflowStage("input", "complete", "用户转写已归因并进入当前轮次");
-      setWorkflowStage("reasoning", "active", "正在进行意图路由与上下文编排");
-      setWorkflowStage("memory", "active", "正在查询当前范围的 TimelineMemory");
     } else if (message.type === "assistant_transcript" && ["conversation", "proactive-utterance"].includes(message.purpose)) {
       livekitAudioElements.forEach(element => { element.muted = false; });
       if (captionResponseId !== message.responseId) assistantText = "";
@@ -1266,7 +1187,6 @@ async function connectRealtimeSession(generation, media, retryAttempt) {
       assistantText = message.done ? message.text : assistantText + message.text;
       $("#assistantCaption").innerHTML = "<span>助手语音字幕 · " + (message.origin?.background ? "后台结果 · " : "") + (message.done ? "字幕已收齐" : "生成中") + "</span><p>" + esc(assistantText) + "</p>";
       $("#duplexState").textContent = message.done ? "字幕已收齐，等待模型结束响应" : "助手正在说 · 你可以随时打断";
-      setWorkflowStage("delivery", "active", message.done ? "等待模型最终响应状态" : "正在生成并流式交付回答");
       if (message.done) assistantText = "";
     } else if (message.type === "response_status") {
       if (audioContext) playbackAudit.report(audioContext.currentTime, "generation-" + message.status, message.responseId);
@@ -1280,12 +1200,8 @@ async function connectRealtimeSession(generation, media, retryAttempt) {
         captionResponseId = null;
         stopPlayback();
         $("#duplexState").textContent = "语音已中断 · 查看问题处理状态";
-        setWorkflowStage("delivery", "failed", "模型响应中断，未完整输出");
-        workflow.active = false;
       } else if (message.status === "completed" && message.responseId === captionResponseId) {
         $("#duplexState").textContent = media ? "全双工在线 · 正在听" : "文本会话在线";
-        setWorkflowStage("delivery", "complete", "模型响应已完整接收");
-        workflow.active = false;
       }
     } else if (message.type === "turn_receipt") {
       try { turnOutbox().acknowledge(message.turnId); }
@@ -1297,21 +1213,7 @@ async function connectRealtimeSession(generation, media, retryAttempt) {
       $("#duplexState").textContent = message.status === "committed"
         ? (media ? "记忆已提交 · 正在听" : "记忆已提交 · 文本会话在线")
         : message.status === "needs-input" ? "等待补充要记住的内容" : "记忆未提交";
-      setWorkflowStage("reasoning", "complete", "记忆事务处理结束");
-      setWorkflowStage("action", message.status === "committed" ? "complete" : "skipped", message.message);
-      setWorkflowStage("delivery", "complete", "服务端记忆回执已交付（文字）");
-      workflow.active = false;
-    } else if (message.type === "memory_trace") {
-      if (message.op === "retrieve") {
-        setWorkflowStage("memory", "complete", "检索完成：候选 " + (message.candidate_count || 0) + "，选中 " + (message.selected_count || 0));
-        if (workflow.active) setWorkflowStage("reasoning", "active", "正在基于检索证据与当前状态形成可交付决策");
-      } else if (message.op === "working_memory_push") {
-        setWorkflowStage("memory", "complete", "检索证据已注入当前工作上下文");
-      }
-    } else if (message.type === "task_update") {
-      setWorkflowStage("action", ["done", "completed"].includes(message.status) ? "complete" : message.status === "failed" ? "failed" : "active", "后台任务 " + (message.kind || "job") + " · " + (message.status || "pending"));
     } else if (message.type === "tool_confirmation_required") {
-      setWorkflowStage("action", "active", "工具 " + message.tool + " 等待用户确认");
       const details = JSON.stringify(message.arguments || {}, null, 2);
       const accepted = window.confirm("Allow tool " + message.tool + "?\n\n" + details);
       if (socket === ws && ws.readyState === WebSocket.OPEN) {
@@ -1425,6 +1327,7 @@ $("#textTurnForm").onsubmit = async event => {
     const pending = {type: "control", transcript, clientRequestId: currentTurnId};
     turnOutbox().add(pending);
     input.value = "";
+    sendVideoFrame();
     socket.send(JSON.stringify(pending));
   } catch (error) { $("#textTurnError").textContent = error.message; }
   finally { button.disabled = false; }
@@ -1712,7 +1615,8 @@ function maybeSuggest() {
   if (!currentUser || !state || !$("#proactiveSuggestions").checked || insightBusy || Date.now() - insightLastAttempt < 30000) return;
   if (insightJobs.some(job => ["queued", "running"].includes(job.status) && job.specification.kind === "suggestions")) return;
   const turn = [...(state.events || [])].reverse().find(item => item.type === "message" && item.payload?.message?.role === "user");
-  if (!turn || turn.eventId === insightTurn || workflow.active) return;
+  if (!turn || turn.eventId === insightTurn || state.workLedger?.turnInbox?.some(t =>
+      ["received", "classifying", "ready", "processing"].includes(t.status) || t.answer?.status === "foreground")) return;
   insightTurn = turn.eventId;
   generateInsight(true);
 }

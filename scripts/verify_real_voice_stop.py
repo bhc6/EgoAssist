@@ -30,13 +30,13 @@ from verify_real_skill_lifecycle import connect
 from research_interruption_semantics import assess
 
 
-async def synthesize(text, output, index):
+async def synthesize(text, output, index, voice="Cherry"):
     import dashscope
     api_key = os.getenv("QWEN_API_KEY") or os.getenv("DASHSCOPE_API_KEY")
     async with aiohttp.ClientSession(trust_env=True, timeout=aiohttp.ClientTimeout(total=40)) as http:
         async with http.post(dashscope.base_http_api_url.rstrip("/") + "/services/aigc/multimodal-generation/generation",
             headers={"Authorization": "Bearer " + api_key}, json={"model": "qwen3-tts-flash",
-                "input": {"text": text, "voice": "Cherry", "language_type": "Chinese"}}) as response:
+                "input": {"text": text, "voice": voice, "language_type": "Chinese"}}) as response:
             payload = await response.json()
             assert response.status == 200, {"status": response.status, "code": payload.get("code")}
         audio = payload["output"]["audio"]

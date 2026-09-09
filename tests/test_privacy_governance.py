@@ -55,6 +55,22 @@ def test_export_preserves_valid_rows_and_reports_corrupt_journal_lines(tmp_path)
     assert exported["exportErrors"][0]["lines"] == [2]
 
 
+def test_export_and_delete_include_original_media(tmp_path):
+    import base64
+    import hashlib
+    user_id, _, _, _, service = _governance(tmp_path)
+    data = b"RIFF-audio-evidence"
+    root = tmp_path / "users" / user_id / "sessions" / "media" / "case-1"
+    root.mkdir(parents=True)
+    path = root / (hashlib.sha256(data).hexdigest() + ".wav")
+    path.write_bytes(data)
+    exported = service.export_account(user_id)
+    assert exported["complete"]
+    assert base64.b64decode(exported["mediaFiles"][0]["content"]) == data
+    service.delete_account(user_id)
+    assert not path.exists()
+
+
 def test_deletion_is_complete_idempotent_and_only_leaves_bounded_evidence(tmp_path):
     user_id, identity, database, timeline, service = _governance(tmp_path)
     timeline.remember("sensitive", user_id=user_id, case_id=None, scope="participant", kind="fact")

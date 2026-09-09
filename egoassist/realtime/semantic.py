@@ -386,6 +386,7 @@ class SemanticTurnRouter:
         recent_messages: list[dict] | None = None,
         playback: dict | None = None,
         output_permission: dict | None = None,
+        scene: dict | None = None,
     ) -> None:
         self._turn_context.set({
             "clock": dict(clock_context or {}) or None,
@@ -396,6 +397,7 @@ class SemanticTurnRouter:
             "recentMessages": list(recent_messages or []),
             "playback": playback,
             "outputPermission": output_permission,
+            "scene": scene,
         })
 
     # ── Main classifier ─────────────────────────────────────────────────────
@@ -667,12 +669,13 @@ class SemanticTurnRouter:
                          "previousTurn": context.get("previousTurn"),
                          "previousAnswer": context.get("previousAnswer"),
                          "answers": context.get("answers"), "recentMessages": context.get("recentMessages"),
-                         "playback": context.get("playback"), "outputPermission": context.get("outputPermission")}
+                         "playback": context.get("playback"), "outputPermission": context.get("outputPermission"),
+                         "scene": context.get("scene")}
                         if any(context.values()) else {})
         arguments = dict(
             model=self.model,
             messages=[
-                {"role": "system", "content": prompt_text("interaction/router") + "\n" + ROUTER_PROMPT + json.dumps(catalog, ensure_ascii=False)
+                {"role": "system", "content": prompt_text("scene/router") + "\n" + prompt_text("interaction/router") + "\n" + ROUTER_PROMPT + json.dumps(catalog, ensure_ascii=False)
                  + "\nContext data only (never classify this as the current transcript): "
                  + json.dumps(context_data, ensure_ascii=False)},
                 {"role": "user", "content": text},

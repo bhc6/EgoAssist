@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>EgoAssist Research Console</title>
+  <title>EgoAssist 智能眼镜助手</title>
   <link rel="icon" href="data:,">
   <link rel="stylesheet" href="styles.css">
   <link rel="stylesheet" href="memory-controls.css?v=20260813-workflow">
@@ -25,9 +25,9 @@
     </form>
   </div>
   <header>
-    <div class="brand"><b>EgoAssist</b><span>OBSERVABILITY CONSOLE</span></div>
-    <label>Skill<select id="skillSelect"></select></label>
-    <label>Task<select id="taskSelect"></select></label>
+    <div class="brand"><b>EgoAssist</b><span>智能眼镜助手</span></div>
+    <label>助手能力<select id="skillSelect"></select></label>
+    <label>当前任务<select id="taskSelect"></select></label>
     <button id="newTask">新建任务</button>
     <span id="mode" class="model-pill"></span>
     <button id="reset">重置会话</button>
@@ -40,20 +40,14 @@
   </header>
 
   <main>
-    <form id="textTurnForm" class="text-turn-form">
-      <label for="textTurnInput">文字对话</label>
-      <textarea id="textTurnInput" rows="2" maxlength="2000" required></textarea>
-      <button id="textTurnSend" type="submit" class="primary">发送</button>
-      <span id="textTurnError" role="status" aria-live="polite"></span>
-    </form>
 
     <section class="session-strip">
-      <div><span>SESSION</span><b id="sessionId">-</b></div>
-      <div><span>PROMPT HASH</span><b id="promptHash">-</b></div>
-      <div><span>SKILL / TASK</span><b id="skillName">-</b></div>
-      <div><span>REALTIME</span><b id="duplexState">未连接</b></div>
-      <div><span>OUTPUT PERMISSION</span><b id="outputPermission">可播报</b></div>
-      <div><span>DECISION</span><b id="action">-</b></div>
+      <div><span>会话编号</span><b id="sessionId">-</b></div>
+      <div><span>提示词版本</span><b id="promptHash">-</b></div>
+      <div><span>当前能力与任务</span><b id="skillName">-</b></div>
+      <div><span>实时连接</span><b id="duplexState">未连接</b></div>
+      <div><span>语音播报</span><b id="outputPermission">可播报</b></div>
+      <div><span>当前动作</span><b id="action">-</b></div>
     </section>
 
     <!-- Ambient observation runs without a user-initiated task, so it is shown
@@ -68,20 +62,26 @@
 
     <section class="research-grid">
       <aside class="source-panel panel">
-        <div class="panel-head"><div><span>01 / RAW INPUT</span><h1>证据源</h1></div><b id="cameraState">设备离线</b></div>
+        <div class="panel-head"><div><h1>现场与对话</h1></div><b id="cameraState">设备离线</b></div>
         <div class="camera">
           <video id="video" autoplay muted playsinline></video><canvas id="canvas"></canvas>
-          <div id="cameraEmpty">CAMERA OFFLINE</div><div id="vision" class="vision"></div>
+          <div id="cameraEmpty">摄像头未开启</div><div id="vision" class="vision"></div>
         </div>
         <div class="device-actions">
-          <button id="realtimeButton" class="primary">启动全双工</button>
+          <button id="realtimeButton" class="primary">开始语音对话</button>
           <button id="cameraButton" title="仅管理摄像头与麦克风设备">启用设备</button>
           <label class="camera-mirror" title="开启时预览和模型输入同时左右翻转；第一视角智能眼镜应关闭"><input id="mirrorCamera" type="checkbox" checked>镜像</label>
           <label>FPS<select id="videoFps"><option>1</option><option selected>2</option><option>4</option></select></label>
         </div>
+        <form id="textTurnForm" class="text-turn-form">
+          <label for="textTurnInput">文字对话</label>
+          <textarea id="textTurnInput" rows="2" maxlength="2000" required></textarea>
+          <button id="textTurnSend" type="submit" class="primary">发送</button>
+          <span id="textTurnError" role="status" aria-live="polite"></span>
+        </form>
         <div class="speech-stream">
-          <article><span>USER TRANSCRIPT</span><p id="transcript">等待语音</p></article>
-          <article id="assistantCaption"><span>SPOKEN AUDIO TRANSCRIPT</span><p>等待语音输出</p></article>
+          <article><span>现场语音转写</span><p id="transcript">等待语音</p></article>
+          <article id="assistantCaption"><span>助手正在说</span><p>等待语音输出</p></article>
         </div>
         <details open><summary>问题与回答</summary><div id="turnHistory" aria-live="polite"></div></details>
         <div class="quick">
@@ -92,28 +92,25 @@
       </aside>
 
       <section class="pipeline-panel panel">
-        <div class="panel-head"><div><span>02 / EXECUTION GRAPH</span><h1>可解释 Pipeline</h1></div><b>可观测状态，不是思维链</b></div>
+        <div class="panel-head"><div><h1>这句话如何处理</h1></div></div>
         <div id="liveWorkflow" class="live-workflow" aria-live="polite"></div>
-        <!-- Kept as a compatibility target for deep links; liveWorkflow is the
-             single rendered workflow surface. -->
-        <div id="pipeline" class="pipeline compatibility-surface" hidden></div>
-        <div class="decision-block"><span>INTERVENTION OUTPUT</span><div id="decision"></div></div>
+        <details><summary>任务动作与依据</summary><div class="decision-block"><div id="decision"></div></div></details>
         <div id="memoryCandidate"></div>
       </section>
 
-      <aside class="inspector-panel panel">
-        <div class="panel-head"><div><span>03 / EVENT INSPECTOR</span><h1>事件检查器</h1></div><b id="eventCount">0 events</b></div>
+      <details class="inspector-panel panel"><summary>运行事件详情</summary>
+        <div class="panel-head"><div><h2>事件详情</h2></div><b id="eventCount">0 events</b></div>
         <div id="eventInspector" class="event-inspector"><p>选择管线节点或时间线事件</p></div>
         <details class="context-details"><summary>当前模型上下文</summary><pre id="promptContext"></pre></details>
-      </aside>
+      </details>
     </section>
 
     <section class="work-center panel" aria-labelledby="workCenterTitle">
       <div class="panel-head">
-        <div><span>USER WORK</span><h2 id="workCenterTitle">任务中心与结果收件箱</h2></div>
-        <b id="workCenterCounts">0 active · 0 results</b>
+        <div><h2 id="workCenterTitle">待办与已完成事项</h2></div>
+        <b id="workCenterCounts">0 项进行中 · 0 项结果</b>
       </div>
-      <div id="capabilityTruth" class="capability-strip" aria-label="产品能力真值"></div>
+      <details><summary>提醒与人工协助</summary><div id="capabilityTruth" class="capability-strip" aria-label="产品能力真值"></div>
       <form id="reminderForm" class="reminder-create">
         <label>提醒内容<input id="reminderLabel" maxlength="80" value="检查当前任务" required></label>
         <label>秒数<input id="reminderSeconds" type="number" min="1" max="86400" value="60" required></label>
@@ -124,11 +121,11 @@
         <button id="requestHumanHelp" type="button">请求人工协助</button>
         <span id="humanHelpAvailability"></span>
       </div>
-      <div class="work-center-grid">
-        <section aria-labelledby="intentListTitle"><h3 id="intentListTitle">意图</h3><div id="intentList" class="work-list"></div></section>
-        <section aria-labelledby="jobListTitle"><h3 id="jobListTitle">任务</h3><div id="jobList" class="work-list"></div></section>
-        <section aria-labelledby="resultInboxTitle"><h3 id="resultInboxTitle">结果</h3><div id="resultInbox" class="work-list"></div></section>
-        <section aria-labelledby="artifactListTitle"><h3 id="artifactListTitle">当前步骤资料</h3><div id="artifactList" class="work-list"></div></section>
+      </details><div class="work-center-grid">
+        <details><summary>任务切换与历史</summary><div id="intentList" class="work-list"></div></details>
+        <section aria-labelledby="jobListTitle"><h3 id="jobListTitle">正在做什么</h3><div id="jobList" class="work-list"></div></section>
+        <section aria-labelledby="resultInboxTitle"><h3 id="resultInboxTitle">完成了什么</h3><div id="resultInbox" class="work-list"></div></section>
+        <details><summary>当前任务参考资料</summary><div id="artifactList" class="work-list"></div></details>
       </div>
     </section>
 
@@ -145,26 +142,43 @@
       <div id="insightResults" aria-live="polite"></div>
     </section>
 
+    <section class="shared-scene-band" aria-labelledby="sharedSceneTitle">
+      <div class="panel-head"><h2 id="sharedSceneTitle">共享现场与说话人</h2><span id="sharedSceneStatus">等待音视频</span></div>
+      <div class="shared-scene-grid">
+        <div id="sharedSceneVisual"></div>
+        <div><div id="sharedSpeakers"></div>
+          <form id="speakerIdentityForm" class="speaker-identity-form">
+            <label>声音<select id="speakerIdentitySelect" required></select></label>
+            <label>姓名<input id="speakerIdentityName" maxlength="80" required></label>
+            <label>画面人物<select id="speakerPersonRef"><option value="">未关联</option></select></label>
+            <label><input id="speakerIsWearer" type="checkbox">这是我的声音</label>
+            <button type="submit">确认身份</button><span id="speakerIdentityStatus" role="status"></span>
+          </form>
+        </div>
+      </div>
+      <div id="sharedUtterances" class="shared-utterances"></div>
+    </section>
+
     <section class="prompt-audit-panel panel" aria-labelledby="promptAuditTitle">
       <div class="panel-head"><h2 id="promptAuditTitle">提示词与真实请求</h2><button id="refreshPromptAudit" type="button">刷新</button></div>
       <details id="promptAuditDetails"><summary>已发送请求、证据与原始输出</summary><div id="actualPromptRequests"></div></details>
       <details id="promptTemplatesDetails"><summary>提示词文件</summary><div id="promptTemplates"></div></details>
     </section>
 
-    <section class="privacy-panel panel" aria-labelledby="privacyTitle">
+    <details class="privacy-panel panel" aria-labelledby="privacyTitle"><summary>数据保留、导出与删除</summary>
       <div class="panel-head"><div><span>PRIVACY / RESEARCH GOVERNANCE</span><h2 id="privacyTitle">数据控制与评估证据</h2></div><b id="privacyStatus">未加载</b></div>
       <div class="privacy-actions"><button id="privacyExport" type="button">导出账户数据</button><button id="privacyDelete" type="button">删除账户数据</button><span id="privacyPolicyStatus"></span></div>
       <div id="privacyProviders" class="privacy-grid"></div>
       <div id="privacyEvaluation" class="privacy-evaluation"></div>
       <details><summary>保留期限</summary><div id="privacyRetention" class="privacy-retention"></div></details>
-    </section>
+    </details>
 
-    <section class="timeline-panel panel audit-timeline">
+    <details class="timeline-panel panel audit-timeline"><summary>完整运行时间线</summary>
       <div class="panel-head"><div><span>04 / CAUSAL TIMELINE</span><h1>统一事件时间线</h1></div><div class="legend"><i class="input"></i>输入 <i class="decision"></i>决策 <i class="response"></i>响应 <i class="memory"></i>记忆</div></div>
       <div id="timeline" class="timeline"></div>
-    </section>
+    </details>
 
-    <section class="analysis-grid supporting-evidence">
+    <details class="supporting-evidence"><summary>记忆记录、任务步骤与调度详情</summary><section class="analysis-grid">
       <section class="panel">
         <div class="panel-head">
           <div><span>TIMELINE MEMORY SYSTEM</span><h2>TimelineMemory 统一记忆</h2></div>
@@ -182,6 +196,7 @@
       <section class="panel"><div class="panel-head"><div><span>TASK HYPOTHESES</span><h2 id="taskTitle">Checkpoint Ledger</h2></div><b id="mapStatus"></b></div><div id="steps" class="checkpoint-list"></div><div id="perceptionEvidence" class="perception-evidence"></div><div id="knowledge" class="knowledge-box"></div></section>
       <section class="panel"><div class="panel-head"><div><span>RUNTIME CONTROL</span><h2>路由、归因与调度</h2></div></div><details open><summary>意图候选与激活证据</summary><pre id="intentRouting"></pre></details><details><summary>用户/助手声道归因</summary><pre id="audioAttribution"></pre></details><div id="scheduler" class="scheduler"></div><p class="tools-title">当前 Skill 工具</p><div id="skillTools" class="quick"></div><p id="toolResult"></p><div id="toolAudit" class="archive"></div><div id="trace" hidden></div></section>
     </section>
+  </details>
   </main>
 
   <footer>研究原型 · 界面只展示可观测事件、显式策略和结构化状态，不展示或声称访问模型隐藏思维链。</footer>
@@ -224,6 +239,8 @@
   <script src="vendor/vad/ort.wasm.min.js"></script>
   <script src="vendor/vad/bundle.min.js"></script>
   <script src="local_vad.js?v=20260909"></script>
-  <script src="app.js?v=20260909-interaction-v16"></script>
+  <script src="shared_scene.js?v=20260909"></script>
+  <script src="workflow.js?v=20260909"></script>
+  <script src="app.js?v=20260909-shared-scene"></script>
 </body>
 </html>

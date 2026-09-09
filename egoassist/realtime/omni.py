@@ -524,10 +524,10 @@ class OmniBrowserBridge:
                 elif event_type == "conversation.item.input_audio_transcription.completed":
                     transcript = str(response.get("transcript", "")).strip()
                     if not transcript:
-                        bridge._input_segment_transcribed(None)
+                        bridge._input_segment_transcribed(None, response.get("item_id"))
                         bridge._trace("audio.transcript.ignored", {"reason": "empty-provider-transcript"})
                         return
-                    bridge._input_segment_transcribed(transcript)
+                    segment = bridge._input_segment_transcribed(transcript, response.get("item_id"))
                     barge_action = bridge.handle_user_speech_started(trigger="transcript-fallback")
                     if barge_action == "cancelled":
                         bridge._schedule({"type": "interrupted"})
@@ -537,12 +537,16 @@ class OmniBrowserBridge:
                     bridge._trace("audio.transcript.attributed", attribution)
                     bridge._schedule({
                         "type": "user_transcript",
-                        "speaker": "user",
+                        "speaker": "unknown",
                         "channel": "input_audio_transcription",
                         "echoRisk": attribution["echoRisk"],
                         "text": transcript,
                     })
-                    bridge._schedule_callback(bridge.on_transcript, transcript)
+                    evidence_handler = getattr(bridge, "on_transcript_evidence", None)
+                    if evidence_handler:
+                        bridge._schedule_callback(evidence_handler, transcript, segment)
+                    else:
+                        bridge._schedule_callback(bridge.on_transcript, transcript)
                 elif event_type in {"response.audio_transcript.delta", "response.audio_transcript.done"}:
                     bridge.route_provider_output(event_type, response)
                 elif event_type == "response.text.delta":
@@ -702,8 +706,11 @@ class OmniBrowserBridge:
             self._replay_context(conversation)
             self.connected = True
             self._reset_scheduler_after_reconnect()
+            self._replayed_audio_samples = 0
             while self._buffered_audio:
-                conversation.append_audio(self._buffered_audio.popleft())
+                audio = self._buffered_audio.popleft()
+                conversation.append_audio(audio)
+                self._replayed_audio_samples += len(base64.b64decode(audio)) // 2
             self._trace("provider.session.ready", {
                 "lane": "dialogue", "generation": generation,
                 "turnDetection": "server-vad-explicit-response",
@@ -765,6 +772,11 @@ class OmniBrowserBridge:
                 pending = deque()
                 self._pending_input_segments = pending
             pending.append(segment_id)
+            contexts = getattr(self, "_input_segment_contexts", None)
+            if contexts is None:
+                contexts = self._input_segment_contexts = {}
+            contexts[segment_id] = {"segmentId": segment_id, "audioStartMs": payload.get("audio_start_ms"),
+                                    "providerItemId": payload.get("item_id"), "generation": self._dialogue_generation}
         self._trace("input.segment.started", {
             "segmentId": segment_id,
             "providerItemId": payload.get("item_id"),
@@ -793,6 +805,8 @@ class OmniBrowserBridge:
     def _input_segment_stopped(self, payload: dict[str, Any]) -> None:
         with self._media_lock:
             segment_id = getattr(self, "_active_input_segment_id", None)
+            if segment_id in getattr(self, "_input_segment_contexts", {}):
+                self._input_segment_contexts[segment_id]["audioEndMs"] = payload.get("audio_end_ms")
             self._active_input_segment_id = None
             self._input_speech_active = False
         self._trace("input.segment.stopped", {
@@ -801,10 +815,13 @@ class OmniBrowserBridge:
             "audioEndMs": payload.get("audio_end_ms"),
         })
 
-    def _input_segment_transcribed(self, transcript: str | None) -> None:
+    def _input_segment_transcribed(self, transcript: str | None, item_id: str | None = None) -> dict:
         with self._media_lock:
             pending = getattr(self, "_pending_input_segments", deque())
-            segment_id = pending.popleft() if pending else None
+            contexts = getattr(self, "_input_segment_contexts", {})
+            segment_id = next((sid for sid in pending if contexts.get(sid, {}).get("providerItemId") == item_id), None) if item_id else (pending[0] if len(pending) == 1 else None)
+            if segment_id:
+                pending.remove(segment_id)
             if segment_id and segment_id == self._active_input_segment_id:
                 self._active_input_segment_id = None
                 self._input_speech_active = False
@@ -813,6 +830,7 @@ class OmniBrowserBridge:
             "characters": len(transcript or ""),
             "reason": None if transcript else "empty-provider-transcript",
         })
+        return getattr(self, "_input_segment_contexts", {}).pop(segment_id, {})
 
     def _drop_open_input_segments(self, reason: str) -> None:
         media_lock = getattr(self, "_media_lock", None)
@@ -823,6 +841,7 @@ class OmniBrowserBridge:
             pending = getattr(self, "_pending_input_segments", deque())
             segment_ids = list(pending)
             pending.clear()
+            getattr(self, "_input_segment_contexts", {}).clear()
             self._active_input_segment_id = None
             self._input_speech_active = False
         for segment_id in segment_ids:
@@ -1080,7 +1099,7 @@ class OmniBrowserBridge:
             else 0.0
         )
         return {
-            "speaker": "user",
+            "speaker": "unknown",
             "sourceChannel": "input_audio_transcription",
             "echoRisk": "suspected" if similarity >= 0.82 else "low",
             "assistantSimilarity": round(similarity, 4),

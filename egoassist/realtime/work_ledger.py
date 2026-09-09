@@ -592,7 +592,14 @@ class CaseWorkLedger:
         answers = {}
         deliveries = {}
         completed_text = {}
+        decisions = {}
+        responses = {}
         for entry in self.journal.entries():
+            if entry.get("eventType") in {"response.created", "response.finished"} and entry.get("responseId"):
+                responses.setdefault(entry["responseId"], {}).update({entry["eventType"]: entry})
+            if entry.get("type") == "control_decision" and entry.get("turnId"):
+                decisions[entry["turnId"]] = {k: v for k, v in (entry.get("decision") or {}).items()
+                                             if k not in {"requestMetrics", "rawOutput"}}
             if entry.get("type") == "message" and entry.get("status") == "completed" and (entry.get("message") or {}).get("role") == "assistant":
                 completed_text[entry.get("responseId")] = entry["message"]["content"]
             if entry.get("type") == "turn_delivery":
@@ -602,8 +609,16 @@ class CaseWorkLedger:
         for answer in answers.values():
             if answer.get("status") == "completed" and answer.get("channel") in {"speech", "generated-audio"}:
                 answer["text"] = completed_text.get(answer.get("responseId"), "")
+                response = responses.get(answer.get("responseId"), {})
+                finished = response.get("response.finished")
+                created = response.get("response.created")
+                if finished:
+                    answer["model"] = finished.get("model")
+                if finished and created:
+                    answer["generationMs"] = round((datetime.fromisoformat(finished["timestamp"]) - datetime.fromisoformat(created["timestamp"])).total_seconds() * 1000, 1)
         return {
-            "turnInbox": [{**turn, "delivery": deliveries.get(turn["turnId"]), "answer": answers.get(turn["turnId"])}
+            "turnInbox": [{**turn, "delivery": deliveries.get(turn["turnId"]), "answer": answers.get(turn["turnId"]),
+                           "semantic": decisions.get(turn["turnId"])}
                           for turn in self.turns().values()],
             "intents": list(self.intents().values()),
             "foregroundIntentId": self.foreground_intent_id(),

@@ -77,7 +77,7 @@ def test_input_output_channels_are_distinct_and_echo_is_only_flagged(monkeypatch
 
     echo = bridge.attribute_input_transcript("请把番茄放稳再慢慢切")
     user = bridge.attribute_input_transcript("我想改做水果沙拉")
-    assert echo["speaker"] == "user"
+    assert echo["speaker"] == "unknown"
     assert echo["sourceChannel"] == "input_audio_transcription"
     assert echo["echoRisk"] == "suspected"
     assert echo["policy"] == "observe-only-never-drop"

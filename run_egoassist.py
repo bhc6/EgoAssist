@@ -17,6 +17,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import threading
 import time
 import webbrowser
@@ -345,6 +346,7 @@ class CaseRuntimeOwner:
     # live. Cleared on revocation, so it is never a stale authorization.
     ambient: Any = None
     interaction: Any = None
+    scene: Any = None
 
 
 def runtime_root() -> Path:
@@ -881,6 +883,8 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
             if existing.user_id != user_id:
                 raise PermissionError("context session belongs to another user")
             case_owners.move_to_end(session_id)
+            if existing.scene:
+                existing.scene.recover()
             return existing
         if len(case_owners) >= max_case_owners:
             evicted = False
@@ -900,6 +904,7 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                     and not worker_active
                     and not maintenance_active
                     and not scheduler_active
+                    and not (candidate.scene and candidate.scene.tasks)
                     and not candidate.transitioning
                     and not candidate.mutation_lock.locked()
                 ):
@@ -948,6 +953,9 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
         case_owners[session_id] = owner
         from egoassist.realtime.interaction import InteractionState
         owner.interaction = InteractionState(journal)
+        from egoassist.realtime.scene import SharedScene
+        owner.scene = SharedScene(journal, os.getenv("QWEN_API_KEY") or os.getenv("DASHSCOPE_API_KEY") or "")
+        owner.scene.recover()
 
         # Phase 1: Memory observability bus
         trace_dir = Path(journal.path).parent
@@ -1271,7 +1279,7 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
         # control-plane snapshot; full history remains available through the
         # dedicated artifacts/timeline endpoints.
         if harness_override:
-            for key in ("turnInbox", "intents", "jobs", "resultInbox"):
+            for key in ("intents", "jobs", "resultInbox"):
                 value = work_ledger_snapshot.get(key)
                 if isinstance(value, list):
                     work_ledger_snapshot[key] = value[-20:]
@@ -1347,7 +1355,7 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
         }
         default_policy = TurnTakingPolicy()
         audio_attribution = {
-            "input": "provider input_audio_transcription -> user",
+            "input": "microphone transcript -> acoustic speaker hypothesis; API user role does not identify wearer",
             "output": "provider audio_transcript -> assistant",
             "browserCapture": (
                 dict(media_override) if media_override is not None
@@ -1448,6 +1456,7 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                 "scheduler": scheduler,
                 "workLedger": work_ledger_snapshot,
                 "interaction": case_owners[visible_session_id].interaction.snapshot() if visible_session_id in case_owners and case_owners[visible_session_id].interaction else None,
+                "sharedScene": case_owners[visible_session_id].scene.snapshot() if visible_session_id in case_owners and case_owners[visible_session_id].scene else None,
                 "artifacts": visible_artifacts,
                 "humanHelp": human_help_summary,
                 "productPersistence": {
@@ -1562,6 +1571,7 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
             "scheduler": scheduler,
             "workLedger": work_ledger_snapshot,
             "interaction": case_owners[visible_session_id].interaction.snapshot() if visible_session_id in case_owners and case_owners[visible_session_id].interaction else None,
+            "sharedScene": case_owners[visible_session_id].scene.snapshot() if visible_session_id in case_owners and case_owners[visible_session_id].scene else None,
             "artifacts": visible_artifacts,
             "humanHelp": human_help_summary,
             "capabilityCatalog": capability_catalog,
@@ -1837,6 +1847,8 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
         owner.job_scheduler_task = task
 
     async def stop_case_connection(owner: CaseRuntimeOwner, *, notify: bool = True) -> None:
+        if owner.scene and notify:
+            await owner.scene.close()
         ledger = owner.work_ledger or CaseWorkLedger(owner.journal)
         for turn in ledger.snapshot()["turnInbox"]:
             delivery = turn.get("delivery") or {}
@@ -1972,7 +1984,12 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
         )
         active_runtime = target_runtime or runtime
         observation = active_runtime.task.observation if active_runtime.task else None
-        if not observation or not str(observation.get("source", "")).startswith("camera/") or not observation.get("frameId"):
+        shared = result.get("sharedScene")
+        if shared:
+            instructions += prompt_text("scene/grounding") + json.dumps(shared, ensure_ascii=False)
+            if not shared.get("speaker", {}).get("wearer"):
+                instructions += prompt_text("scene/unverified")
+        elif not observation or not str(observation.get("source", "")).startswith("camera/") or not observation.get("frameId"):
             instructions += (
                 prompt_text('run_egoassist/grounded_user_instructions.3')
             )
@@ -2211,13 +2228,41 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
         session_id = str(request.query.get("session", "")).strip() or None
         return web.json_response(scoped_state_for_user(user_id, session_id))
 
+    async def get_scene_media(request):
+        user_id = request[user_key]["id"]
+        session_id = str(request.query.get("session", ""))
+        identity.get_context_session(user_id, session_id)
+        scene = case_owner(user_id, session_id).scene
+        asset = str(request.query.get("asset", ""))
+        if not re.fullmatch(r"[a-f0-9]{64}\.(jpg|wav)", asset):
+            raise web.HTTPBadRequest(text="invalid scene asset")
+        path = scene.root / asset
+        if not path.is_file():
+            raise web.HTTPNotFound()
+        return web.FileResponse(path, headers={"Cache-Control": "private, no-store"})
+
+    async def post_scene_identity(request):
+        user_id = request[user_key]["id"]
+        value = await request.json()
+        session_id = str(value.get("sessionId", ""))
+        identity.get_context_session(user_id, session_id)
+        owner = case_owner(user_id, session_id)
+        person_ref = value.get("personRef") or None
+        if person_ref and person_ref not in {p["personRef"] for row in owner.journal.entries()
+                if row.get("type") == "scene.result" for p in row.get("people", [])}:
+            raise web.HTTPBadRequest(text="unknown visual person reference")
+        async with owner.mutation_lock:
+            owner.scene.speakers.confirm(value.get("speakerId"), name=value.get("name"),
+                                        wearer=value.get("wearer", False), person_ref=person_ref)
+        return web.json_response({"state": scoped_state_for_user(user_id, session_id)})
+
     async def get_prompt_audit(request):
         user_id = request[user_key]["id"]
         session_id = str(request.query.get("session", "")).strip()
         identity.get_context_session(user_id, session_id)
         owner = case_owner(user_id, session_id)
         rows = owner.journal.entries()
-        actual = [row for row in rows if row.get("type") in {"control_decision", "interaction.classification_retry", "insight.request", "insight.result", "insight.job", "answer.request", "answer.result"}
+        actual = [row for row in rows if row.get("type") in {"control_decision", "interaction.classification_retry", "scene.request", "scene.result", "scene.transcription.request", "scene.transcription.result", "insight.request", "insight.result", "insight.job", "answer.request", "answer.result"}
                   or row.get("eventType") in {"model.prompt", "response.dispatched", "episodic.memory.injected"}]
         return web.json_response({"templates": prompt_catalog(), "requests": actual[-30:],
                                   "sessionId": session_id, "totalAuditEvents": len(actual)})
@@ -2847,6 +2892,9 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
             transcript_event = trace_event("audio.transcript.completed", "realtime-user", {"text": transcript})
         semantic_supplied = semantic_decision is not None
         semantic_decision = dict(semantic_decision or {})
+        if semantic_decision.get("speakerRestricted"):
+            preference_enabled = False
+            episodic_settings = {**episodic_settings, "episodic_enabled": False}
         semantic_method = str(semantic_decision.get("method") or "semantic-turn-router-v4")
         speech_control = semantic_decision.get("speechControl")
         task_control = semantic_decision.get("taskControl")
@@ -3202,11 +3250,11 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
         memory_kind = semantic_decision.get("memoryKind")
         memory_consent = semantic_decision.get("memoryConsent")
         memory_case_id = harness.session_id if harness else "local-default"
-        pending_draft = timeline.pending_draft(user_id=user_scope, case_id=memory_case_id)
+        pending_draft = None if semantic_decision.get("speakerRestricted") else timeline.pending_draft(user_id=user_scope, case_id=memory_case_id)
         raw_draft_decision = semantic_decision.get("memoryDraft")
         memory_atoms = list(semantic_decision.get("memoryAtoms") or [])
         fallback_atoms = []
-        if not memory_atoms and semantic_decision.get("status") in {"unavailable", "invalid"}:
+        if not semantic_decision.get("speakerRestricted") and not memory_atoms and semantic_decision.get("status") in {"unavailable", "invalid"}:
             fallback_atoms = explicit_memory_fallback_atoms(transcript, pending_draft)
             if fallback_atoms:
                 memory_atoms = fallback_atoms
@@ -3259,7 +3307,7 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
         draft_decision, draft_rejection = memory_draft_candidate(
             transcript, draft_decision, pending_draft,
         )
-        memory_requested = bool(
+        memory_requested = not semantic_decision.get("speakerRestricted") and bool(
             is_explicit_memory_request(transcript)
             or fallback_atoms
             or draft_decision
@@ -4885,6 +4933,9 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
             source = dict(origin or {})
             ledger = owner.work_ledger or CaseWorkLedger(harness.journal)
             source_turn_id = str(source.get("turnId", ""))
+            evidence = owner.scene.turns.get(source_turn_id)
+            if evidence and not evidence["speaker"].get("wearer"):
+                raise PermissionError("unconfirmed microphone speaker cannot authorize tools")
             source_intent_id = str(source.get("intentId", ""))
             source_job_id = str(source.get("jobId", ""))
             source_generation = source.get("generation")
@@ -5113,6 +5164,7 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                                   "text": str(item.get("message", {}).get("content", ""))[-600:]}
                                  for item in harness.journal.entries() if item.get("type") == "message"][-6:],
                 playback=interaction_state.playback_context(), output_permission=interaction_state.snapshot(),
+                scene=owner.scene.turns.get(turn_id),
             )
             return await semantic_router.classify(text, catalog)
 
@@ -5258,13 +5310,23 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
         async def classify_persisted_turn(turn_id: str, text: str) -> dict:
             ledger = owner.work_ledger or CaseWorkLedger(harness.journal)
             ledger.set_turn_status(turn_id, "classifying")
+            speaker_task = asyncio.create_task(owner.scene.resolve_speaker(turn_id))
             async with classification_limit:
-                semantic = await classify_semantic_turn(text, turn_id)
-                if semantic.get("status") == "unavailable":
-                    harness.journal.append("interaction.classification_retry", {"turnId": turn_id, "decision": semantic})
-                    if not ws.closed:
-                        await ws.send_json({"type": "interaction_status", "turnId": turn_id, "status": "retrying"})
+                try:
                     semantic = await classify_semantic_turn(text, turn_id)
+                    if semantic.get("status") == "unavailable":
+                        harness.journal.append("interaction.classification_retry", {"turnId": turn_id, "decision": semantic})
+                        if not ws.closed:
+                            await ws.send_json({"type": "interaction_status", "turnId": turn_id, "status": "retrying"})
+                        semantic = await classify_semantic_turn(text, turn_id)
+                    scene_turn = await speaker_task
+                    if scene_turn and not scene_turn["speaker"].get("wearer"):
+                        from egoassist.realtime.scene import restrict_unverified_speaker
+                        semantic = restrict_unverified_speaker(semantic)
+                finally:
+                    if not speaker_task.done():
+                        speaker_task.cancel()
+                    await asyncio.gather(speaker_task, return_exceptions=True)
             ledger.set_turn_status(
                 turn_id, "ready", detail={"semanticMethod": semantic.get("method")},
             )
@@ -5311,8 +5373,9 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                     purpose=purpose, origin=accepted_origin,
                 ))
 
-        def resolve_semantic_turn(text: str, result: dict, semantic: dict) -> None:
+        def resolve_semantic_turn(text: str, result: dict, semantic: dict, turn_id: str) -> None:
             harness.journal.append("control_decision", {
+                "turnId": turn_id,
                 "decision": semantic,
                 "source": "semantic-turn-router",
                 "input": text,
@@ -5333,9 +5396,17 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                 session_trace("audio.transcript.ignored", "realtime-user", {"reason": "empty-transcript"})
                 return {}
             work_ledger = owner.work_ledger or CaseWorkLedger(harness.journal)
-            semantic = await semantic_task if semantic_task is not None else await classify_persisted_turn(
-                turn_id, text,
-            )
+            scene_task = asyncio.create_task(owner.scene.context(turn_id, describe_frame=explicit))
+            try:
+                semantic = await semantic_task if semantic_task is not None else await classify_persisted_turn(turn_id, text)
+                control_only = (semantic.get("interaction") or {}).get("action") in {"listen", "pause", "cancel", "uncertain"} or semantic.get("speechControl")
+                shared_scene = await owner.scene.context(turn_id) if control_only else await scene_task
+            finally:
+                if not scene_task.done():
+                    scene_task.cancel()
+                await asyncio.gather(scene_task, return_exceptions=True)
+            if shared_scene:
+                shared_scene["speaker"] = owner.scene.turns[turn_id]["speaker"]
             if owner.socket_token is not socket_token or owner.epoch != connection_epoch:
                 raise asyncio.CancelledError
             _bg_task_queue: list[tuple[TaskSlot, str, str, SkillRuntime, dict]] = []
@@ -5355,7 +5426,7 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                         "status": "suppressed-control", "selectedSkill": None, "selectedTask": None,
                         "interaction": control, "suppressedBy": control["action"]}
                     owner.routing = session_routing
-                    resolve_semantic_turn(text, {}, semantic)
+                    resolve_semantic_turn(text, {}, semantic, turn_id)
                     work_ledger.set_turn_status(turn_id, "completed")
                     work_ledger.set_turn_delivery(turn_id, "completed", channel="speech-control")
                     if turn_sequence == owner.latest_input_sequence and not ws.closed:
@@ -5379,7 +5450,7 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                                        "status": "suppressed-control", "selectedSkill": None,
                                        "selectedTask": None, "suppressedBy": "stop-speaking"}
                     owner.routing = session_routing
-                    resolve_semantic_turn(text, {}, semantic)
+                    resolve_semantic_turn(text, {}, semantic, turn_id)
                     session_trace("user.control.stop_speaking", "semantic-turn-router",
                                   {"text": text, "turnId": turn_id, "responseRequested": False})
                     work_ledger.set_turn_status(turn_id, "completed")
@@ -5531,7 +5602,9 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                     memory_policy=current_memory_policy(),
                     clock_context=clock_for_session(user_id, session_id),
                 )
-                resolve_semantic_turn(text, result, semantic)
+                if shared_scene:
+                    result["sharedScene"] = shared_scene
+                resolve_semantic_turn(text, result, semantic, turn_id)
                 if not background_intent:
                     session_routing = result["routingState"]
                     owner.routing = session_routing
@@ -5589,7 +5662,7 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                     job_id=f"job-{turn_id}",
                 )
                 if not background_intent and hasattr(bridge, "set_tools"):
-                    bridge.set_tools(session_tool_declarations(), session_tool_handler)
+                    bridge.set_tools([] if semantic.get("speakerRestricted") else session_tool_declarations(), session_tool_handler)
                 if not background_intent and result.get("taskControl") == "show-reference":
                     result["referenceResult"] = execute_reference_request(
                         harness, execute_session_tool, session_tool_declarations(),
@@ -5678,6 +5751,7 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                     answer_executor.register(user_id, harness.journal, turn_id=turn_id, question=text,
                                              instructions=primary_instruction,
                                              context={"retrievalEvidence": evidence,
+                                                      "sharedScene": shared_scene,
                                                       "clock": clock_for_session(user_id, session_id).prompt_payload(),
                                                       "timelineWrite": result.get("timelineWrite"),
                                                       "referenceResult": result.get("referenceResult"),
@@ -5802,7 +5876,7 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                         "intentId": _child_intent["intentId"],
                         "jobId": _child_job["jobId"],
                         "skill": current_skill_ref,
-                        "tools": session_tool_declarations(),
+                        "tools": [] if semantic.get("speakerRestricted") else session_tool_declarations(),
                         "runtimeCheckpoint": runtime_checkpoint(processing_runtime),
                         "waitingInput": _candidate_waiting,
                         "unsupportedCapability": "background-execution" if _candidate_unsupported else None,
@@ -5939,7 +6013,7 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                         "intentId": intent["intentId"],
                         "jobId": job["jobId"],
                         "skill": current_skill_ref,
-                        "tools": session_tool_declarations(),
+                        "tools": [] if semantic.get("speakerRestricted") else session_tool_declarations(),
                         "runtimeCheckpoint": runtime_checkpoint(processing_runtime),
                     },
                 )
@@ -6073,7 +6147,7 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                     break
                 enqueue_persisted_turn(pending)
 
-        def _do_enqueue_transcript(text: str) -> None:
+        def _do_enqueue_transcript(text: str, segment=None) -> None:
             """Enqueue one complete (already-accumulated) utterance."""
             owner.turn_sequence += 1
             owner.latest_input_sequence = owner.turn_sequence
@@ -6090,6 +6164,8 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                 source="input-audio-transcript",
                 sequence=owner.turn_sequence,
             )
+            if segment is not None:
+                owner.scene.capture(captured["turnId"], segment=segment)
             ledger.set_turn_delivery(captured["turnId"], "received")
             enqueue_persisted_turn(captured)
 
@@ -6114,6 +6190,13 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
             # Every fragment is retained; semantic routing decides its meaning.
             _turn_accumulator.push(normalized)
 
+        def transcript_with_evidence(text, segment):
+            # Do not merge provider segments before acoustic speaker attribution.
+            if str(text).strip():
+                if segment:
+                    segment = {**segment, "generation": f"{connection_epoch}:{segment.get('generation')}"}
+                _do_enqueue_transcript(str(text).strip(), segment=segment)
+
         def proactive_interval_for() -> float:
             """Seconds between perception checks.
 
@@ -6131,6 +6214,8 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
             kind = payload.get("type")
             if kind == "audio":
                 audio_value = str(payload.get("audio", ""))
+                owner.scene.append_audio(audio_value, f"{connection_epoch}:{getattr(bridge, '_dialogue_generation', connection_epoch)}",
+                                         sample_offset=getattr(bridge, "_replayed_audio_samples", 0))
                 video_flushed = bridge.append_audio(audio_value)
                 media_audit.record_audio(len(audio_value), video_flushed=video_flushed)
                 if video_flushed:
@@ -6138,6 +6223,7 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                 return True
             if kind == "video":
                 image_value = str(payload.get("image", ""))
+                owner.scene.append_frame(image_value, payload.get("capture"))
                 media_audit.record_video(len(image_value))
                 if bridge.append_video(image_value):
                     bridge.maybe_check_proactively(proactive_interval_for())
@@ -6186,6 +6272,7 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                 for pending_turn in recoverable:
                     enqueue_persisted_turn(pending_turn)
             bridge = OmniBrowserBridge(api_key, model, voice, initial_context["system"], emit, transcript_received)
+            bridge.on_transcript_evidence = transcript_with_evidence
             bridge.interaction_managed = True
             bridge.playback_context = interaction_state.playback_context
             bridge.output_permission = interaction_state.allows
@@ -6376,6 +6463,7 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                         sequence=owner.turn_sequence,
                         turn_id=client_id or None,
                     )
+                    owner.scene.capture(captured["turnId"], explicit=True)
                     ledger.set_turn_delivery(captured["turnId"], "received")
                     await ws.send_json({"type": "user_transcript", "speaker": "user",
                         "channel": "explicit_control", "echoRisk": "low", "text": transcript,
@@ -6642,6 +6730,8 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
         web.post("/api/sessions/memory-policy", post_memory_policy),
         web.get("/api/state", get_state),
         web.get("/api/prompts", get_prompt_audit),
+        web.get("/api/scene/media", get_scene_media),
+        web.post("/api/scene/identity", post_scene_identity),
         web.post("/api/answers/control", post_answer_control),
         web.get("/api/insights", get_insights),
         web.post("/api/insights", post_insight),

@@ -142,6 +142,19 @@
 .performance-metric b { font-size: 17px; font-variant-numeric: tabular-nums; }
 .tl-evidence-detail pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 320px; overflow: auto; font-size: 11px; }
 .text-turn-form { display: grid; grid-template-columns: minmax(0, 1fr) 76px; gap: 8px 12px; margin: 0 0 12px; padding: 12px 16px; background: #fff; border-bottom: 1px solid #cbd3ce; }
+.shared-scene-band { margin: 12px 0; padding: 16px; background: #fff; border-top: 1px solid #cbd3ce; }
+.shared-scene-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 20px; }
+.shared-scene-image { width: 100%; max-height: 300px; object-fit: contain; background: #edf2ee; }
+.shared-scene-band p, .shared-scene-band small { overflow-wrap: anywhere; }
+.speaker-identity-form { display: flex; flex-wrap: wrap; gap: 10px; align-items: end; }
+.speaker-identity-form label { display: grid; gap: 5px; min-width: 0; max-width: 100%; }
+.speaker-identity-form select, .speaker-identity-form input { max-width: 100%; min-width: 0; padding: 6px; }
+.shared-utterances { max-height: 480px; overflow: auto; margin-top: 16px; }
+.shared-utterances article { border-top: 1px solid #d8ddd9; padding: 10px 0; }
+.shared-utterances small { display: block; color: #566760; }
+.shared-utterances audio { width: 100%; max-width: 420px; height: 36px; }
+.shared-utterances pre { white-space: pre-wrap; overflow-wrap: anywhere; }
+@media (max-width: 650px) { .shared-scene-grid { grid-template-columns: 1fr; } }
 .text-turn-form label { grid-column: 1 / -1; font-size: 13px; font-weight: 600; }
 .text-turn-form textarea { width: 100%; min-width: 0; min-height: 72px; box-sizing: border-box; resize: vertical; border: 1px solid #89968f; padding: 10px; font-size: 14px; line-height: 1.5; }
 .text-turn-form textarea:focus-visible { outline: 2px solid #16778a; outline-offset: 2px; }
@@ -165,3 +178,28 @@
 .turn-history-row p { margin: 0 0 4px; }
 .turn-history-row small { display: block; }
 .completed-answer { white-space: pre-wrap; border-left: 2px solid #3b8067; padding-left: 8px; margin-top: 8px !important; }
+.research-grid { grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr); align-items: start; }
+.research-grid > .inspector-panel { grid-column: 1 / -1; }
+.panel h1, .panel h2 { font-size: 18px; }
+.panel, .shared-scene-band { border-radius: 0; box-shadow: none; }
+.text-turn-form { padding: 12px 0; margin: 0; }
+#turnHistory { height: 420px; overflow-y: auto; overscroll-behavior: contain; scroll-anchor: none; }
+.turn-history-row { padding: 12px 0; font-size: 14px; line-height: 1.6; }
+.turn-history-row small { color: #52625c; font-size: 11px; }
+.workflow-select { display: grid; gap: 8px; font-size: 13px; }
+.workflow-select select { width: 100%; min-width: 0; padding: 8px; }
+#liveWorkflow blockquote { margin: 16px 0; padding: 8px 12px; border-left: 3px solid #237589; background: #f1f6f7; font-size: 15px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.workflow-fact { display: grid; grid-template-columns: 88px minmax(0, 1fr); gap: 12px; padding: 12px 0; border-bottom: 1px solid #dce3df; font-size: 13px; line-height: 1.6; }
+.workflow-fact span { overflow-wrap: anywhere; }
+#liveWorkflow pre { max-height: 300px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
+[hidden] { display: none !important; }
+.workflow-event-list { max-height: 260px; overflow: auto; padding-left: 20px; }
+.workflow-event-list li { padding: 6px 0; overflow-wrap: anywhere; }
+.workflow-event-list button { max-width: 100%; white-space: normal; overflow-wrap: anywhere; height: auto; }
+.work-center-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.work-center-grid > section { min-width: 0; }
+.work-center-grid > details { grid-column: 1 / -1; }
+.work-row pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 240px; overflow: auto; }
+.work-row b, .work-row small { font-size: 13px; line-height: 1.6; }
+details > summary { cursor: pointer; padding: 12px 0; font-size: 13px; }
+@media (max-width: 800px) { .research-grid, .work-center-grid { grid-template-columns: minmax(0, 1fr); } }

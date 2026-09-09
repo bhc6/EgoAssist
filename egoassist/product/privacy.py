@@ -68,17 +68,24 @@ def provider_disclosures(*, ambient: bool = False) -> list[dict[str, Any]]:
     values = [
         ProviderDisclosure(
             provider="realtime-model",
-            data_categories=["transcript", "turn metadata"],
+            data_categories=["microphone audio", "camera frames", "transcript", "turn metadata"],
             purposes=["speech recognition", "dialogue response"],
-            retention="provider policy; EgoAssist does not persist raw media by default",
+            retention="provider policy; question audio clips and frame evidence are retained in the account journal media directory until account deletion",
             user_controls=["stop realtime", "delete account", "export account"],
         ),
         ProviderDisclosure(
             provider="structured-vision-model",
-            data_categories=["selected video frames", "checkpoint context"],
-            purposes=["hazard and progress evidence"],
-            retention="frame transport only unless accepted as evidence",
+            data_categories=["selected video frames", "question context", "checkpoint context"],
+            purposes=["shared scene description", "visual answers", "hazard and progress evidence"],
+            retention="observed and question-time frames are stored as checksum-addressed account evidence",
             user_controls=["disable camera", "reject evidence", "delete account"],
+        ),
+        ProviderDisclosure(
+            provider="local-speaker-model",
+            data_categories=["question audio", "speaker embeddings", "account-confirmed names and frame references"],
+            purposes=["speaker segmentation and acoustic matching; not biometric authentication"],
+            retention="account-owned journal and media; mixed-speaker segments may be sent to Qwen ASR for transcription",
+            user_controls=["stop realtime", "export account", "delete account"],
         ),
         ProviderDisclosure(
             provider="human-help-connector",
@@ -251,6 +258,12 @@ class PrivacyGovernance:
             if not path.is_file() or path.parent == journal_root:
                 continue
             try:
+                if path.suffix in {".jpg", ".wav"} and "media" in path.relative_to(legacy_root).parts:
+                    import base64
+                    data = path.read_bytes()
+                    result.setdefault("mediaFiles", []).append({"path": str(path.relative_to(legacy_root)),
+                        "sha256": hashlib.sha256(data).hexdigest(), "encoding": "base64", "content": base64.b64encode(data).decode()})
+                    continue
                 raw = path.read_text(encoding="utf-8")
                 try:
                     content: Any = json.loads(raw)
