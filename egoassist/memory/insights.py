@@ -103,15 +103,20 @@ class InsightGenerator:
         self.api_key = api_key
         self.model = os.getenv("EGOASSIST_INSIGHT_MODEL", "qwen-flash")
         self.timeout = float(os.getenv("EGOASSIST_INSIGHT_TIMEOUT", "30"))
+        if not 1 <= self.timeout <= 300:
+            raise ValueError("invalid report provider timeout")
 
     async def generate(self, *, user_id: str, journal, paths: list[Path], kind: str,
-                       anchor: str | None, clock: ClockContext) -> dict:
-        return await self._generate(journal, paths, kind, anchor, clock)
+                       anchor: str | None, clock: ClockContext, progress=None) -> dict:
+        return await self._generate(journal, paths, kind, anchor, clock, progress)
 
-    async def _generate(self, journal, paths, kind, anchor, clock):
+    async def _generate(self, journal, paths, kind, anchor, clock, progress):
         period = calendar_period(kind, anchor, clock)
         started = time.perf_counter()
         sources = await asyncio.to_thread(collect_sources, paths, period)
+        if progress:
+            progress("preparing", includedRecords=sources["includedRecords"],
+                     totalRecords=sources["totalRecords"], model=self.model, providerTimeoutSeconds=self.timeout)
         policy = prompt_text("insights/generate")
         data = {"period": period, "coverage": {k: v for k, v in sources.items() if k != "records"},
                 "sources": sources["records"]}
@@ -135,6 +140,8 @@ class InsightGenerator:
                     raise ValueError("QWEN_API_KEY is not configured")
                 import dashscope
                 url = dashscope.base_http_api_url.rstrip("/") + "/services/aigc/text-generation/generation"
+                if progress:
+                    progress("waiting-provider")
                 async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=self.timeout), trust_env=True) as session:
                     async with session.post(url, headers={"Authorization": "Bearer " + self.api_key}, json={
                         "model": self.model, "input": {"messages": messages},
@@ -147,6 +154,8 @@ class InsightGenerator:
                 result["rawOutput"] = payload["output"]["choices"][0]["message"]["content"]
                 result["providerRequestId"] = payload.get("request_id")
                 result["usage"] = payload.get("usage", {})
+                if progress:
+                    progress("validating", providerRequestId=payload.get("request_id"))
                 result.update(validate_insights(result["rawOutput"], sources["records"]))
                 result["status"] = "completed"
         except (ValueError, TypeError, KeyError, RuntimeError, aiohttp.ClientError, asyncio.TimeoutError) as exc:

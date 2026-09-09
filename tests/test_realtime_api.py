@@ -232,6 +232,76 @@ def install_queue_test_bridge(monkeypatch):
     return instances
 
 
+def test_text_retries_and_newer_input_do_not_block_behind_slow_routing(tmp_path, monkeypatch):
+    instances = install_queue_test_bridge(monkeypatch)
+
+    async def scenario():
+        first_started = asyncio.Event()
+        release_first = asyncio.Event()
+        classified = []
+
+        async def classify(_self, text, catalog):
+            classified.append(text)
+            if text == "first question":
+                first_started.set()
+                await release_first.wait()
+            return semantic_result(text)
+
+        monkeypatch.setattr(run_egoassist.SemanticTurnRouter, "classify", classify)
+        app = create_app(str(BUILTIN_SKILLS_ROOT), None, str(tmp_path / "runtime.json"), "test", "Ethan")
+        async with TestClient(TestServer(app)) as client:
+            await register_client(client, "turn-attribution")
+            sid = (await (await client.post("/api/sessions")).json())["session"]["id"]
+            ws = await client.ws_connect("/ws/realtime?session=" + sid)
+
+            async def until(kind):
+                async with asyncio.timeout(3):
+                    while True:
+                        event = await ws.receive_json()
+                        if event.get("type") == kind:
+                            return event
+
+            await until("state")
+            await ws.send_json({"type": "control", "transcript": "first question", "clientRequestId": "first"})
+            assert (await until("turn_receipt"))["turnId"] == "first"
+            await asyncio.wait_for(first_started.wait(), 3)
+            second = {"type": "control", "transcript": "second question", "clientRequestId": "second"}
+            await ws.send_json(second)
+            assert (await until("turn_receipt"))["turnId"] == "second"
+            await ws.send_json(second)
+            assert (await until("turn_receipt"))["deduplicated"] is True
+            await ws.send_json({**second, "transcript": "different content"})
+            assert (await until("error"))["message"] == "clientRequestId content mismatch"
+            release_first.set()
+            await asyncio.wait_for(instances[0].request_event.wait(), 3)
+            assert classified == ["first question", "second question"]
+            assert len(instances[0].requests) == 1
+
+            await instances[0].emit({"type": "audio", "audio": "unattributed", "purpose": "conversation", "responseId": "orphan"})
+            assert "no source question" in (await until("error"))["message"]
+            await instances[0].emit({"type": "audio", "audio": "stale", "origin": {"turnId": "first", "generation": 1}})
+            await instances[0].emit({"type": "audio", "audio": "current", "origin": {"turnId": "second", "generation": 2}})
+            assert (await until("audio"))["audio"] == "current"
+            await instances[0].emit({"type": "response_status", "status": "responding", "responseId": "r2",
+                                     "origin": {"turnId": "second", "generation": 2}})
+            await until("response_status")
+            snapshot = await (await client.get("/api/state?session=" + sid)).json()
+            turns = {turn["turnId"]: turn for turn in snapshot["workLedger"]["turnInbox"]}
+            assert turns["first"]["delivery"]["status"] == "interrupted"
+            assert turns["second"]["delivery"]["status"] == "responding"
+            await ws.close()
+            async with asyncio.timeout(3):
+                while True:
+                    response = await client.get("/api/state?session=" + sid)
+                    snapshot = await response.json()
+                    turns = {turn["turnId"]: turn for turn in snapshot["workLedger"]["turnInbox"]}
+                    if turns["second"]["delivery"]["status"] == "interrupted":
+                        break
+                    await asyncio.sleep(0.01)
+
+    asyncio.run(scenario())
+
+
 def test_grounded_turn_claims_follow_committed_memory_state(tmp_path, monkeypatch):
     instances = install_queue_test_bridge(monkeypatch)
 

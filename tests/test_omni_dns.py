@@ -65,6 +65,7 @@ def scheduler_bridge():
     bridge._latest_perception_frame = None
     bridge.conversation = FakeConversation()
     bridge.modalities = FakeModalities
+    bridge._schedule = lambda payload: None
     return bridge
 
 
@@ -530,6 +531,43 @@ def test_natural_speech_started_bounds_protected_utterance():
     assert bridge.conversation.cancelled == 1
 
 
+def test_expired_old_protection_timer_cannot_cancel_new_response():
+    bridge = scheduler_bridge()
+    bridge.request_response("old safety phrase", speech_policy="protected")
+    bridge._response_created({"response": {"id": "old-protected"}})
+    bridge._response_finished({"type": "response.done", "response": {"id": "old-protected"}})
+    bridge.request_response("new safety phrase", speech_policy="protected")
+    bridge._response_created({"response": {"id": "new-protected"}})
+
+    bridge._expire_protection(2500, frozenset({"old-protected"}), 0)
+    assert bridge.conversation.cancelled == 0
+    assert not bridge.cancel_response(expected_response_ids=frozenset({"old-protected"}))
+    bridge._expire_protection(2500, frozenset({"new-protected"}), 0)
+    assert bridge.conversation.cancelled == 1
+
+    async def real_timer():
+        bridge = scheduler_bridge()
+        bridge.loop = asyncio.get_running_loop()
+        cancelled = asyncio.Event()
+        def on_cancel():
+            bridge.conversation.cancelled += 1
+            cancelled.set()
+        bridge.conversation.cancel_response = on_cancel
+        bridge.request_response("protected", speech_policy="protected", max_protection_ms=250)
+        bridge._response_created({"response": {"id": "timed-protected"}})
+        assert bridge.handle_user_speech_started() == "protected"
+        await asyncio.wait_for(cancelled.wait(), 3)
+        assert bridge.conversation.cancelled == 1
+
+    asyncio.run(real_timer())
+
+    pending = scheduler_bridge()
+    pending.request_response("not yet created", speech_policy="protected")
+    assert pending.handle_user_speech_started() == "cancelled"
+    pending._response_created({"response": {"id": "cancel-on-arrival"}})
+    assert pending.conversation.cancelled == 1
+
+
 def test_cancelled_response_drops_late_audio_and_transcript_output():
     bridge = scheduler_bridge()
     emitted = []
@@ -547,7 +585,7 @@ def test_cancelled_response_drops_late_audio_and_transcript_output():
         "response.audio_transcript.delta",
         {"response_id": "speech-cancelled", "delta": "late transcript"},
     )
-    assert emitted == []
+    assert not [item for item in emitted if item["type"] in {"audio", "assistant_transcript"}]
     assert {item[1]["reason"] for item in traced if item[0] == "response.output.suppressed"} == {
         "cancel-requested"
     }

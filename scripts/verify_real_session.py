@@ -8,6 +8,7 @@ import asyncio
 import json
 import sys
 import time
+from uuid import uuid4
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -41,14 +42,16 @@ async def verify(output, model, scenario='greeting'):
             started = time.perf_counter()
             async with client.ws_connect('/ws/realtime?session=' + sid) as ws:
                 sent = None
+                turn_id = uuid4().hex
                 async with asyncio.timeout(60):
                     while True:
                         if report.get('transcript') and report['audioPackets']:
                             journal_path = next(output.glob('users/*/sessions/' + sid + '.jsonl'))
                             rows = [json.loads(line) for line in journal_path.read_text(encoding='utf-8').splitlines() if line.strip()]
-                            terminal = [row for row in rows if row.get('eventType') == 'response.finished']
-                            provider_turns = sum(t.get('channel') != 'server-memory-policy' for t in report['turns'])
-                            if len(terminal) > provider_turns:
+                            terminal = [row for row in rows if row.get('eventType') == 'response.finished'
+                                        and row.get('responseId') == report.get('responseId')
+                                        and row.get('payload', {}).get('origin', {}).get('turnId') == turn_id]
+                            if terminal:
                                 detail = terminal[-1]['payload']
                                 report['responseFinished'] = detail
                                 report['passed'] = not detail.get('interrupted') and detail.get('status') == 'response.done'
@@ -57,15 +60,16 @@ async def verify(output, model, scenario='greeting'):
                                 report['routingLatencyMs'] = [r['decision'].get('latencyMs') for r in rows if r.get('type') == 'control_decision']
                                 report['routingStatuses'] = [r['decision'].get('status') for r in rows if r.get('type') == 'control_decision']
                                 report['turns'].append({k: report.get(k) for k in (
-                                    'passed', 'transcript', 'firstTextMs', 'firstAudioMs', 'finishedMs', 'audioPackets')})
+                                    'passed', 'responseId', 'transcript', 'firstTextMs', 'firstAudioMs', 'finishedMs', 'audioPackets')})
                                 if not report['passed']:
                                     break
                                 if len(report['turns']) < len(turns):
-                                    for key in ('transcript', 'firstTextMs', 'firstAudioMs', 'transcriptDoneMs'):
+                                    for key in ('transcript', 'firstTextMs', 'firstAudioMs', 'transcriptDoneMs', 'responseId'):
                                         report.pop(key, None)
                                     report['audioPackets'] = 0
                                     sent = time.perf_counter()
-                                    await ws.send_json({'type': 'control', 'transcript': turns[len(report['turns'])]})
+                                    turn_id = uuid4().hex
+                                    await ws.send_json({'type': 'control', 'transcript': turns[len(report['turns'])], 'clientRequestId': turn_id})
                                     continue
                                 if scenario == 'memory':
                                     report['memoryAnswerCorrect'] = '7429' in report['transcript']
@@ -86,10 +90,13 @@ async def verify(output, model, scenario='greeting'):
                         payload = json.loads(message.data)
                         kind = payload.get('type')
                         now = time.perf_counter()
-                        report['events'].append({'type': kind, 'elapsedMs': round((now-started)*1000, 1)})
+                        report['events'].append({'type': kind, 'elapsedMs': round((now-started)*1000, 1),
+                                                 'turnId': payload.get('turnId') or payload.get('origin', {}).get('turnId'),
+                                                 'responseId': payload.get('responseId')})
                         if kind in {'error', 'provider_unavailable'}:
                             raise RuntimeError(str(payload.get('message') or payload.get('reason'))[:400])
                         if kind == 'memory_status' and scenario == 'memory' and not report['turns']:
+                            assert payload.get('turnId') == turn_id
                             if payload.get('status') != 'committed' or not payload.get('committedCardIds'):
                                 raise RuntimeError('Memory was not committed')
                             if '7429' not in payload.get('message', '') or '电话' in payload.get('message', ''):
@@ -99,14 +106,21 @@ async def verify(output, model, scenario='greeting'):
                                                    'finishedMs': round((now-sent)*1000, 1),
                                                    'audioPackets': 0})
                             sent = time.perf_counter()
-                            await ws.send_json({'type': 'control', 'transcript': turns[1]})
+                            turn_id = uuid4().hex
+                            await ws.send_json({'type': 'control', 'transcript': turns[1], 'clientRequestId': turn_id})
                         if kind == 'ready' and sent is None:
                             report['lanes'] = payload.get('lanes')
                             if not (payload.get('lanes') or {}).get('dialogue', {}).get('connected'):
                                 raise RuntimeError('Provider is not connected despite ready event')
                             report['connectMs'] = round((now-started)*1000, 1)
                             sent = time.perf_counter()
-                            await ws.send_json({'type': 'control', 'transcript': turns[0]})
+                            await ws.send_json({'type': 'control', 'transcript': turns[0], 'clientRequestId': turn_id})
+                        if kind in {'audio', 'assistant_transcript'}:
+                            if payload.get('origin', {}).get('turnId') != turn_id:
+                                continue
+                            assert payload.get('responseId'), 'Missing response ID'
+                            report.setdefault('responseId', payload['responseId'])
+                            assert report['responseId'] == payload['responseId'], 'Mixed response IDs'
                         if sent is not None and kind == 'audio' and payload.get('audio'):
                             report.setdefault('firstAudioMs', round((now-sent)*1000, 1))
                             report['audioPackets'] += 1

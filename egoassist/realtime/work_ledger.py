@@ -584,10 +584,17 @@ class CaseWorkLedger:
         return recovered
 
     def snapshot(self) -> dict[str, Any]:
+        deliveries = {}
+        for entry in self.journal.entries():
+            if entry.get("type") == "turn_delivery":
+                deliveries[entry["turnId"]] = entry
         return {
-            "turnInbox": list(self.turns().values()),
+            "turnInbox": [{**turn, "delivery": deliveries.get(turn["turnId"])} for turn in self.turns().values()],
             "intents": list(self.intents().values()),
             "foregroundIntentId": self.foreground_intent_id(),
             "jobs": list(self.jobs().values()),
             "resultInbox": list(self.results().values()),
         }
+
+    def set_turn_delivery(self, turn_id: str, status: str, **details) -> dict:
+        return self.journal.append("turn_delivery", {"turnId": turn_id, "status": status, **details})

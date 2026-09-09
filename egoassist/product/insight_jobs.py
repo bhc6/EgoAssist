@@ -22,6 +22,13 @@ def insight_jobs(journal) -> list[dict]:
     return list(latest.values())
 
 
+def visible_insight_jobs(journal) -> list[dict]:
+    rows = insight_jobs(journal)
+    terminal = {row["jobId"] for row in rows if row["status"] not in PENDING}
+    recent = [row["jobId"] for row in rows if row["jobId"] in terminal][-12:]
+    return [row for row in rows if row["status"] in PENDING or row["jobId"] in recent]
+
+
 class InsightQueueFull(ValueError):
     pass
 
@@ -38,6 +45,7 @@ class InsightJobs:
         self._slots = asyncio.Semaphore(concurrency)
         self._tasks = {}
         self._users = {}
+        self._deferred = {}
         self._closing = False
         self._blocked_users = set()
         self.timeout = float(os.getenv("EGOASSIST_INSIGHT_JOB_TIMEOUT", "45"))
@@ -56,10 +64,11 @@ class InsightJobs:
                          if row["status"] in PENDING and row["specification"] == specification), None)
         if previous:
             return {**previous, "deduplicated": True}
-        if len(self._tasks) >= self.capacity:
+        if len(self._tasks) + len(self._deferred) >= self.capacity:
             raise InsightQueueFull("report queue is full")
         row = journal.append("insight.job", {"jobId": uuid4().hex[:16], "status": "queued",
-            "specification": specification, "attempt": 0, "createdAt": datetime.now(timezone.utc).isoformat()})
+            "phase": "queued", "specification": specification, "attempt": 0,
+            "createdAt": datetime.now(timezone.utc).isoformat()})
         self._schedule(user_id, session_id, journal, row)
         return row
 
@@ -68,7 +77,19 @@ class InsightJobs:
         self._users[job_id] = user_id
         task = asyncio.create_task(self._execute(user_id, session_id, journal, row), name="insight-" + job_id)
         self._tasks[job_id] = task
-        task.add_done_callback(lambda _: (self._tasks.pop(job_id, None), self._users.pop(job_id, None)))
+        task.add_done_callback(lambda finished: self._finished(job_id, finished))
+
+    def _finished(self, job_id, task):
+        self._tasks.pop(job_id, None)
+        self._users.pop(job_id, None)
+        if not task.cancelled() and task.exception() is not None:
+            asyncio.get_running_loop().call_exception_handler({
+                "message": "Report task could not persist its final state", "exception": task.exception(), "task": task})
+        while self._deferred and len(self._tasks) < self.capacity and not self._closing:
+            key = next(iter(self._deferred))
+            user_id, session_id, journal, row = self._deferred.pop(key)
+            if user_id not in self._blocked_users:
+                self._schedule(user_id, session_id, journal, row)
 
     @staticmethod
     def _transition(journal, previous, **updates):
@@ -80,24 +101,30 @@ class InsightJobs:
             async with self._slots:
                 row = self._transition(journal, row, status="running", phase="collecting",
                     attempt=row["attempt"] + 1, startedAt=datetime.now(timezone.utc).isoformat(),
-                    heartbeatAt=datetime.now(timezone.utc).isoformat())
+                    phaseStartedAt=datetime.now(timezone.utc).isoformat())
                 started = time.perf_counter()
                 spec = row["specification"]
                 paths = self.resolve(user_id, session_id, spec["scope"])
                 clock = ClockContext.current(spec["timezone"], spec["utcOffsetMinutes"])
-                row = self._transition(journal, row, phase="generating", sourceCount=len(paths),
-                                       heartbeatAt=datetime.now(timezone.utc).isoformat())
+
+                def progress(phase, **details):
+                    nonlocal row
+                    row = self._transition(journal, row, phase=phase,
+                        phaseStartedAt=datetime.now(timezone.utc).isoformat(), **details)
+
                 result = await asyncio.wait_for(self.generator.generate(user_id=user_id, journal=journal,
-                    paths=paths, kind=spec["kind"], anchor=spec["anchor"], clock=clock), timeout=self.timeout)
+                    paths=paths, kind=spec["kind"], anchor=spec["anchor"], clock=clock,
+                    progress=progress), timeout=self.timeout)
                 self._transition(journal, row, status=result["status"], phase="finished", resultEventId=result.get("id"),
                     error=result.get("error"), durationMs=round((time.perf_counter() - started) * 1000, 3),
                     finishedAt=datetime.now(timezone.utc).isoformat())
         except asyncio.CancelledError:
             self._transition(journal, row, status="queued" if self._closing else "cancelled",
+                             phase="queued" if self._closing else "finished",
                              reason="server-shutdown" if self._closing else "cancel-requested")
             raise
         except Exception as exc:
-            self._transition(journal, row, status="failed", error=type(exc).__name__ + ": " + str(exc)[:200],
+            self._transition(journal, row, status="failed", phase="finished", error=type(exc).__name__ + ": " + str(exc)[:200],
                              timedOut=isinstance(exc, asyncio.TimeoutError),
                              finishedAt=datetime.now(timezone.utc).isoformat())
 
@@ -105,21 +132,19 @@ class InsightJobs:
         if self._closing or user_id in self._blocked_users:
             return
         for row in insight_jobs(journal):
-            if row["status"] not in PENDING or row["jobId"] in self._tasks:
+            if row["status"] not in PENDING or row["jobId"] in self._tasks or row["jobId"] in self._deferred:
                 continue
-            if row.get("attempt", 0) >= 2:
-                self._transition(journal, row, status="failed", reason="restart-attempt-limit")
-            elif len(self._tasks) >= self.capacity:
-                # Keep it persisted; a later case refresh can resume it.
-                continue
+            row = self._transition(journal, row, status="queued", phase="queued", reason="recovered")
+            if len(self._tasks) >= self.capacity:
+                self._deferred[row["jobId"]] = (user_id, session_id, journal, row)
             else:
-                self._schedule(user_id, session_id, journal,
-                               self._transition(journal, row, status="queued", reason="recovered"))
+                self._schedule(user_id, session_id, journal, row)
 
     async def cancel(self, job_id, journal):
         row = next((item for item in insight_jobs(journal) if item["jobId"] == job_id), None)
         if row is None:
             raise ValueError("unknown report job")
+        self._deferred.pop(job_id, None)
         task = self._tasks.get(job_id)
         if row["status"] in PENDING:
             if task:
@@ -127,10 +152,11 @@ class InsightJobs:
                 await asyncio.gather(task, return_exceptions=True)
             latest = next(item for item in insight_jobs(journal) if item["jobId"] == job_id)
             if latest["status"] in PENDING:
-                self._transition(journal, latest, status="cancelled", reason="cancel-requested")
+                self._transition(journal, latest, status="cancelled", phase="finished", reason="cancel-requested")
 
     async def delete_user(self, user_id):
         self._blocked_users.add(user_id)
+        self._deferred = {key: value for key, value in self._deferred.items() if value[0] != user_id}
         tasks = [task for key, task in tuple(self._tasks.items()) if self._users[key] == user_id]
         for task in tasks:
             task.cancel()

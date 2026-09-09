@@ -80,6 +80,7 @@
           <textarea id="textTurnInput" rows="2" maxlength="2000" required></textarea>
           <button id="textTurnSend" type="submit">发送</button><span id="textTurnError" role="status"></span>
         </form>
+        <details><summary>问题处理记录</summary><div id="turnHistory" aria-live="polite"></div></details>
         <div class="quick">
           <button data-say="完成了" data-requires-task>目标达成</button><button data-say="再说一遍">重复</button>
           <button data-say="怎么做">请求帮助</button><button data-say="暂停" data-requires-task>暂停</button>
@@ -215,6 +216,7 @@
     </form>
   </dialog>
   <script src="vendor/livekit-client.umd.js?v=2.21.0"></script>
-  <script src="app.js?v=20260909-insights"></script>
+  <script src="turn_outbox.js?v=20260909"></script>
+  <script src="app.js?v=20260909-turn-attribution"></script>
 </body>
 </html>

@@ -160,3 +160,6 @@
 .insight-job span { flex: 1; min-width: 140px; }
 .insight-job small { color: #566760; }
 .insight-job p { flex-basis: 100%; margin: 0; overflow-wrap: anywhere; color: #a13729; }
+.turn-history-row { padding: 8px 0; border-bottom: 1px solid #d4dcda; overflow-wrap: anywhere; }
+.turn-history-row p { margin: 0 0 4px; }
+.turn-history-row small { display: block; }

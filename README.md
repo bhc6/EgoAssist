@@ -1,414 +1,170 @@
 # EgoAssist
 
-**Egocentric assistant demo and research base**, with real Qwen dialogue,
-explicit Skill/task state, scoped memory and an auditable browser console.
-The current validation covers software workflows; physical glasses, continuous
-visual task verification and production reliability require separate evaluation.
+面向智能眼镜助手的可运行软件 Demo 和记忆研究项目。浏览器提供文本、麦克风与摄像头入口，Python 服务管理用户、任务、记忆与审计，Qwen 提供语义路由、实时回答和独立报告生成。
 
-Latest memory audit: [social interaction, civil time, data ownership and live performance
-(2026-09-09)](docs/SOCIAL_TEMPORAL_MEMORY_2026-09-09.md), including real-provider failures and final validation.
-The console includes cited daily/weekly/monthly reports and optional online suggestions.
-[Prompt assets and tuning](egoassist/prompts/README.md) document the editable policies and actual-request audit.
+此前真实验收覆盖云端对话、Skill 工作流、跨会话记忆、带来源的日报/周报/月报和性能审计。本轮新增的问题归属修复已通过软件回归，但真实模型复验被执行环境的自动审批连接故障阻止。**当前不能宣称整版真实验收通过；尚未完成眼镜硬件验收，也不是生产级多机服务。**
 
-Skill review: [Skill architecture, product boundaries and real-provider validation
-(2026-09-09)](docs/SKILLS_ARCHITECTURE_2026-09-09.md). It includes failed trials,
-fixes, latency measurements and the distinction between model proposals and
-executed actions. Earlier [memory latency analysis](docs/MEMORY_SKILLS_VALIDATION_2026-09-09.md)
-records the retrieval optimizations and cloud-latency limits.
+- [记忆机制](MEMORY_ARCHITECTURE.md)：保存、检索、时间理解、报告和失败边界。
+- [文档导航](docs/README.md)：架构决策、代码审查和历史实验。
+- [提示词](egoassist/prompts/README.md)：模板、调参方法和实际请求审计。
 
----
+## 启动
 
-## Architecture
-
-```mermaid
-flowchart LR
-    UI[Browser audio / controls] --> Server[HTTP / WebSocket session]
-    Server --> Router[Semantic router + activation evidence]
-    Router --> Runtime[SkillRuntime / TaskSession]
-    Router --> Memory[TimelineMemory: scoped write / recall]
-    Runtime --> Tools[Authorized tool executor]
-    Runtime --> Harness[ContextHarness]
-    Memory --> Harness
-    Tools --> Harness
-    Harness --> Qwen[Qwen realtime dialogue]
-    Qwen --> UI
-    Camera[Camera frames] --> Perception[Bound perception evidence]
-    Perception --> Runtime
-    Server --> Journal[Journal / work ledger / console]
-```
-
-There is no autonomous think→act loop. What replaces it is deliberate: every
-semantic turn is classified by `SemanticTurnRouter`, then accepted controls are
-applied to runtime state. Procedural Skills use checkpoints; conversational
-Skills can operate without fixed tasks. `ContextHarness` assembles policy,
-authoritative state and evidence within a budget. Checkpoint advancement requires
-user confirmation; it does not prove physical completion.
-
----
-
-## Core Modules
-
-| Layer | Path | What it does |
-|---|---|---|
-| **Memory** | `egoassist/memory/timeline.py` | `TimelineMemory`: SQLite WAL, FTS5 and structured scope/time/entity constraints; current realtime retrieval does not use FAISS |
-| **Memory adapters** | `egoassist/memory/adapters.py` | Import external visual/text items into memory cards without the caller touching the store |
-| **Retrieval** | `egoassist/retrieval/` | `VectorIndex` protocol (`FlatIndex` / `FAISSIndex`), temporal localisation, semantic router |
-| **MCP** | `egoassist/realtime/mcp_provider.py` | `MCPToolProvider` — stdio and HTTP/SSE transports; `providers_from_env()` config parsing |
-| **Context** | `egoassist/realtime/context_harness.py` | `ContextHarness` — token-bounded context assembly, retrieval injection, trajectory record |
-| **Routing** | `egoassist/realtime/semantic.py`, `skills.py` | `SemanticTurnRouter` (one call → speech control, task control, preferences, Skill choice) and `SkillRuntime` |
-| **Skill packages** | `egoassist/realtime/skill_package.py`, `egoassist/skills/` | Validated YAML policy, version/hash, resources and optional task specs; distinct from session state and tool execution |
-| **Work** | `egoassist/realtime/work_ledger.py` | `CaseWorkLedger` — durable intents, jobs, and the result inbox |
-| **Perception** | `egoassist/realtime/perception.py`, `ambient.py` | Checkpoint-bound frame validation ([ADR 005](docs/ADR_005_CHECKPOINT_BOUND_PERCEPTION.md)) and task-free ambient observation ([ADR 007](docs/ADR_007_AMBIENT_OBSERVATION.md)) |
-| **Habits** | `egoassist/habits/` | von Mises circular time-of-day induction; observation-gated reminder decisions |
-| **Abstention** | `egoassist/abstention/conformal.py` | `ConformalAbstention` — split-conformal threshold, risk–coverage curve |
-| **Benchmarks** | `egoassist/eval/` | `real_metrics.py` (exact match, token F1, temporal IoU) and `metrics.py` (synthetic QA records) |
-| **Product** | `egoassist/product/` | Privacy governance, artifact ports, human-help webhook, outcome ledger |
-
----
-
-## Quick Start
+云端 Demo 不需要本地 GPU。主要验证环境为 Windows、Python 3.13、Edge；真实验收脚本使用 Python 3.11 及以上的异步超时接口。项目声明的最低运行版本不等于所有平台都已验证。
 
 ```powershell
 cd D:\DEMO\EgoAssist
-Copy-Item .env.example .env          # set QWEN_API_KEY or DASHSCOPE_API_KEY
-pip install -e ".[dev]"
-python run_egoassist.py --open        # opens http://127.0.0.1:8770
+py -3.13 -m venv .venv
+.venv\Scripts\python.exe -m pip install -e ".[dev]"
+if (-not (Test-Path .env)) { Copy-Item .env.example .env }
 ```
 
-Register a local identity, create an experiment case, and start a realtime session.
-
-**Two servers on the same machine** — port *and* memory root must differ:
+在 `.env` 填写 `QWEN_API_KEY`，或使用 `DASHSCOPE_API_KEY`。密钥需要对应模型权限，网络需可访问 DashScope HTTPS 和实时 WebSocket。不要提交密钥。
 
 ```powershell
-python run_egoassist.py --port 8771 --memory-path .egoassist-8771/runtime.json
+.venv\Scripts\python.exe run_egoassist.py --open
 ```
 
----
+默认地址 <http://127.0.0.1:8770>。注册本地账户，创建案例，先用文本入口验证云端链路，再启用媒体设备。摄像头和麦克风需要浏览器授权。
 
-## Building on Top (Secondary Development)
-
-EgoAssist is a *base layer*. The intended extension model:
-
-### 1 — Feed your own data into memory
-
-`TimelineMemory` is the store; `remember()` is the only write path, and every
-card carries provenance, civil-time semantics, and a scope.
-
-```python
-from egoassist.memory.timeline import TimelineMemory
-
-memory = TimelineMemory(".egoassist/timeline.db")
-card = memory.remember(
-    "厨房，早上八点，看到服药动作",
-    user_id="participant-1",
-    case_id="case-1",
-    scope="case",                # case | participant
-    kind="observation",          # fact event state preference task-preference
-                                 # scene observation tool-effect capture legacy
-    subject="participant-1", predicate="took-medication", value="kitchen",
-)
-cards = memory.cards(user_id="participant-1", kinds=["observation"])
-```
-
-For bulk external items use `egoassist.memory.adapters.import_visual_items()`
-rather than writing to the database directly.
-
-### 2 — Attach MCP servers
-
-```python
-import os
-from egoassist.realtime.mcp_provider import providers_from_env
-from egoassist.realtime.tools import SkillToolExecutor
-
-executor = SkillToolExecutor()
-for provider in providers_from_env(os.environ["EGOASSIST_MCP_SERVERS"]):
-    await provider.start()
-    tools = await provider.list_tools()
-    # Bridge each MCP tool to a synchronous handler at your own async boundary:
-    # SkillToolExecutor.execute() is deliberately synchronous.
-    executor.register_handler("my-mcp-handler", my_sync_bridge(provider))
-```
-
-`EGOASSIST_MCP_SERVERS` is comma-separated `name:command` or `name:url`:
-
-```bash
-EGOASSIST_MCP_SERVERS=filesystem:npx -y @modelcontextprotocol/server-filesystem /tmp,custom:http://localhost:8000/mcp
-```
-
-MCP is a supported client transport, not yet wired into the default server
-startup — `run_egoassist.py` does not call `providers_from_env()` for you.
-
-### 3 — Write a Skill
-
-```
-egoassist/skills/my-domain/
-├── SKILL.md          # YAML name/description + domain workflow policy
-├── skill.json        # manifest: name, description, tools[], tasks[]
-├── tasks/*.json
-└── references/*.md
-```
-
-The four bundled Skills contain seven fixed tasks:
-
-| Skill | Workflow | Example |
-|---|---|---|
-| `kitchen-coach` | Tomato eggs, fruit salad, oatmeal | Cooking steps, confirmation, pause and rollback |
-| `assembly-coach` | Stool assembly, water filter | Assembly steps and authorized reference PDF |
-| `packing-coach` | Commuting check, short trip packing | Confirm list, gather items, confirm carrying |
-| `field-notes` | Conversational, no fixed task | Dictated field note, uncertainty and factual corrections |
-
-These are bundled domain workflows. A Skill does not supply a model, hardware
-recognition, durable reminder delivery or external submission by itself. Memory
-and reports remain platform capabilities. See the latest review for exactly
-which paths received real-provider tests.
-
----
-
-## Ambient Observation (off by default)
-
-The elderly medication-adherence scenario needs the camera to notice a behaviour
-nobody asked it to watch for. [ADR 005](docs/ADR_005_CHECKPOINT_BOUND_PERCEPTION.md)
-drops any frame without an active task, so ambient observation is a **separate,
-parallel contract** rather than a relaxation of that one — see
-[ADR 007](docs/ADR_007_AMBIENT_OBSERVATION.md) for the full decision, including
-what it makes genuinely weaker.
-
-```bash
-EGOASSIST_AMBIENT_MODE=1              # default 0; a default deployment is unchanged
-EGOASSIST_AMBIENT_WATCHLIST=          # empty = built-in medication watchlist
-EGOASSIST_AMBIENT_INTERVAL_SECONDS=20 # floor 5
-```
-
-Boundaries, in the order they apply:
-
-- Off unless the deployment sets the flag, **and** the participant grants consent
-  in the console. The consent id sits inside the frame binding, so revoking it
-  invalidates frames already in flight.
-- The watchlist is a finite, reviewable set of activities and places — kitchen,
-  dining table, living room. No bedroom, no bathroom (Aria community guidelines).
-- Absence is recorded as evidence (`observed=False`), which is what a missed-dose
-  reminder rests on. A frame that fails to parse is *not* recorded as absence.
-- A reminder requires **coverage today**: with no ambient frames since local
-  midnight the system cannot tell a missed dose from glasses left on the charger,
-  so it stays silent.
-- Raw frames are never persisted, and ambient observation can neither advance a
-  task nor speak on its own.
-- While it runs, the console shows a top-level banner naming what is watched,
-  where, how often, the latest result, and a revoke button.
-
----
-
-## Optional Integrations
-
-All optional — the base runs without any of them.
-
-| Integration | Purpose | Configure |
-|---|---|---|
-| **LiveKit** | Realtime WebRTC media transport | `LIVEKIT_URL` + `LIVEKIT_API_KEY` + `LIVEKIT_API_SECRET` |
-| **Temporal** | Durable reminder workflows | `EGOASSIST_TEMPORAL_TARGET=127.0.0.1:7233` |
-| **OpenTelemetry** | Distributed tracing | install `opentelemetry-sdk`; no-op if absent |
-| **FAISS** | Fast ANN vector search | install `faiss-cpu`; falls back to O(n) FlatIndex |
-| **ntfy** | Push notifications | `EGOASSIST_NTFY_SERVER` + `EGOASSIST_NTFY_TOPIC` |
-| **scipy** | von Mises habit fitting | optional; `egoassist/habits/` falls back to circular moments |
-
----
-
-## Running Benchmarks
-
-The real entry point is `run_egolife_benchmark.py`, against a downloaded
-[EgoLife](https://egolife-ai.github.io/) subset. It runs the full pipeline —
-captioning, retrieval, answer generation, temporal localisation — and applies
-split-conformal abstention to the result.
+第二个实例必须同时使用不同端口和数据根目录：
 
 ```powershell
-python run_egolife_benchmark.py `
-  --data-dir data_real/egolife/A1_JAKE_DAY1 `
-  --output-dir outputs/my_run `
-  --max-videos 4 --fps 0.5 --alpha 0.1 --calibration-ratio 0.5
+.venv\Scripts\python.exe run_egoassist.py --port 8780 --memory-path .egoassist-real-demo/runtime.json
 ```
 
-| Flag | Default | Description |
-|---|---|---|
-| `--data-dir` | *required* | Downloaded EgoLife day directory |
-| `--max-videos` | all | Cap videos; **fewer than 2 yields no held-out test split** |
-| `--fps` | `0.5` | Frame sampling rate for captioning |
-| `--alpha` | `0.1` | Conformal target risk |
-| `--calibration-ratio` | `0.5` | Fraction of videos used for calibration |
-| `--backend` | `local` | `local` (Qwen3-VL on-device) or `dashscope` |
-| `--model-id` / `--api-model` | Qwen3-VL-2B / `qwen3-vl-plus` | Model selection |
-| `--precision` | `fp16` | `fp16` or `4bit` for the local backend |
+`--memory-path` 的父目录是持久数据根目录，不只是 JSON 文件的位置。每个根目录只允许一个服务进程持有写入租约。
 
-Outputs are `results.jsonl` (per question) and `summary.json` (aggregate).
+## 演示能力
 
-**Read the summary honestly.** With a single video every question lands in the
-calibration set, so `n_test == 0` and every held-out metric is `null` — not
-`0.0`. `split_status` says which case you are in:
+| 能力 | 实际行为 | 边界 |
+| --- | --- | --- |
+| 实时对话 | 文本/语音输入，真实 Qwen 音频与转写输出 | 文本测试不测量麦克风 ASR、扬声器和眼镜无线链路 |
+| Skill | 选择、激活、退出、确认、暂停、恢复、回退 | 用户确认检查点不证明物理动作完成 |
+| 记忆 | 案例事件、显式跨会话保存、偏好与时间检索 | 可能漏检别名、同义词和复杂指代 |
+| 报告 | 按指定日期生成日报、周报、月报，查看来源 | 按需提交，不是每天/月末自动执行的日历调度 |
+| 主动建议 | 在线控制台启用后，对新记录生成建议 | 页面关闭后不产生新的建议请求；已受理任务继续执行 |
+| 任务恢复 | 刷新后恢复显示，重启后调度未完成报告 | 在途云端调用可能重做，不保证外部副作用恰好执行一次 |
+| 审计 | 事件链、提示词、证据、Token、阶段耗时 | UI 是有限窗口，完整数据通过账户导出检查 |
+| 资料/求助 | 授权 PDF 预览、确认后的求助连接器 | 外部服务必须配置并可用 |
 
-| `split_status` | Meaning |
-|---|---|
-| `held-out-test-split` | Real measurement; `token_f1` etc. are meaningful |
-| `no-test-split` | Fewer than 2 videos; held-out metrics are `null`, use the `all_sample_*` fields |
-| `no-rows` | Nothing ran |
+内置四个 Skill、七个固定任务：`kitchen-coach` 三项、`assembly-coach` 两项、`packing-coach` 两项；`field-notes` 是无固定步骤的对话工作流。Skill 定义政策、资源和可用工具，不替代模型、记忆服务或硬件识别。
 
-The `all_sample_*` fields are computed over every question including the
-calibration set. They are real numbers but **not** a held-out measurement.
+## 架构
 
-Existing runs in `outputs/` predate this fix and still show the misleading
-`token_f1: 0.0` with `n_test: 0`; they also record a `mean_query_seconds` of
-191 s (local) to 260 s (cloud) per question, which is why latency is named
-openly as unsolved below rather than buried.
-
-`egoassist/eval/real_metrics.py` holds the metric primitives
-(`exact_match`, `token_f1`, `temporal_iou`) if you want to score your own runs.
-
----
-
-## Configuration Reference
-
-**CLI**
-
-| Flag | Default | Description |
-|---|---|---|
-| `--host` | `127.0.0.1` | Bind address |
-| `--port` | `8770` | HTTP/WebSocket port |
-| `--open` | off | Launch browser on start |
-| `--skills` | bundled | Skill registry directory |
-| `--active-skill` | none | Seed new cases with a Skill |
-| `--memory-path` | `.egoassist/runtime.json` | Persistent-root anchor |
-| `--model` | `qwen3.5-omni-flash-realtime` | Realtime dialogue model |
-| `--voice` | `Ethan` | Provider voice |
-
-**`.env`** — see `.env.example` for the annotated copy.
-
-```text
-QWEN_API_KEY=...                          # or DASHSCOPE_API_KEY
-
-# Turn routing
-EGOASSIST_TURN_ROUTER_MODEL=qwen-flash
-EGOASSIST_TURN_ROUTER_TIMEOUT=3.0
-
-# Context window
-EGOASSIST_CONTEXT_WINDOW=32768
-EGOASSIST_CONTEXT_RESERVE=4096
-EGOASSIST_MAX_CASE_OWNERS=128
-
-# Optional: ambient observation (ADR 007), off by default
-EGOASSIST_AMBIENT_MODE=0
-EGOASSIST_AMBIENT_WATCHLIST=
-EGOASSIST_AMBIENT_INTERVAL_SECONDS=20
-
-# Optional: LiveKit
-LIVEKIT_URL=ws://127.0.0.1:7880
-LIVEKIT_API_KEY=
-LIVEKIT_API_SECRET=
-
-# Optional: Temporal reminders
-EGOASSIST_TEMPORAL_TARGET=127.0.0.1:7233
-EGOASSIST_TEMPORAL_NAMESPACE=default
-
-# Optional: Human-help webhook
-EGOASSIST_HUMAN_HELP_WEBHOOK=
-EGOASSIST_HUMAN_HELP_TOKEN=
-
-# Optional: ntfy push
-EGOASSIST_NTFY_SERVER=https://ntfy.sh
-EGOASSIST_NTFY_TOPIC=
+```mermaid
+flowchart LR
+    Browser[浏览器文本 / 媒体 / 审计] --> Server[身份与案例运行时]
+    Server --> Journal[追加会话日志]
+    Server --> Router[单次语义路由]
+    Router --> Task[Skill / 检查点 / 工具权限]
+    Router --> Memory[SQLite 原文证据检索]
+    Memory --> Context[有预算的上下文组装]
+    Task --> Context
+    Context --> Realtime[Qwen 实时回答]
+    Realtime --> Browser
+    Server --> Jobs[持久报告队列]
+    Jobs --> Report[独立 Qwen 文本调用]
+    Journal --> Jobs
+    Report --> Journal
+    Journal --> Browser
 ```
 
----
+实时回答、报告、媒体观察和持久提醒是不同执行路径。报告默认最多两个并发请求，不占用实时回答的供应商会话；仍共享进程、磁盘和网络。单个案例的任务状态转换保持顺序，避免多个语义结果同时修改检查点。
 
-## Testing
+刷新会关闭媒体连接；已接收文本、检查点和持久化结果可恢复，旧连接音频无法原地续播。重启会中断计算，报告恢复的是任务与证据，执行可能重新开始。普通工作账本、Temporal 提醒和工具副作用各有恢复规则，不能统称所有任务无条件不中断。
+
+文本入口为每次提交分配 `clientRequestId`。同一案例内以相同 ID、相同内容重发会去重；同一 ID 改变内容会被拒绝。后续问题可以打断旧播报，旧问题保留在账本中并显示“回答已打断”，可明确重新提问。音频、字幕携带 `turnId/responseId`，服务端过滤过期代次，前端按问题和响应分开字幕。记忆文字回执、后台处理完成、模型响应完成是不同状态；模型完成也不等于扬声器已经播完。
+
+未获回执的文本暂存在该标签页的 `sessionStorage`，按账户和案例隔离，刷新后连接同一案例会用原 ID 重发，回执后移除。关闭标签页、清除站点数据不在该暂存保证内；已获回执的数据由服务端日志保留。
+
+## 代码地图
+
+| 路径 | 职责 |
+| --- | --- |
+| `run_egoassist.py` | HTTP/WS、案例所有权、生命周期与模块组装，目前仍是较大的集成入口 |
+| `egoassist/realtime/` | 云端桥接、路由、Skill、工作账本、上下文日志与视觉观察 |
+| `egoassist/memory/` | SQLite 证据记忆、时间解释、报告、离线分层与快照 |
+| `egoassist/product/` | 报告调度、隐私、资料、通知、提醒与外部接口 |
+| `egoassist/console/` | 原生 JS 审计界面及打包媒体/PDF 库 |
+| `egoassist/prompts/`、`skills/` | 模型政策、Skill 清单、参考资源与任务定义 |
+| `egoassist/capture/`、`backends/`、`qa/`、`retrieval/` | 离线采样、模型后端、检索、定位与问答 |
+| `egoassist/habits/`、`abstention/`、`eval/` | 习惯推断、拒答研究和指标，不自动校准实时模型 |
+| `tests/`、`scripts/` | 行为回归、环境诊断、真实供应商验收和机制对比 |
+| `docs/validation/` | 已归档实验摘要和失败证据 |
+| `outputs/`、`data_real/`、`.egoassist*/` | 本地产物、数据集与用户数据，默认不进入 Git |
+
+## 配置
+
+完整样例见 [.env.example](.env.example)。
+
+| 配置 | 默认 | 含义 |
+| --- | --- | --- |
+| `--model` | `qwen3.5-omni-flash-realtime` | 实时回答模型 |
+| `EGOASSIST_TURN_ROUTER_MODEL` | `qwen-flash` | 单次语义路由 |
+| `EGOASSIST_TURN_ROUTER_TIMEOUT` | `3.0` 秒 | 路由截止时间 |
+| `EGOASSIST_INSIGHT_MODEL` | `qwen-flash` | 报告模型 |
+| `EGOASSIST_INSIGHT_CONCURRENCY` | `2` | 全局报告并发，不超过待办容量 16 |
+| `EGOASSIST_INSIGHT_TIMEOUT` | `30` 秒 | 单次报告 HTTP 截止时间 |
+| `EGOASSIST_INSIGHT_JOB_TIMEOUT` | `45` 秒 | 获得执行名额后的截止时间，不含排队 |
+| `EGOASSIST_AMBIENT_MODE` | `0` | 无任务观察，另需用户授权 |
+| `EGOASSIST_TEMPORAL_TARGET` | 空 | 持久提醒服务，未配置时对应能力不可用 |
+| `LIVEKIT_URL/API_KEY/API_SECRET` | 空 | 配齐后使用 LiveKit，否则使用 WebSocket 媒体路径 |
+
+求助 webhook 和 ntfy 通知需另配地址/凭据。MCP 客户端已实现，但默认入口未自动连接 provider。可选功能的运行配置与安装依赖是不同概念，不能据此认为其 SDK 均未安装。
+
+## 验证
 
 ```powershell
-python -m pytest                          # 332 deterministic tests, no API key needed
-python scripts/verify_egoassist.py        # release gate
-python -m compileall -q egoassist run_egoassist.py
+# 确定性行为回归，不需要 API Key
+.venv\Scripts\python.exe -m pytest -p no:cacheprovider
+
+# 真实供应商，每次使用新的输出目录
+.venv\Scripts\python.exe scripts/verify_real_turn_attribution.py --output outputs/new-attribution
+.venv\Scripts\python.exe scripts/benchmark_realtime_latency.py --output outputs/new-latency --repeats 3
+.venv\Scripts\python.exe scripts/verify_real_social_memory.py --output outputs/new-social
+
+# 真实浏览器，需要 Playwright 和已安装的 Edge
+.venv\Scripts\python.exe -m pip install playwright
+.venv\Scripts\python.exe scripts/verify_browser.py --output outputs/new-browser --real-turn
+
+# 已下载 EgoLife 标注的真实 embedding / 回答模型比较
+.venv\Scripts\python.exe scripts/compare_memory_mechanisms.py --output outputs/new-memory-comparison
+.venv\Scripts\python.exe scripts/verify_insight_recovery.py --output outputs/new-report-recovery --source outputs/new-memory-comparison/dataset.json
+
+# 统一真实软件验收：14 组独立运行，失败继续记录，不自动重试
+.venv\Scripts\python.exe scripts/verify_real_acceptance.py --output outputs/new-full-real --source outputs/new-memory-comparison/dataset.json
 ```
 
-The deterministic suite covers: persistence across restart, participant/case
-isolation, stale-turn cancellation, concurrent WebSocket ownership, reconnect
-routing, tool-result boundaries, memory deletion, consolidation idempotency,
-FTS5 migration, vector index, MCP provider, checkpoint-bound perception,
-ambient observation and consent revocation, habit induction across midnight, and
-privacy export/deletion.
+真实脚本没有可用供应商时应失败，不以 mock 冒充通过。`compare_memory_mechanisms.py` 使用已下载片段对应的 QA 原始文本标注，不重新推理视频。使用替身的单元测试只证明软件行为。
 
----
+统一验收包含连续输入、播报中打断、文字口误更正、重复提交、在途断线、延迟、记忆、时间、Skill、浏览器报告和报告重启恢复。它不覆盖实物眼镜、真实麦克风口误识别、所有可选连接器及无限并发。具体证据与未验证项见[代码审查](docs/CODE_REVIEW_2026-09-09.md)。
 
-## Repository Layout
+视频全链路研究另用 `run_egolife_benchmark.py --help`。它的采样、图像编码、视觉回答和定位开销不同，不能把旧视频评测的分钟级耗时当作当前实时延迟。少于两段视频时没有独立测试集，必须检查 `split_status` 和 `n_test`。
 
-```text
-egoassist/
-├── memory/         TimelineMemory, adapters, temporal semantics, snapshots
-├── retrieval/      VectorIndex (FAISS/Flat), temporal localisation, router
-├── realtime/       MCP provider, Skill/task/turn control, perception, journal
-├── habits/         circular-time habit induction, observation→reminder bridge
-├── abstention/     split-conformal abstention
-├── eval/           metric primitives (exact match, token F1, temporal IoU)
-├── qa/             question-answering pipelines
-├── skills/         bundled replaceable Skills
-├── capture/        offline stream segmentation
-├── backends/       model adapters
-├── product/        privacy, artifacts, human-help, telemetry
-└── console/        packaged research UI
+## 性能与限制
 
-docs/               architecture decision records
-tests/              deterministic regression suite
-scripts/            release and real-provider checks
-run_egoassist.py    HTTP/WebSocket server entry point
-run_egolife_benchmark.py  EgoLife evaluation entry point
-```
+2026-09-09 的四轮真实 Qwen 文本控制验收中，从发送文本到首音频约 **1.01-1.42 秒**，四轮均通过。样本很小，不代表 P95/P99 或硬件延迟。对应本地产物为 `outputs/async-realtime-latency-20260909/summary.json`。
 
----
+22 条 EgoLife 记录的独立报告约 **14-22 秒**。异步受理并不缩短模型输出时间。前端显示排队、读记录、准备证据、等待模型、校验和耗时，不伪造生成百分比。[记忆对比](docs/MEMORY_MECHANISM_COMPARISON_2026-09-09.md)区分本地检索与云端 embedding 成本。这些本地产物默认忽略，克隆后需重新运行或查归档证据。
 
-## TimelineMemory
+尚未验收：眼镜型号与协议、麦克风和回声打断、无线断网、后台录制、连续长时间运行、功耗、温度、多设备同步、生产认证和灾难恢复。原始媒体默认不完整保存；模型可能遗漏、混淆或错误引用已找回的证据。
 
-SQLite WAL, `memory_cards` table, FTS5 trigram full-text index, optional FAISS
-ANN index. In-place migration from schema v1/v2 to v3 preserves all existing cards.
+## 部署与数据
 
-Card kinds: `fact event state preference task-preference scene observation tool-effect capture legacy`
-
-Persisted tiers are `short` (working set) and `long` (durable; lossless
-deterministic promotion, no LLM summarisation). Retrieval additionally surfaces
-a derived `current` layer for cards inside the recency window.
-
-Scope: `case` (per-experiment) or `participant` (cross-session, explicit opt-in).
-
----
-
-## Known Limitations
-
-Named here rather than left for a reader to discover:
-
-- **Latency is not glasses-grade.** Measured end-to-end question latency is
-  95–191 s on-device and 254–260 s via cloud APIs. A wearable assistant needs
-  well under 2 s. Closing that gap is architectural work (on-device
-  quantisation, smaller models, a shorter retrieval path), not configuration.
-- **No Aria SDK integration.** `projectaria_tools` does not support Windows and
-  the hardware is not in hand; USB passthrough under WSL is unverified. The
-  browser camera path is the only live input today.
-- **Held-out benchmark numbers are still thin.** The runs committed under
-  `outputs/` used a single video each, so they carry no test split at all.
-- **MCP is not auto-wired.** The client works; the default server startup does
-  not attach providers.
-- **The participant login is a research identity store**, not production
-  authentication.
-
----
-
-## Deployment
+本机优先绑定 `127.0.0.1`。远程访问需 TLS、访问控制和持久卷；浏览器远程媒体也需要安全上下文。Docker 应挂载整个数据根目录：
 
 ```powershell
 docker build -t egoassist .
-docker run --rm -p 8770:8770 --env-file .env egoassist
+docker run --rm -p 127.0.0.1:8770:8770 --env-file .env -v egoassist-data:/app/.egoassist egoassist
 ```
 
-> The built-in participant login is a research identity store, not production
-> authentication. Keep the server on `127.0.0.1` or place it behind a reviewed
-> TLS gateway. SQLite + the memory-root lease supports one process per memory
-> root, not distributed active-active serving.
+Docker 文件存在不代表已完成容器验收。备份应在停止写入后复制整个数据根目录，包括 SQLite、日志及相关文件，不要只备份 `runtime.json`。账户可导出和显式删除数据；安全说明见 [SECURITY.md](SECURITY.md)。
 
----
+## 开发
 
-## License
+领域政策进入 Skill/提示词，权限和时钟进入可验证代码，状态进入持久账本，模型输出只是提议。异步执行必须处理重复提交、取消、退出、恢复和结果归属。
 
-[Apache 2.0](LICENSE) — see [NOTICE](NOTICE) for attribution.
+不要用无来源摘要覆盖原文，不把模型自报置信度当作正确率。修复后运行受影响测试，再按风险运行全量和真实验收。保留失败日志，检查安装包资源，明确未验证条件。
+
+许可证：[Apache 2.0](LICENSE)。第三方归属见 [NOTICE](NOTICE)。

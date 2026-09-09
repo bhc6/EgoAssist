@@ -5,6 +5,8 @@ let state, stream, socket, audioContext, microphoneSource, processor, videoTimer
 let livekitRoom = null, livekitAudioElements = [];
 let interactionTransport = "websocket-fallback";
 let playbackTime = 0, assistantText = "";
+let captionResponseId = null, currentTurnId = null;
+const turnOutbox = () => new TurnOutbox(sessionStorage, currentUser.id, selectedSessionId);
 let connectingPromise = null;
 let connectionGeneration = 0;
 let providerReady = false;
@@ -16,6 +18,9 @@ let sessionCatalog = [], memoryPolicySaving = false;
 let ambientState = null;
 let insightSession = null, insightBusy = false, insightTurn = null, insightLastAttempt = 0;
 let insightJobs = [], selectedInsightJob = null, insightPolling = false, displayedInsightResult = null;
+let insightLastPoll = 0;
+const insightPhases = {queued: "等待执行名额", collecting: "读取原始记录", preparing: "准备报告证据",
+  "waiting-provider": "等待模型响应", validating: "校验输出与来源", finished: "处理结束"};
 let promptAuditSignature = "";
 let pdfjs = null, artifactDocument = null, artifactPageNumber = 1, artifactScale = 1;
 let artifactRenderGeneration = 0, artifactRenderTask = null, pendingHumanHelpPreview = null;
@@ -207,6 +212,12 @@ async function enterConsole(user) {
   const selected = sessionCatalog.find(item => item.id === selectedSessionId);
   if (selected?.memoryPolicy) renderMemoryPolicy(selected.memoryPolicy, state.memoryProfiles || []);
   await refreshPrivacy();
+  try {
+    if (turnOutbox().entries().length) {
+      $("#textTurnError").textContent = "正在恢复未确认的文本请求";
+      connectRealtime({media: false}).catch(error => { $("#textTurnError").textContent = error.message; });
+    }
+  } catch (error) { $("#textTurnError").textContent = error.message; }
 }
 
 function renderPrivacy(payload) {
@@ -438,6 +449,19 @@ function showHumanHelpPreview(payload) {
 
 function renderWorkCenter() {
   const ledger = state.workLedger || {intents: [], jobs: [], resultInbox: [], foregroundIntentId: null};
+  const turnStates = {received: "已接收，等待处理", responding: "正在回答", completed: "回答已完成",
+    interrupted: "回答已打断", classifying: "正在分析问题", processing: "正在处理", ready: "等待执行",
+    deferred: "排队中", failed: "处理失败", cancelled: "已取消"};
+  const turns = ledger.turnInbox || [];
+  const recentTurnIds = new Set(turns.slice(-8).map(turn => turn.turnId));
+  $("#turnHistory").innerHTML = turns.filter(turn => recentTurnIds.has(turn.turnId) ||
+    !["completed", "cancelled"].includes(turn.delivery?.status || turn.status)).reverse().map(turn => {
+    const status = turn.delivery?.status || turn.status;
+    const label = !turn.delivery && status === "completed" ? "已处理，查看任务结果" : turnStates[status] || status;
+    return "<div class='turn-history-row' data-turn-id='" + esc(turn.turnId) + "'><p>" + esc(turn.text) +
+      "</p><small>" + esc(label) + " · " + esc(turn.turnId) + "</small>" +
+      (["interrupted", "failed"].includes(status) ? "<button type='button' data-reask-turn='" + esc(turn.turnId) + "'>继续这个问题</button>" : "") + "</div>";
+  }).join("");
   const capabilities = state.capabilityCatalog?.platform || [];
   const unavailable = capabilities.filter(item => item.status !== "available");
   const timerCapability = capabilities.find(item => item.id === "timer-delivery") || {
@@ -1137,6 +1161,9 @@ async function connectRealtimeSession(generation, media, retryAttempt) {
   ws.onmessage = event => {
     if (socket !== ws || generation !== connectionGeneration) return;
     const message = JSON.parse(event.data);
+    if (["audio", "assistant_transcript", "response_status"].includes(message.type) &&
+        message.origin?.turnId && currentTurnId && message.origin.turnId !== currentTurnId && !message.origin.background) return;
+    if (message.type === "memory_status" && message.turnId && currentTurnId && message.turnId !== currentTurnId) return;
     if (message.type === "ready") {
       if (message.lanes?.dialogue?.connected === false || providerUnavailable) {
         rejectReady(Error("实时模型尚未连接"));
@@ -1146,6 +1173,11 @@ async function connectRealtimeSession(generation, media, retryAttempt) {
       ready = true;
       providerReady = true;
       selectedSessionId = message.contextSessionId || selectedSessionId;
+      try {
+        const pending = turnOutbox().entries();
+        if (pending.length) currentTurnId = pending.at(-1).clientRequestId;
+        for (const item of pending) ws.send(JSON.stringify(item));
+      } catch (error) { $("#textTurnError").textContent = error.message; }
       if (currentUser) localStorage.setItem("egoassist.session." + currentUser.id, selectedSessionId);
       refreshSessionList(selectedSessionId).catch(() => {});
       resolveReady();
@@ -1165,10 +1197,16 @@ async function connectRealtimeSession(generation, media, retryAttempt) {
       playPcm24(message.audio);
     } else if (message.type === "interrupted") {
       stopPlayback();
+      assistantText = "";
+      captionResponseId = null;
       $("#duplexState").textContent = "已打断旧响应，正在处理你的请求";
     } else if (message.type === "barge_in_policy") {
       $("#duplexState").textContent = message.action === "protected" ? "安全句保护播报中 · 仍在听你说话" : "将在当前短句边界停止 · 仍在听你说话";
     } else if (message.type === "user_transcript") {
+      if (message.channel === "explicit_control" && currentTurnId && message.turnId !== currentTurnId) return;
+      currentTurnId = message.turnId || null;
+      assistantText = "";
+      captionResponseId = null;
       $("#transcript").textContent = "你 · " + (message.channel || "input_audio_transcription") + "：" + message.text + (message.echoRisk === "suspected" ? " · 可能残余回声" : "");
       $("#duplexState").textContent = media ? "正在听你说话" : "正在处理文本";
       resetWorkflow("收到用户转写：" + String(message.text || "").slice(0, 80));
@@ -1176,12 +1214,36 @@ async function connectRealtimeSession(generation, media, retryAttempt) {
       setWorkflowStage("reasoning", "active", "正在进行意图路由与上下文编排");
       setWorkflowStage("memory", "active", "正在查询当前范围的 TimelineMemory");
     } else if (message.type === "assistant_transcript" && ["conversation", "proactive-utterance"].includes(message.purpose)) {
+      if (captionResponseId !== message.responseId) assistantText = "";
+      captionResponseId = message.responseId;
       assistantText = message.done ? message.text : assistantText + message.text;
-      $("#assistantCaption").innerHTML = "<span>助手语音字幕 · provider output channel · " + (message.done ? "已完成" : "生成中") + "</span><p>" + esc(assistantText) + "</p>";
-      $("#duplexState").textContent = message.done ? (media ? "全双工在线 · 正在听" : "文本会话在线") : "助手正在说 · 你可以随时打断";
-      setWorkflowStage("delivery", message.done ? "complete" : "active", message.done ? "回答已通过 provider 输出通道交付" : "正在生成并流式交付回答");
-      if (message.done) workflow.active = false;
+      $("#assistantCaption").innerHTML = "<span>助手语音字幕 · " + (message.origin?.background ? "后台结果 · " : "") + (message.done ? "字幕已收齐" : "生成中") + "</span><p>" + esc(assistantText) + "</p>";
+      $("#duplexState").textContent = message.done ? "字幕已收齐，等待模型结束响应" : "助手正在说 · 你可以随时打断";
+      setWorkflowStage("delivery", "active", message.done ? "等待模型最终响应状态" : "正在生成并流式交付回答");
       if (message.done) assistantText = "";
+    } else if (message.type === "response_status") {
+      const turn = state?.workLedger?.turnInbox?.find(item => item.turnId === message.origin?.turnId);
+      if (turn) {
+        turn.delivery = {status: message.status, responseId: message.responseId};
+        renderWorkCenter();
+      }
+      if (message.status === "interrupted") {
+        assistantText = "";
+        captionResponseId = null;
+        stopPlayback();
+        $("#duplexState").textContent = "本轮回答未完成 · 可在问题记录中继续";
+        setWorkflowStage("delivery", "failed", "模型响应中断，未完整输出");
+        workflow.active = false;
+      } else if (message.status === "completed" && message.responseId === captionResponseId) {
+        $("#duplexState").textContent = media ? "全双工在线 · 正在听" : "文本会话在线";
+        setWorkflowStage("delivery", "complete", "模型响应已完整接收");
+        workflow.active = false;
+      }
+    } else if (message.type === "turn_receipt") {
+      try { turnOutbox().acknowledge(message.turnId); }
+      catch (error) { $("#textTurnError").textContent = error.message; return; }
+      if (currentTurnId && message.turnId !== currentTurnId) return;
+      $("#textTurnError").textContent = (message.deduplicated ? "已受理过，未重复执行 · " : "已接收 · ") + message.turnId;
     } else if (message.type === "memory_status") {
       $("#assistantCaption").innerHTML = "<span>记忆事务 · 服务端确认</span><p>" + esc(message.message) + "</p>";
       $("#duplexState").textContent = message.status === "committed"
@@ -1264,6 +1326,9 @@ function stopAudioCapture() {
 }
 
 function disconnectRealtime() {
+  currentTurnId = null;
+  captionResponseId = null;
+  assistantText = "";
   connectionGeneration += 1;
   providerReady = false;
   if (mediaPromise) mediaGeneration += 1;
@@ -1301,10 +1366,26 @@ $("#textTurnForm").onsubmit = async event => {
     await audioContext.resume();
     await connectRealtime({media: false});
     if (!socket || socket.readyState !== WebSocket.OPEN) throw Error("实时会话尚未就绪");
-    socket.send(JSON.stringify({type: "control", transcript}));
+    currentTurnId = crypto.randomUUID();
+    assistantText = "";
+    captionResponseId = null;
+    stopPlayback();
+    const pending = {type: "control", transcript, clientRequestId: currentTurnId};
+    turnOutbox().add(pending);
     input.value = "";
+    socket.send(JSON.stringify(pending));
   } catch (error) { $("#textTurnError").textContent = error.message; }
   finally { button.disabled = false; }
+};
+
+$("#turnHistory").onclick = event => {
+  const button = event.target.closest("[data-reask-turn]");
+  if (!button) return;
+  const turn = state?.workLedger?.turnInbox?.find(item => item.turnId === button.dataset.reaskTurn);
+  if (turn) {
+    $("#textTurnInput").value = turn.text;
+    $("#textTurnInput").focus();
+  }
 };
 
 async function switchRuntime(button, path, payload) {
@@ -1345,6 +1426,7 @@ $("#privacyDelete").onclick = async () => {
   if (!confirm("删除账户数据后不可恢复。继续？")) return;
   try {
     await post("/api/privacy/delete", {confirm: true});
+    TurnOutbox.clearUser(sessionStorage, currentUser.id);
     showLogin();
   } catch (error) { alert(error.message); }
 };
@@ -1533,7 +1615,12 @@ async function syncInsightSession() {
     $("#proactiveSuggestions").checked = data.proactiveEnabled;
     renderInsightJobs(data.jobs || []);
     if (data.results.length) renderInsight(data.results.at(-1));
-  } catch (error) { if (sid === selectedSessionId) $("#insightStatus").textContent = error.message; }
+  } catch (error) {
+    if (sid === selectedSessionId) {
+      insightSession = null;
+      $("#insightStatus").textContent = "任务状态暂不可用 · " + error.message;
+    }
+  }
 }
 
 async function generateInsight(automatic = false) {
@@ -1571,10 +1658,19 @@ function renderInsightJobs(jobs) {
   insightJobs = jobs;
   const labels = {queued: "排队中", running: "生成中", completed: "已完成", empty: "无记录", failed: "失败", cancelled: "已取消"};
   const kinds = {daily: "日报", weekly: "周报", monthly: "月报", suggestions: "建议"};
-  $("#insightJobs").innerHTML = jobs.slice(-6).reverse().map(job => "<div class='insight-job' data-insight-job='" + esc(job.jobId) + "'>" +
+  const visible = [...jobs.filter(job => !["queued", "running"].includes(job.status)).slice(-6),
+    ...jobs.filter(job => ["queued", "running"].includes(job.status))];
+  $("#insightJobs").innerHTML = visible.reverse().map(job => "<div class='insight-job' data-insight-job='" + esc(job.jobId) + "'>" +
     "<span>" + esc(kinds[job.specification.kind] + " · " + job.specification.anchor) + "</span><b>" + esc(labels[job.status] || job.status) +
-    "</b><small>" + esc(job.durationMs != null ? job.durationMs.toFixed(0) + " ms" : (job.phase ? job.phase + " · " : "") + (job.reason || "等待调度")) + "</small>" +
-    (job.status === "running" ? "<small>阶段：" + esc(job.phase || "处理中") + " · 任务已持久化，刷新不会丢失</small>" : "") +
+    "</b><small>" + esc(!["queued", "running"].includes(job.status)
+      ? (job.durationMs != null ? job.durationMs.toFixed(0) + " ms" : labels[job.status] || job.status)
+      : "已等待 " + Math.max(0, (Date.now() - Date.parse(job.createdAt)) / 1000).toFixed(1) + " s") + "</small>" +
+    (["queued", "running"].includes(job.status) ? "<small>" + esc(insightPhases[job.phase] || "处理中") +
+      (job.model ? " · " + esc(job.model) : "") +
+      (job.includedRecords != null ? " · 记录 " + job.includedRecords + "/" + job.totalRecords : "") +
+      (job.phase === "waiting-provider" ? " · 单次请求上限 " + job.providerTimeoutSeconds + " s" : "") +
+      " · 执行次数 " + job.attempt + "</small>" : "") +
+    (job.reason === "recovered" ? "<small>已从服务重启恢复</small>" : "") +
     (job.resultEventId ? "<button data-insight-result='" + esc(job.resultEventId) + "'>查看</button>" : "") +
     (["queued", "running"].includes(job.status) ? "<button data-insight-cancel='" + esc(job.jobId) + "'>取消</button>" : "") +
     (["failed", "cancelled"].includes(job.status) ? "<button data-insight-retry='" + esc(job.jobId) + "'>重试</button>" : "") +
@@ -1594,17 +1690,18 @@ async function refreshInsightJobs() {
   if (insightPolling || !currentUser || !selectedSessionId) return;
   const sid = selectedSessionId;
   insightPolling = true;
+  insightLastPoll = Date.now();
   try {
-    const data = await request("/api/insights?session=" + encodeURIComponent(sid) + "&includeResults=false");
+    const data = await request("/api/insights?session=" + encodeURIComponent(sid) + "&includeResults=false", {signal: AbortSignal.timeout(8000)});
     if (sid !== selectedSessionId || !currentUser) return;
     renderInsightJobs(data.jobs || []);
     const job = insightJobs.find(item => item.jobId === selectedInsightJob) || insightJobs.at(-1);
     if (job && ["queued", "running"].includes(job.status)) {
       $("#insightStatus").textContent = (job.status === "queued" ? "排队中" : "生成中") +
-        " · " + (job.phase || "等待调度") + " · 任务已保存，刷新或重启不会丢失";
+        " · " + (insightPhases[job.phase] || "处理中") + " · 状态更新于 " + new Date().toLocaleTimeString();
     }
     if (job?.resultEventId && job.resultEventId !== displayedInsightResult) await loadInsightResult(job.resultEventId);
-  } catch (error) { if (sid === selectedSessionId) $("#insightStatus").textContent = error.message; }
+  } catch (error) { if (sid === selectedSessionId) $("#insightStatus").textContent = "连接中断，显示上次状态 · " + error.message; }
   finally { insightPolling = false; }
 }
 
@@ -1629,7 +1726,9 @@ $("#insightJobs").onclick = async event => {
   } catch (error) { $("#insightStatus").textContent = error.message; }
   finally { button.disabled = false; }
 };
-setInterval(() => { if (insightJobs.some(job => ["queued", "running"].includes(job.status))) refreshInsightJobs(); }, 1200);
+setInterval(() => {
+  if (insightJobs.some(job => ["queued", "running"].includes(job.status)) || Date.now() - insightLastPoll > 5000) refreshInsightJobs();
+}, 1200);
 
 async function refreshPromptAudit() {
   const sid = selectedSessionId;

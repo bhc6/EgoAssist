@@ -5,7 +5,7 @@ from __future__ import annotations
 
 from egoassist.prompts import prompt_text, prompt_catalog, compact_audit_payload
 from egoassist.memory.insights import InsightGenerator
-from egoassist.product.insight_jobs import InsightJobs, InsightQueueFull, insight_jobs
+from egoassist.product.insight_jobs import InsightJobs, InsightQueueFull, visible_insight_jobs
 
 import argparse
 import asyncio
@@ -1827,6 +1827,13 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
         owner.job_scheduler_task = task
 
     async def stop_case_connection(owner: CaseRuntimeOwner, *, notify: bool = True) -> None:
+        ledger = owner.work_ledger or CaseWorkLedger(owner.journal)
+        for turn in ledger.snapshot()["turnInbox"]:
+            delivery = turn.get("delivery") or {}
+            if delivery.get("status") == "responding" or (
+                delivery.get("status") == "received" and turn.get("status") == "completed"
+            ):
+                ledger.set_turn_delivery(turn["turnId"], "interrupted", reason="connection-closed")
         owner.epoch += 1
         socket = owner.socket
         owner.socket_token = None
@@ -2218,7 +2225,7 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
             results = [row for row in results if row["id"] == result_id]
         if request.query.get("includeResults") == "false":
             results = []
-        return web.json_response({"results": results[-1:], "jobs": insight_jobs(journal)[-12:],
+        return web.json_response({"results": results[-1:], "jobs": visible_insight_jobs(journal),
                                   "proactiveEnabled": policy.get("enabled", False), "sessionId": session_id})
 
     async def post_insight_cancel(request):
@@ -2228,7 +2235,7 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
         identity.get_context_session(user_id, session_id)
         journal = case_owner(user_id, session_id).journal
         await insight_executor.cancel(str(payload.get("jobId", "")), journal)
-        return web.json_response({"jobs": insight_jobs(journal)[-12:]})
+        return web.json_response({"jobs": visible_insight_jobs(journal)})
 
     async def post_insight_policy(request):
         payload = await request.json()
@@ -4345,8 +4352,26 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
             return ws
 
         livekit_active = False
+        unattributed_outputs = set()
 
         async def emit(payload):
+            if owner.socket_token is not socket_token or owner.epoch != connection_epoch:
+                return
+            origin = payload.get("origin") or {}
+            if payload.get("type") in {"audio", "assistant_transcript", "response_status"}:
+                if payload.get("type") in {"audio", "assistant_transcript"} and payload.get("purpose") == "conversation" and not origin.get("turnId"):
+                    response_id = payload.get("responseId")
+                    if response_id not in unattributed_outputs:
+                        unattributed_outputs.add(response_id)
+                        session_trace("response.output.unattributed", "case-delivery", {"responseId": response_id})
+                        if not ws.closed:
+                            await ws.send_json({"type": "error", "message": "Model response has no source question; output was blocked. Please retry."})
+                    return
+                if origin.get("generation") is not None and origin["generation"] != owner.output_generation and not origin.get("background"):
+                    return
+                if payload.get("type") == "response_status" and origin.get("turnId"):
+                    (owner.work_ledger or CaseWorkLedger(owner.journal)).set_turn_delivery(
+                        origin["turnId"], payload["status"], responseId=payload.get("responseId"))
             if livekit_active and livekit_transport is not None:
                 if payload.get("type") in {"audio", "interrupted"}:
                     try:
@@ -4969,6 +4994,13 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
 
         def session_response_lifecycle(origin: dict, status: str) -> None:
             ledger = owner.work_ledger or CaseWorkLedger(harness.journal)
+            if origin.get("turnId"):
+                current = origin.get("background") or (
+                    owner.socket_token is socket_token and owner.epoch == connection_epoch
+                    and origin.get("generation") in {None, owner.output_generation}
+                )
+                ledger.set_turn_delivery(origin["turnId"], "completed" if status == "completed" and current else "interrupted",
+                                         responseId=origin.get("responseId"))
             intent_id = str(origin.get("intentId", ""))
             job_id = str(origin.get("jobId", ""))
             if intent_id not in ledger.intents():
@@ -5713,10 +5745,14 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                 )
                 await ws.send_json({
                     "type": "memory_status",
+                    "turnId": turn_id,
+                    "responseId": response_id,
                     "status": memory_response.get("status"),
                     "message": server_memory_reply,
                     "committedCardIds": memory_response.get("committedCardIds", []),
                 })
+                work_ledger.set_turn_delivery(turn_id, "completed", responseId=response_id,
+                                              channel="memory-receipt", memoryStatus=memory_response.get("status"))
                 session_trace(
                     "response.served.memory_transaction",
                     "server-memory-policy",
@@ -5801,6 +5837,7 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                         origin=_candidate_origin,
                     )
             elif result.get("control") != "stop-speaking" and turn_sequence < owner.latest_input_sequence:
+                work_ledger.set_turn_delivery(turn_id, "interrupted", reason="newer-user-turn")
                 session_trace(
                     "response.skipped.stale_user_turn",
                     "case-turn-worker",
@@ -5811,11 +5848,14 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                 and hasattr(bridge, "has_unresolved_user_input")
                 and bridge.has_unresolved_user_input()
             ):
+                work_ledger.set_turn_delivery(turn_id, "interrupted", reason="unresolved-user-input")
                 session_trace(
                     "response.skipped.unresolved_user_input",
                     "case-turn-worker",
                     {"turnSequence": turn_sequence, "latestInputSequence": owner.latest_input_sequence},
                 )
+            if result.get("control") == "stop-speaking":
+                work_ledger.set_turn_delivery(turn_id, "completed", channel="speech-control")
             return result
 
         async def turn_worker_loop(queue: asyncio.Queue) -> None:
@@ -5836,16 +5876,17 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                     raise
                 except Exception as exc:
                     try:
-                        (owner.work_ledger or CaseWorkLedger(harness.journal)).set_turn_status(
-                            item["turnId"], "failed", detail={"error": str(exc)},
-                        )
+                        ledger = owner.work_ledger or CaseWorkLedger(harness.journal)
+                        ledger.set_turn_delivery(item["turnId"], "failed", error=str(exc))
+                        if ledger.turns()[item["turnId"]]["status"] != "completed":
+                            ledger.set_turn_status(item["turnId"], "failed", detail={"error": str(exc)})
                     except Exception:
                         LOGGER.exception("failed to persist turn failure")
                     if future and not future.done():
                         future.set_exception(exc)
                     elif not ws.closed:
                         try:
-                            await ws.send_json({"type": "error", "message": str(exc)})
+                            await ws.send_json({"type": "error", "message": str(exc), "turnId": item["turnId"]})
                         except Exception:
                             pass  # non-fatal; WS may have closed between the guard check and write
                 finally:
@@ -5915,13 +5956,21 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                 except TypeError:
                     bridge.cancel_response()
             ledger = owner.work_ledger or CaseWorkLedger(harness.journal)
+            mark_interrupted_turns(ledger)
             ledger.suspend_before_sequence(owner.turn_sequence, reason="newer-user-turn")
             captured = ledger.capture_turn(
                 text,
                 source="input-audio-transcript",
                 sequence=owner.turn_sequence,
             )
+            ledger.set_turn_delivery(captured["turnId"], "received")
             enqueue_persisted_turn(captured)
+
+        def mark_interrupted_turns(ledger):
+            for turn in ledger.snapshot()["turnInbox"]:
+                delivery = turn.get("delivery") or {}
+                if delivery.get("status") in {"received", "responding"}:
+                    ledger.set_turn_delivery(turn["turnId"], "interrupted", reason="newer-user-turn")
 
         _turn_accumulator = TurnAccumulator(
             _do_enqueue_transcript,
@@ -6134,14 +6183,22 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                     transcript = str(payload.get("transcript", "")).strip()
                     if not transcript:
                         continue
-                    await ws.send_json({
-                        "type": "user_transcript", "speaker": "user",
-                        "channel": "explicit_control", "echoRisk": "low", "text": transcript,
-                    })
+                    ledger = owner.work_ledger or CaseWorkLedger(harness.journal)
+                    client_id = str(payload.get("clientRequestId") or "")
+                    if client_id and (len(client_id) > 80 or not all(c.isascii() and (c.isalnum() or c in "-_") for c in client_id)):
+                        await ws.send_json({"type": "error", "message": "invalid clientRequestId"})
+                        continue
+                    previous = ledger.turns().get(client_id) if client_id else None
+                    if previous:
+                        if previous["text"] != transcript:
+                            await ws.send_json({"type": "error", "message": "clientRequestId content mismatch"})
+                        else:
+                            await ws.send_json({"type": "turn_receipt", "turnId": client_id, "deduplicated": True,
+                                                "status": previous["status"]})
+                        continue
                     queue = owner.turn_queue
                     if queue is None or owner.turn_worker is None or owner.turn_worker.done():
                         raise RuntimeError("case turn worker is not available")
-                    future = asyncio.get_running_loop().create_future()
                     owner.turn_sequence += 1
                     owner.latest_input_sequence = owner.turn_sequence
                     owner.output_generation += 1
@@ -6152,7 +6209,7 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                             )
                         except TypeError:
                             bridge.cancel_response()
-                    ledger = owner.work_ledger or CaseWorkLedger(harness.journal)
+                    mark_interrupted_turns(ledger)
                     ledger.suspend_before_sequence(
                         owner.turn_sequence, reason="newer-explicit-control",
                     )
@@ -6160,11 +6217,17 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                         transcript,
                         source="explicit-control",
                         sequence=owner.turn_sequence,
+                        turn_id=client_id or None,
                     )
+                    ledger.set_turn_delivery(captured["turnId"], "received")
+                    await ws.send_json({"type": "user_transcript", "speaker": "user",
+                        "channel": "explicit_control", "echoRisk": "low", "text": transcript,
+                        "turnId": captured["turnId"]})
+                    if client_id:
+                        await ws.send_json({"type": "turn_receipt", "turnId": captured["turnId"], "status": "received"})
                     if hasattr(bridge, "handle_user_speech_started"):
                         bridge.handle_user_speech_started(trigger="explicit-control")
-                    enqueue_persisted_turn(captured, explicit=True, future=future)
-                    await future
+                    enqueue_persisted_turn(captured, explicit=True)
                 elif kind == "tool_confirmation":
                     call_id = str(payload.get("callId", ""))
                     accepted = bool(payload.get("accepted", False))

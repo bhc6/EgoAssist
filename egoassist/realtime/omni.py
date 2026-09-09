@@ -73,6 +73,11 @@ class _ResponseRequest:
     purpose: str = "conversation"
     origin: dict[str, Any] | None = None
 
+    @property
+    def correlation(self) -> dict:
+        return {key: value for key, value in (self.origin or {}).items()
+                if key in {"turnId", "generation", "sessionId", "intentId", "jobId", "resultId", "background"}}
+
 
 def _is_fake_ip(value: str) -> bool:
     try:
@@ -1007,6 +1012,9 @@ class OmniBrowserBridge:
             requests = list(getattr(self, "_active_response_requests", {}).values())
             current = max(requests, key=lambda item: item.sequence) if requests else self._inflight_response
             policy = current.speech_policy if current else "immediate"
+            # A pending protected response has no audible warning to preserve.
+            if policy == "protected" and not requests:
+                policy = "immediate"
             reason = current.reason if current else "provider-or-untracked-response"
             if policy == "protected":
                 self._trace("barge_in.protected", {"policy": policy, "reason": reason, "maxProtectionMs": current.max_protection_ms, "trigger": trigger})
@@ -1165,6 +1173,7 @@ class OmniBrowserBridge:
             self._schedule({
                 "type": "audio", "audio": payload.get("delta", ""),
                 "purpose": request.purpose, "responseId": response_id,
+                "origin": request.correlation,
             })
             return True
 
@@ -1176,6 +1185,7 @@ class OmniBrowserBridge:
             "channel": "spoken_audio",
             "purpose": request.purpose,
             "responseId": response_id,
+            "origin": request.correlation,
             "text": transcript,
             "done": done,
         })
@@ -1667,15 +1677,23 @@ class OmniBrowserBridge:
         loop = getattr(self, "loop", None)
         if not loop or not loop.is_running():
             return
+        # handle_user_speech_started already holds the scheduler lock.
+        response_ids = frozenset(self._active_response_ids)
+        generation = getattr(self, "_dialogue_generation", 0)
 
         def install_timer():
-            loop.call_later(max_protection_ms / 1000, self._expire_protection, max_protection_ms)
+            loop.call_later(max_protection_ms / 1000, self._expire_protection,
+                            max_protection_ms, response_ids, generation)
         loop.call_soon_threadsafe(install_timer)
 
-    def _expire_protection(self, max_protection_ms: int = 2500) -> None:
+    def _expire_protection(self, max_protection_ms: int = 2500,
+                           response_ids: frozenset[str] | None = None, generation: int | None = None) -> None:
+        if generation is not None and generation != getattr(self, "_dialogue_generation", 0):
+            return
         with self._response_lock:
-            protected = any(item.speech_policy == "protected" for item in getattr(self, "_active_response_requests", {}).values())
-        if protected and self.cancel_response(drop_queued_below=100):
+            protected_ids = frozenset(key for key, item in getattr(self, "_active_response_requests", {}).items()
+                                      if item.speech_policy == "protected" and (response_ids is None or key in response_ids))
+        if protected_ids and self.cancel_response(drop_queued_below=100, expected_response_ids=protected_ids):
             self._trace("barge_in.protection_expired", {"maxProtectionMs": max_protection_ms})
             self._schedule({"type": "interrupted"})
 
@@ -1684,9 +1702,12 @@ class OmniBrowserBridge:
         drop_queued_below: int | None = None,
         *,
         reason: str = "explicit-cancel",
+        expected_response_ids: frozenset[str] | None = None,
     ) -> bool:
         should_cancel = False
         with self._response_lock:
+            if expected_response_ids is not None and not (expected_response_ids & self._active_response_ids):
+                return False
             if drop_queued_below is not None:
                 to_drop = [r for r in self._queued_requests if r.priority < drop_queued_below]
                 for r in to_drop:
@@ -1727,7 +1748,7 @@ class OmniBrowserBridge:
     def _send_response(self, request: _ResponseRequest) -> None:
         try:
             self._trace("response.dispatched", {"sequence": request.sequence, "priority": request.priority, "speechPolicy": request.speech_policy, "outputMode": request.output_mode, "purpose": request.purpose,
-                                                "instructions": request.instructions})
+                                                "instructions": request.instructions, "origin": dict(request.origin or {})})
             self.conversation.create_response(
                 instructions=request.instructions,
                 output_modalities=[self.modalities.TEXT] if request.output_mode == "text" else [self.modalities.AUDIO, self.modalities.TEXT],
@@ -1847,7 +1868,8 @@ class OmniBrowserBridge:
             }, response_id=response_id)
         self._trace(
             "response.created",
-            {"sequence": request.sequence, "purpose": request.purpose, "outputMode": request.output_mode, "providerInitiated": provider_initiated},
+            {"sequence": request.sequence, "purpose": request.purpose, "outputMode": request.output_mode,
+             "providerInitiated": provider_initiated, "origin": dict(request.origin or {})},
             response_id=response_id,
         )
         if terminal_arrived_first:
@@ -1869,6 +1891,9 @@ class OmniBrowserBridge:
             )
         if should_cancel:
             self.conversation.cancel_response()
+
+        self._schedule({"type": "response_status", "status": "responding", "responseId": response_id,
+                        "origin": request.correlation})
 
     def _response_finished(self, payload: dict[str, Any]) -> None:
         response_id = self._payload_response_id(payload)
@@ -1926,12 +1951,14 @@ class OmniBrowserBridge:
             return
         fragment = self._pop_assistant_transcript(response_id)
         purpose = request.purpose if request else "conversation"
-        interrupted = locally_cancelled or event_type in {"response.cancelled", "response.failed"}
+        response = payload.get("response")
+        provider_status = response.get("status") if isinstance(response, dict) else None
+        interrupted = locally_cancelled or event_type in {"response.cancelled", "response.failed"} or provider_status in {"cancelled", "failed", "incomplete"}
         lifecycle_handler = getattr(self, "_response_lifecycle_handler", None)
         if request and request.origin and lifecycle_handler:
             try:
                 lifecycle_handler(
-                    dict(request.origin), "suspended" if interrupted else "completed",
+                    {**dict(request.origin), "responseId": response_id}, "suspended" if interrupted else "completed",
                 )
             except Exception as exc:
                 self._trace("intent.lifecycle.update_failed", {"error": str(exc)})
@@ -1974,9 +2001,14 @@ class OmniBrowserBridge:
                 "fragmentCommitted": bool(fragment),
                 "interrupted": interrupted,
                 "localCancelRequested": locally_cancelled,
+                "providerStatus": provider_status,
+                "origin": dict(request.origin or {}) if request else {},
             },
             response_id=response_id or None,
         )
+        self._schedule({"type": "response_status", "status": "interrupted" if interrupted else "completed",
+                        "responseId": response_id, "origin": request.correlation if request else {},
+                        "providerStatus": provider_status})
         # Track completed exchanges so refresh_harness_context() can trigger
         # a proactive compact+reconnect when DashScope's live context grows too large.
         if not interrupted:
@@ -2176,6 +2208,7 @@ class OmniBrowserBridge:
         return sink(event_type, "realtime-bridge", payload, [], response_id=response_id)
 
     async def close(self) -> None:
+        self._persist_active_interruptions("bridge-closed")
         self.closed = True
         self.connected = False
         self._drop_open_input_segments("bridge-closed")

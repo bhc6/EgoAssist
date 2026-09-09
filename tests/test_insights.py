@@ -171,3 +171,40 @@ def test_report_timeout_releases_worker_for_next_job(tmp_path):
         assert completed["status"] == "completed"
         await manager.close()
     asyncio.run(run())
+
+
+def test_restart_recovers_all_pending_without_browser_or_attempt_limit(tmp_path):
+    from egoassist.product.insight_jobs import InsightJobs, insight_jobs, visible_insight_jobs
+
+    async def run():
+        journal = SessionJournal(tmp_path / "recovery.jsonl", session_id="recovery")
+        for i in range(20):
+            journal.append("insight.job", {"jobId": str(i), "status": "running", "attempt": 4,
+                "specification": {"kind": "daily", "scope": "case", "anchor": "2026-09-09",
+                                  "timezone": "UTC", "utcOffsetMinutes": 0}})
+        assert len(visible_insight_jobs(journal)) == 20
+        completed = asyncio.Event()
+        active = maximum = count = 0
+
+        class Generator:
+            async def generate(self, **kwargs):
+                nonlocal active, maximum, count
+                active += 1
+                maximum = max(maximum, active)
+                kwargs["progress"]("waiting-provider", model="test-only")
+                await asyncio.sleep(0.005)
+                active -= 1
+                count += 1
+                if count == 20:
+                    completed.set()
+                return journal.append("insight.result", {"status": "completed"})
+
+        manager = InsightJobs(Generator(), lambda *args: [journal.path], concurrency=2, capacity=3)
+        manager.recover("u", "recovery", journal)
+        await asyncio.wait_for(completed.wait(), 3)
+        await asyncio.sleep(0)
+        assert maximum == 2
+        assert all(row["status"] == "completed" and row["attempt"] == 5 for row in insight_jobs(journal))
+        assert not manager._deferred
+        await manager.close()
+    asyncio.run(run())

@@ -2,6 +2,7 @@
 import asyncio
 import json
 import time
+from uuid import uuid4
 from aiohttp import WSMsgType
 
 
@@ -11,16 +12,18 @@ def journal(output, sid):
 
 
 async def turn(ws, output, sid, transcript):
-    before = sum(row.get("eventType") == "response.finished" for row in journal(output, sid))
-    result = {"input": transcript, "audioPackets": 0}
+    turn_id = uuid4().hex
+    result = {"input": transcript, "turnId": turn_id, "audioPackets": 0}
     started = time.perf_counter()
-    await ws.send_json({"type": "control", "transcript": transcript})
+    await ws.send_json({"type": "control", "transcript": transcript, "clientRequestId": turn_id})
     async with asyncio.timeout(45):
         while True:
             if result.get("transcript") and result["audioPackets"]:
                 rows = journal(output, sid)
-                terminal = [r for r in rows if r.get("eventType") == "response.finished"]
-                if len(terminal) > before:
+                terminal = [r for r in rows if r.get("eventType") == "response.finished"
+                            and r.get("responseId") == result.get("responseId")
+                            and r.get("payload", {}).get("origin", {}).get("turnId") == turn_id]
+                if terminal:
                     result["terminal"] = terminal[-1]["payload"]
                     assert result["terminal"].get("status") == "response.done"
                     assert not result["terminal"].get("interrupted")
@@ -35,6 +38,17 @@ async def turn(ws, output, sid, transcript):
             kind = payload.get("type")
             if kind in {"error", "provider_unavailable"}:
                 raise RuntimeError(str(payload)[:400])
+            if payload.get("origin", {}).get("turnId") != turn_id:
+                continue
+            if kind in {"audio", "assistant_transcript"}:
+                response_id = payload.get("responseId")
+                assert response_id, "Provider output missing responseId"
+                # A turn may include text-only subtask responses. This helper
+                # accepts only the audio response used by its dialogue callers.
+                if payload.get("purpose") != "conversation":
+                    continue
+                result.setdefault("responseId", response_id)
+                assert result["responseId"] == response_id, "Audio and transcript came from different responses"
             if kind == "audio" and payload.get("audio"):
                 result.setdefault("firstAudioMs", round((time.perf_counter() - started) * 1000, 1))
                 result["audioPackets"] += 1

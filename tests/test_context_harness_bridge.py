@@ -1,5 +1,6 @@
 import json
 import threading
+import pytest
 from collections import deque
 
 from egoassist.realtime import ContextHarness, ContextSettings, SessionJournal
@@ -221,6 +222,32 @@ def test_result_delivery_handler_tracks_response_terminal_state(tmp_path):
     bridge._response_finished({"type": "response.cancelled", "response": {"id": "response-2"}})
 
     assert delivered == [("result-1", "delivered"), ("result-2", "pending")]
+
+
+@pytest.mark.parametrize("provider_status", ["cancelled", "failed", "incomplete"])
+def test_provider_done_with_failure_never_claims_completed_delivery(tmp_path, provider_status):
+    harness = harness_at(tmp_path / "nested-failure.jsonl")
+    bridge = make_bridge(harness)
+    events = []
+    lifecycle = []
+    bridge._schedule = events.append
+    bridge.set_response_lifecycle_handler(lambda origin, status: lifecycle.append((origin, status)))
+    origin = {"turnId": "question-a", "generation": 7, "tools": [{"name": "private-contract"}]}
+    bridge.request_response("answer", origin=origin)
+    bridge._response_created({"response": {"id": "answer-a"}})
+    bridge.route_provider_output("response.audio.delta", {"response_id": "answer-a", "delta": "AAAA"})
+    bridge.route_provider_output("response.audio_transcript.done", {
+        "response_id": "answer-a", "transcript": "partial answer",
+    })
+    bridge._response_finished({"type": "response.done", "response": {"id": "answer-a", "status": provider_status}})
+
+    assert lifecycle == [({**origin, "responseId": "answer-a"}, "suspended")]
+    assert events[-1]["status"] == "interrupted"
+    assert all(event["responseId"] == "answer-a" and event["origin"] == {
+        "turnId": "question-a", "generation": 7,
+    } for event in events)
+    messages = [entry for entry in harness.journal.entries() if entry["type"] == "message"]
+    assert len(messages) == 1 and messages[0]["status"] == "interrupted"
 
 
 def test_replaced_queued_result_is_returned_to_inbox(tmp_path):

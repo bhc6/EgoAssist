@@ -125,6 +125,30 @@ async def verify(output, real_turn=False):
                     await page.wait_for_function('previous => state.performance.latestUsage?.responseId !== previous', arg=previous_response, timeout=45000)
                     assert '未' in await page.locator('#assistantCaption p').text_content(), await page.locator('#assistantCaption').text_content()
                     report['reconnectedWithoutLosingSession'] = True
+                # Exercise actual tab storage across reload, isolated from the
+                # signed-in account so this check never creates cloud requests.
+                await page.evaluate('''() => {
+                    const outbox = new TurnOutbox(sessionStorage, 'storage-test', 'case-a');
+                    const item = {type: 'control', clientRequestId: 'stable-id', transcript: 'pending question'};
+                    outbox.add(item);
+                    outbox.add(item);
+                    if (outbox.entries().length !== 1) throw Error('duplicate local pending request');
+                    if (new TurnOutbox(sessionStorage, 'other-user', 'case-a').entries().length) throw Error('cross-user pending request');
+                    if (new TurnOutbox(sessionStorage, 'storage-test', 'other-case').entries().length) throw Error('cross-case pending request');
+                }''')
+                await page.reload()
+                await page.locator('#authGate').wait_for(state='hidden')
+                await page.wait_for_function('Boolean(state?.workLedger)')
+                await page.evaluate('''() => {
+                    const outbox = new TurnOutbox(sessionStorage, 'storage-test', 'case-a');
+                    if (outbox.entries()[0]?.clientRequestId !== 'stable-id') throw Error('pending request lost on reload');
+                    outbox.acknowledge('stable-id');
+                    if (outbox.entries().length) throw Error('acknowledged request retained');
+                    outbox.add({type: 'control', clientRequestId: 'delete-id', transcript: 'remove'});
+                    TurnOutbox.clearUser(sessionStorage, 'storage-test');
+                    if (outbox.entries().length) throw Error('deleted user request retained');
+                }''')
+                report['pendingTextSurvivesReload'] = True
                 for width in (1440, 390):
                     await page.set_viewport_size({'width': width, 'height': 1000})
                     await page.evaluate('scrollTo(0, 0)')

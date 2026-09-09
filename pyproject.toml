@@ -63,6 +63,7 @@ egoassist = [
     "console/*.css",
     "console/*.js",
     "console/vendor/*.js",
+    "console/vendor/*.mjs",
     "skills/*/*.md",
     "skills/*/*.json",
     "skills/*/tasks/*.json",
