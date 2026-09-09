@@ -7,3 +7,6 @@
 .compatibility-surface { display: none !important; }
 .supporting-evidence { border-top: 2px solid var(--line, #d9dee7); }
 .audit-timeline { scroll-margin-top: 1rem; }
+.session-strip { grid-template-columns: .8fr .8fr 1.1fr 1.2fr 1.2fr .6fr; }
+#outputPermission, #duplexState { white-space: normal; overflow-wrap: anywhere; line-height: 1.5; }
+@media (max-width: 900px) { .session-strip { grid-template-columns: 1fr 1fr; } }

@@ -27,7 +27,8 @@ def verify(output, source):
         for scenario in ("rapid", "barge-in", "correction", "duplicate-reconnect", "disconnect-inflight", "automatic-completion", "cancellation")
     ] + [
         ("voice-stop", "verify_real_voice_stop.py", []),
-        ("voice-stop-browser", "verify_real_voice_stop_browser.py", []),
+        ("voice-stop-browser", "verify_real_voice_stop_browser.py", ["--local-vad"]),
+        ("interaction", "verify_real_interaction.py", []),
         ("answer-recovery", "verify_real_answer_recovery.py", []),
         ("latency", "benchmark_realtime_latency.py", ["--repeats", "3"]),
         ("memory", "verify_real_memory.py", []),

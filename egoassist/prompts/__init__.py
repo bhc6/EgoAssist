@@ -46,6 +46,13 @@ def compact_audit_payload(kind: str, payload: dict) -> dict:
             metrics["messagesAvailable"] = True
             decision["requestMetrics"] = metrics
             value["decision"] = decision
+        if isinstance(metrics.get("cancellationCheck"), dict):
+            check = dict(metrics["cancellationCheck"])
+            check.pop("messages", None)
+            check["messagesAvailable"] = True
+            metrics["cancellationCheck"] = check
+            decision["requestMetrics"] = metrics
+            value["decision"] = decision
     fields = {
         "model.prompt": ("instructions", "tools"),
         "response.dispatched": ("instructions",),

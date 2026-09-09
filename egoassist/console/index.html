@@ -45,6 +45,7 @@
       <div><span>PROMPT HASH</span><b id="promptHash">-</b></div>
       <div><span>SKILL / TASK</span><b id="skillName">-</b></div>
       <div><span>REALTIME</span><b id="duplexState">未连接</b></div>
+      <div><span>OUTPUT PERMISSION</span><b id="outputPermission">可播报</b></div>
       <div><span>DECISION</span><b id="action">-</b></div>
     </section>
 
@@ -217,6 +218,10 @@
   </dialog>
   <script src="vendor/livekit-client.umd.js?v=2.21.0"></script>
   <script src="turn_outbox.js?v=20260909"></script>
-  <script src="app.js?v=20260909-natural-speech-stop"></script>
+  <script src="playback_audit.js?v=20260909"></script>
+  <script src="vendor/vad/ort.wasm.min.js"></script>
+  <script src="vendor/vad/bundle.min.js"></script>
+  <script src="local_vad.js?v=20260909"></script>
+  <script src="app.js?v=20260909-interaction-v16"></script>
 </body>
 </html>

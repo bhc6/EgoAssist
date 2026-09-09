@@ -7,6 +7,10 @@ let interactionTransport = "websocket-fallback";
 let playbackTime = 0, assistantText = "";
 let captionResponseId = null, currentTurnId = null;
 const stoppedSpeechResponses = new Set();
+const playbackAudit = new PlaybackAudit(payload => {
+  if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify(payload));
+});
+setInterval(() => { if (audioContext) playbackAudit.report(audioContext.currentTime); }, 500);
 let detachedStatePolling = false, lastDetachedStatePoll = 0;
 const turnOutbox = () => new TurnOutbox(sessionStorage, currentUser.id, selectedSessionId);
 let connectingPromise = null;
@@ -461,8 +465,8 @@ function renderWorkCenter() {
     !["completed", "cancelled"].includes(turn.answer?.status || turn.delivery?.status || turn.status)).reverse().map(turn => {
     const status = turn.delivery?.status || turn.status;
     const answer = turn.answer;
-    const answerLabels = {queued: "后台补全排队中", running: "正在后台补全", failed: "后台补全失败", cancelled: "已取消或被更正",
-      completed: answer?.channel === "background-text" ? "已在后台回答" : "回答已完成"};
+    const answerLabels = {queued: "后台补全排队中", running: "正在后台补全", paused: "已暂停计算", failed: "后台补全失败", cancelled: "已取消或被更正",
+      completed: answer?.channel === "background-text" ? "已在后台回答" : status === "completed" && turn.delivery?.channel === "device-playback" ? "设备已播完" : "已生成 · 播放未确认"};
     const label = answer && answer.status !== "foreground" ? answerLabels[answer.status]
       : !turn.delivery && status === "completed" ? "已处理，查看任务结果" : turnStates[status] || status;
     return "<div class='turn-history-row' data-turn-id='" + esc(turn.turnId) + "'><p>" + esc(turn.text) +
@@ -680,6 +684,10 @@ function render(next) {
   syncInsightSession();
   maybeSuggest();
   const task = state.task, memory = state.memory, mechanism = state.memoryMechanism;
+  const interaction = state.interaction;
+  $("#outputPermission").textContent = interaction?.paused ? "暂让声音 · 等待意图" : interaction?.quiet
+    ? "免打扰" + (interaction.until ? " · 至 " + new Date(interaction.until).toLocaleTimeString() : " · 等待解除")
+      + (interaction.allowReplies ? " · 可回答主动提问" : " · 静默") : "可播报";
   const decision = task?.decision || state.genericDecision;
   const step = task ? task.steps.find(item => item.id === task.currentCheckpointId) || task.steps[task.stepIndex] : null;
   $("#mode").textContent = "● " + state.realtimeModel;
@@ -1094,7 +1102,7 @@ function sendMediaConfiguration(ws) {
   }));
 }
 
-function playPcm24(base64Audio) {
+function playPcm24(base64Audio, responseId) {
   if (!audioContext) return;
   const binary = atob(base64Audio), pcm = new Int16Array(Math.floor(binary.length / 2));
   for (let index = 0; index < pcm.length; index++) pcm[index] = binary.charCodeAt(index * 2) | (binary.charCodeAt(index * 2 + 1) << 8);
@@ -1107,12 +1115,14 @@ function playPcm24(base64Audio) {
   const now = audioContext.currentTime;
   playbackTime = Math.max(playbackTime, now + 0.03);
   source.start(playbackTime);
+  playbackAudit.queued(responseId, source, playbackTime, 24000);
   playbackSources.add(source);
   source.onended = () => playbackSources.delete(source);
   playbackTime += buffer.duration;
 }
 
 function stopPlayback() {
+  if (audioContext) playbackAudit.report(audioContext.currentTime, "paused");
   livekitAudioElements.forEach(element => { element.muted = true; });
   playbackSources.forEach(source => { try { source.stop(); } catch (_) {} });
   playbackSources.clear();
@@ -1137,7 +1147,8 @@ async function connectRealtimeSession(generation, media, retryAttempt) {
   const connectionSessionId = selectedSessionId;
   if (media) await ensureMedia();
   if (generation !== connectionGeneration) return;
-  const livekitConnected = media && await connectLiveKitMedia(connectionSessionId);
+    const livekitConnected = media && await connectLiveKitMedia(connectionSessionId);
+    if (media && stream) startLocalVad(stream);
   if (media && !livekitConnected) await startAudioCapture();
   if (generation !== connectionGeneration) {
     await disconnectLiveKit();
@@ -1210,7 +1221,13 @@ async function connectRealtimeSession(generation, media, retryAttempt) {
       $("#assistantCaption").innerHTML = "<span>REALTIME PROVIDER UNAVAILABLE</span><p>" + esc(message.reason || "network or DNS unavailable") + "</p>";
     } else if (message.type === "audio" && interactionTransport !== "livekit" && ["conversation", "proactive-utterance"].includes(message.purpose)) {
       $("#duplexState").textContent = "助手正在说 · 你可以随时打断";
-      playPcm24(message.audio);
+      playPcm24(message.audio, message.responseId);
+    } else if (message.type === "playback_resume") {
+      stoppedSpeechResponses.delete(message.responseId);
+      playbackAudit.resume(message.responseId, message.offsetSamples);
+      currentTurnId = message.turnId;
+      livekitAudioElements.forEach(element => { element.muted = false; });
+      $("#duplexState").textContent = "正在继续原回答";
     } else if (message.type === "playback_stop") {
       if (captionResponseId) stoppedSpeechResponses.add(captionResponseId);
       for (const id of message.responseIds || []) stoppedSpeechResponses.add(id);
@@ -1218,10 +1235,12 @@ async function connectRealtimeSession(generation, media, retryAttempt) {
       stopPlayback();
       $("#duplexState").textContent = "已停播 · 正在听你说";
     } else if (message.type === "speech_control") {
-      stopPlayback();
-      $("#duplexState").textContent = message.action === "cancel-answer" ? "已停止回答 · 正在听" : "已停止播报 · 正在听";
+      if (message.action !== "resume") stopPlayback();
+      $("#duplexState").textContent = message.action === "resume" ? "正在继续原回答" : message.action === "uncertain" ? "暂不播报 · 等待明确意图" : message.action === "cancel-answer" ? "已取消指定回答 · 正在听" : "已停止播报 · 正在听";
       setWorkflowStage("delivery", "complete", "语音控制已生效");
       workflow.active = false;
+    } else if (message.type === "interaction_status" && (!message.turnId || !currentTurnId || message.turnId === currentTurnId)) {
+      $("#duplexState").textContent = "语义服务超时 · 保持静默并重试一次";
     } else if (message.type === "interrupted") {
       stopPlayback();
       assistantText = "";
@@ -1250,9 +1269,10 @@ async function connectRealtimeSession(generation, media, retryAttempt) {
       setWorkflowStage("delivery", "active", message.done ? "等待模型最终响应状态" : "正在生成并流式交付回答");
       if (message.done) assistantText = "";
     } else if (message.type === "response_status") {
+      if (audioContext) playbackAudit.report(audioContext.currentTime, "generation-" + message.status, message.responseId);
       const turn = state?.workLedger?.turnInbox?.find(item => item.turnId === message.origin?.turnId);
       if (turn) {
-        turn.delivery = {status: message.status, responseId: message.responseId};
+        turn.delivery = {status: message.status === "completed" ? "generated" : message.status, responseId: message.responseId};
         renderWorkCenter();
       }
       if (message.status === "interrupted") {
@@ -1348,12 +1368,15 @@ async function connectRealtimeSession(generation, media, retryAttempt) {
 }
 
 function stopAudioCapture() {
+  stopLocalVad();
   if (processor) processor.disconnect();
   if (microphoneSource) microphoneSource.disconnect();
   processor = microphoneSource = null;
 }
 
 function disconnectRealtime() {
+  if (audioContext) playbackAudit.report(audioContext.currentTime, "paused");
+  playbackAudit.clear();
   stoppedSpeechResponses.clear();
   currentTurnId = null;
   captionResponseId = null;

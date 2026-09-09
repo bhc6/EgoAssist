@@ -286,23 +286,26 @@ def test_text_retries_and_newer_input_do_not_block_behind_slow_routing(tmp_path,
             await until("playback_stop")
             await instances[0].emit({"type": "audio", "audio": "must-not-resume", "responseId": "muted",
                                      "origin": {"turnId": "second", "generation": 2}})
+            # A new provider response cannot release a pause. A valid user turn can.
+            await ws.send_json({"type": "control", "transcript": "third question", "clientRequestId": "third"})
+            await until("state")
             await instances[0].emit({"type": "audio", "audio": "new-response", "responseId": "new",
-                                     "origin": {"turnId": "second", "generation": 2}})
+                                     "origin": {"turnId": "third", "generation": 3}})
             assert (await until("audio"))["audio"] == "new-response"
             await instances[0].emit({"type": "response_status", "status": "responding", "responseId": "r2",
-                                     "origin": {"turnId": "second", "generation": 2}})
+                                     "origin": {"turnId": "third", "generation": 3}})
             await until("response_status")
             snapshot = await (await client.get("/api/state?session=" + sid)).json()
             turns = {turn["turnId"]: turn for turn in snapshot["workLedger"]["turnInbox"]}
             assert turns["first"]["delivery"]["status"] == "interrupted"
-            assert turns["second"]["delivery"]["status"] == "responding"
+            assert turns["third"]["delivery"]["status"] == "responding"
             await ws.close()
             async with asyncio.timeout(3):
                 while True:
                     response = await client.get("/api/state?session=" + sid)
                     snapshot = await response.json()
                     turns = {turn["turnId"]: turn for turn in snapshot["workLedger"]["turnInbox"]}
-                    if turns["second"]["delivery"]["status"] == "interrupted":
+                    if turns["third"]["delivery"]["status"] == "interrupted":
                         break
                     await asyncio.sleep(0.01)
 
@@ -515,7 +518,10 @@ def test_failed_trial_sequence_keeps_draft_advisory_and_falls_back_to_durable_at
                 "这里的报警电话是九幺幺，你都要记住。"
             )
             await ws.send_json({"type": "control", "transcript": phone_turn})
-            third = [await _recv(ws) for _ in range(4)]
+            third = [await _recv(ws) for _ in range(5)]
+            retry = next(item for item in third if item["type"] == "interaction_status")
+            assert retry["status"] == "retrying"
+            third = [item for item in third if item["type"] != "interaction_status"]
             assert [item["type"] for item in third] == [
                 "user_transcript", "state", "interrupted", "memory_status",
             ]
@@ -1434,7 +1440,7 @@ def test_websocket_sessions_isolate_runtime_memory_and_resume_from_journal(tmp_p
         def append_video(self, value):
             return False
 
-        def cancel_response(self):
+        def cancel_response(self, **kwargs):
             return False
 
         async def close(self):

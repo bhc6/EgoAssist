@@ -2,9 +2,11 @@
   "name": "egoassist-console-assets",
   "private": true,
   "scripts": {
-    "vendor:livekit": "node scripts/vendor-livekit.mjs"
+    "vendor:livekit": "node scripts/vendor-livekit.mjs",
+    "vendor:vad": "node scripts/vendor-vad.mjs"
   },
   "dependencies": {
+    "@ricky0123/vad-web": "0.0.29",
     "livekit-client": "2.21.0",
     "pdfjs-dist": "6.2.108"
   }

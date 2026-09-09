@@ -27,6 +27,7 @@ from egoassist.realtime import SemanticTurnRouter
 from run_egoassist import create_app
 from real_session_support import journal
 from verify_real_skill_lifecycle import connect
+from research_interruption_semantics import assess
 
 
 async def synthesize(text, output, index):
@@ -75,10 +76,11 @@ async def verify(output, text_only=False):
             row = {"text": phrase, "expectedStop": stop, "expectedCancel": cancel, "decision": result}
             report["semantic"].append(row)
             assert result["status"] == "classified", row
-            assert (result.get("speechControl") == "stop-speaking") == stop, row
-            assert ((result.get("revision") or {}).get("type") == "cancellation") == cancel, row
+            _, failures = assess({"stop": stop, "cancel": cancel}, result)
+            assert not failures, row
             if cancel:
-                assert result["revision"]["supersedesTurnId"] == "question", row
+                target = (result.get("interaction") or {}).get("targetTurnId") or (result.get("revision") or {}).get("supersedesTurnId")
+                assert target == "question", row
             row["passed"] = True
         if not text_only:
             phrases = [("闭嘴。", False), ("让我安静一会儿，先别出声。", False),

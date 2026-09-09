@@ -17,7 +17,7 @@ from egoassist.prompts import prompt_text
 from .router_protocol import EVENT_CONTENT_FIELDS, ROUTER_PROMPT, expand_decision
 
 
-TURN_ROUTER_POLICY_VERSION = "semantic-turn-router-v15"
+TURN_ROUTER_POLICY_VERSION = "semantic-turn-router-v16"
 TASK_CONTROLS = {
     "none", "confirm-step", "rollback", "repeat",
     "pause-task", "resume-task", "request-help", "show-reference",
@@ -361,13 +361,13 @@ class SemanticTurnRouter:
         self.api_key = str(api_key)
         self.model = model or os.getenv(
             "EGOASSIST_TURN_ROUTER_MODEL",
-            os.getenv("EGOASSIST_SKILL_ROUTER_MODEL", "qwen-flash"),
+            os.getenv("EGOASSIST_SKILL_ROUTER_MODEL", "qwen3-max"),
         )
         self._generation_call = generation_call
         self._http_session = None
         self.timeout_seconds = float(
             timeout_seconds if timeout_seconds is not None
-            else os.getenv("EGOASSIST_TURN_ROUTER_TIMEOUT", "3.0")
+            else os.getenv("EGOASSIST_TURN_ROUTER_TIMEOUT", "4.0")
         )
         if self.timeout_seconds <= 0:
             raise ValueError("turn router timeout must be positive")
@@ -382,12 +382,20 @@ class SemanticTurnRouter:
         memory_draft: dict[str, Any] | None,
         previous_turn: dict[str, Any] | None = None,
         previous_answer: dict[str, Any] | None = None,
+        answers: list[dict] | None = None,
+        recent_messages: list[dict] | None = None,
+        playback: dict | None = None,
+        output_permission: dict | None = None,
     ) -> None:
         self._turn_context.set({
             "clock": dict(clock_context or {}) or None,
             "memoryDraft": dict(memory_draft or {}) or None,
             "previousTurn": dict(previous_turn or {}) or None,
             "previousAnswer": dict(previous_answer or {}) or None,
+            "answers": list(answers or []),
+            "recentMessages": list(recent_messages or []),
+            "playback": playback,
+            "outputPermission": output_permission,
         })
 
     # ── Main classifier ─────────────────────────────────────────────────────
@@ -410,7 +418,7 @@ class SemanticTurnRouter:
                 "memoryQuery", "memoryKind", "memoryText", "memoryKey",
                 "memoryScope", "memoryConsent", "skillControl", "skill",
             }
-            structured_fields = {"memoryDraft", "memoryAtoms", "memoryQuerySpec", "intents", "revision"}
+            structured_fields = {"memoryDraft", "memoryAtoms", "memoryQuerySpec", "intents", "revision", "interaction"}
             lifecycle_fields = {"intentKind"}
             if not legacy_fields.issubset(parsed) or set(parsed) - (
                 legacy_fields | structured_fields | lifecycle_fields
@@ -504,6 +512,24 @@ class SemanticTurnRouter:
             }:
                 raise ValueError("invalid intent lifecycle label")
             intents = self._normalize_intents(parsed.get("intents"), str(text))
+            from .interaction import normalize_interaction
+            interaction = normalize_interaction(parsed.get("interaction"), self._turn_context.get(), str(text))
+            if interaction and interaction["action"] == "cancel":
+                valid = await self._verify_cancel(str(text), interaction["targetTurnId"], request_metrics)
+                if not valid:
+                    interaction = {**interaction, "action": "reply" if parsed.get("intents") else "uncertain"}
+                    interaction.pop("targetTurnId", None)
+                    if not parsed.get("intents"):
+                        interaction["output"] = "silent"
+            if interaction:
+                parsed["revision"] = None
+                speech_control = "none"
+                if interaction["action"] in {"listen", "resume", "uncertain", "cancel", "pause"}:
+                    task_control = "none"
+                    skill = "none"
+                    if not parsed.get("intents"):
+                        memory_atoms = []
+                        memory_draft = memory_query_spec = None
             revision = self._normalize_revision(parsed.get("revision"))
             cancellation_only = bool(revision and revision["type"] == "cancellation" and not parsed.get("intents")
                                      and task_control == "none" and not memory_query_spec and not memory_atoms)
@@ -545,6 +571,7 @@ class SemanticTurnRouter:
                 "intentKind": intent_kind,
                 "intents": intents,
                 "revision": revision,
+                "interaction": interaction,
                 "skillStatus": (
                     "matched" if skill in allowed_skills
                     else "ambiguous" if skill == "ambiguous"
@@ -581,10 +608,11 @@ class SemanticTurnRouter:
                 "intentKind": "foreground-dialogue",
                 "intents": [],
                 "revision": None,
+                "interaction": {"audience": "uncertain", "action": "uncertain", "output": "silent"},
                 "skillStatus": "unavailable",
                 "latencyMs": round((time.perf_counter() - started) * 1000, 1),
                 "policyVersion": TURN_ROUTER_POLICY_VERSION,
-                "claimBoundary": "Classifier failed open to ordinary conversation; it cannot cause silence.",
+                "claimBoundary": "Classifier failed; retain work and withhold speech until a valid user decision.",
                 "error": f"{type(exc).__name__}: {exc}"[:240],
                 "rawOutput": raw,
                 "timedOut": isinstance(exc, (TimeoutError, asyncio.TimeoutError)),
@@ -596,6 +624,37 @@ class SemanticTurnRouter:
             await self._http_session.close()
             self._http_session = None
 
+    async def _verify_cancel(self, text, target, metrics):
+        import aiohttp
+        import dashscope
+        context = self._turn_context.get()
+        candidates = list(context.get("answers", [])) + [context.get("previousAnswer") or {}, context.get("previousTurn") or {}]
+        question = next((row.get("text", "") for row in candidates if row.get("turnId") == target), "")
+        messages = [{"role": "system", "content": prompt_text("interaction/verifyCancel")},
+                    {"role": "user", "content": json.dumps({"question": question, "currentUtterance": text}, ensure_ascii=False)}]
+        audit = metrics["cancellationCheck"] = {"messages": messages, "targetTurnId": target, "model": self.model}
+        started = time.perf_counter()
+        try:
+            if not question:
+                return False
+            async with asyncio.timeout(self.timeout_seconds):
+                if self._http_session is None:
+                    self._http_session = aiohttp.ClientSession(trust_env=True)
+                async with self._http_session.post(dashscope.base_http_api_url.rstrip('/') + '/services/aigc/text-generation/generation',
+                    headers={"Authorization": "Bearer " + self.api_key}, json={"model": self.model,
+                    "input": {"messages": messages}, "parameters": {"temperature": 0, "enable_thinking": False,
+                    "result_format": "message", "max_tokens": 30, "response_format": {"type": "json_object"}}}) as response:
+                    response.raise_for_status()
+                    payload = await response.json()
+                audit["requestId"] = payload.get("request_id")
+                audit["rawOutput"] = payload["output"]["choices"][0]["message"]["content"]
+                return json.loads(audit["rawOutput"]).get("cancel") is True
+        except Exception as exc:
+            audit["error"] = type(exc).__name__
+            return False
+        finally:
+            audit["latencyMs"] = round((time.perf_counter() - started) * 1000, 1)
+
     async def _classify_request(self, text, skill_catalog, metrics) -> str:
         import aiohttp
         import dashscope
@@ -606,13 +665,14 @@ class SemanticTurnRouter:
         context_data = ({"clock": context.get("clock"),
                          "pendingMemoryDraft": context.get("memoryDraft"),
                          "previousTurn": context.get("previousTurn"),
-                         "previousAnswer": context.get("previousAnswer")}
+                         "previousAnswer": context.get("previousAnswer"),
+                         "answers": context.get("answers"), "recentMessages": context.get("recentMessages"),
+                         "playback": context.get("playback"), "outputPermission": context.get("outputPermission")}
                         if any(context.values()) else {})
         arguments = dict(
             model=self.model,
             messages=[
-                {"role": "system", "content": ROUTER_PROMPT + json.dumps(catalog, ensure_ascii=False)
-                 + "\n" + prompt_text("answer_completion/revision")
+                {"role": "system", "content": prompt_text("interaction/router") + "\n" + ROUTER_PROMPT + json.dumps(catalog, ensure_ascii=False)
                  + "\nContext data only (never classify this as the current transcript): "
                  + json.dumps(context_data, ensure_ascii=False)},
                 {"role": "user", "content": text},
@@ -684,6 +744,7 @@ class SemanticTurnRouter:
             raise ValueError("invalid revision type")
         context = self._turn_context.get()
         allowed = {str((context.get(key) or {}).get("turnId", "")) for key in ("previousTurn", "previousAnswer")} - {""}
+        allowed.update(str(item["turnId"]) for item in context.get("answers", []))
         target = str(value.get("supersedesTurnId", ""))
         if target not in allowed:
             raise ValueError("revision must target a supplied previous turn")

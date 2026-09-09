@@ -6,6 +6,7 @@
 - [记忆机制](../MEMORY_ARCHITECTURE.md)：实际数据流、时间语义、报告与失效模式。
 - [提示词](../egoassist/prompts/README.md)：模板与真实模型请求审计。
 - [代码审查](CODE_REVIEW_2026-09-09.md)：本轮检查范围、修复、剩余风险与验证。
+- [自然打断实现与验收](INTERACTION_IMPLEMENTATION_2026-09-09.md)：本地停播、输出权限、原答续播、真实 Qwen 证据。
 
 ## 架构决策
 

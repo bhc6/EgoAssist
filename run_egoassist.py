@@ -344,6 +344,7 @@ class CaseRuntimeOwner:
     # AmbientWatchSession — present only while ambient mode is on AND consent is
     # live. Cleared on revocation, so it is never a stale authorization.
     ambient: Any = None
+    interaction: Any = None
 
 
 def runtime_root() -> Path:
@@ -945,6 +946,8 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
             work_ledger=CaseWorkLedger(journal),
         )
         case_owners[session_id] = owner
+        from egoassist.realtime.interaction import InteractionState
+        owner.interaction = InteractionState(journal)
 
         # Phase 1: Memory observability bus
         trace_dir = Path(journal.path).parent
@@ -1444,6 +1447,7 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                 "sessionId": visible_session_id,
                 "scheduler": scheduler,
                 "workLedger": work_ledger_snapshot,
+                "interaction": case_owners[visible_session_id].interaction.snapshot() if visible_session_id in case_owners and case_owners[visible_session_id].interaction else None,
                 "artifacts": visible_artifacts,
                 "humanHelp": human_help_summary,
                 "productPersistence": {
@@ -1557,6 +1561,7 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
             "sessionId": visible_session_id,
             "scheduler": scheduler,
             "workLedger": work_ledger_snapshot,
+            "interaction": case_owners[visible_session_id].interaction.snapshot() if visible_session_id in case_owners and case_owners[visible_session_id].interaction else None,
             "artifacts": visible_artifacts,
             "humanHelp": human_help_summary,
             "capabilityCatalog": capability_catalog,
@@ -1606,6 +1611,9 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
         speech_policy="immediate", reason="unspecified", max_protection_ms=2500,
         output_mode="audio", purpose="conversation", origin=None,
     ):
+        playback_context = getattr(bridge, "playback_context", None)
+        if playback_context:
+            instructions += "\n" + prompt_text("interaction/playbackContext") + "\n" + json.dumps(playback_context(), ensure_ascii=False)
         if hasattr(bridge, "scheduler_snapshot"):
             return bridge.request_response(
                 instructions, priority=priority, interrupt=interrupt,
@@ -2209,7 +2217,7 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
         identity.get_context_session(user_id, session_id)
         owner = case_owner(user_id, session_id)
         rows = owner.journal.entries()
-        actual = [row for row in rows if row.get("type") in {"control_decision", "insight.request", "insight.result", "insight.job", "answer.request", "answer.result"}
+        actual = [row for row in rows if row.get("type") in {"control_decision", "interaction.classification_retry", "insight.request", "insight.result", "insight.job", "answer.request", "answer.result"}
                   or row.get("eventType") in {"model.prompt", "response.dispatched", "episodic.memory.injected"}]
         return web.json_response({"templates": prompt_catalog(), "requests": actual[-30:],
                                   "sessionId": session_id, "totalAuditEvents": len(actual)})
@@ -4373,13 +4381,28 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
         livekit_active = False
         unattributed_outputs = set()
         muted_response_ids = set()
+        from egoassist.realtime.interaction import InteractionState
+        if owner.interaction is None:
+            owner.interaction = InteractionState(owner.journal)
+        interaction_state = owner.interaction
+        interaction_state.grants.clear()
+        resumed_response_ids = {}
 
         async def emit(payload):
             if owner.socket_token is not socket_token or owner.epoch != connection_epoch:
                 return
             origin = payload.get("origin") or {}
+            if not payload.get("replay"):
+                interaction_state.observe(payload)
+            if payload.get("responseId") in resumed_response_ids:
+                origin = resumed_response_ids[payload["responseId"]]
+                payload = {**payload, "origin": origin}
             if payload.get("type") == "playback_stop":
+                interaction_state.pause()
                 muted_response_ids.update(payload.get("responseIds") or [])
+                resumed_response_ids.clear()
+            if payload.get("type") == "audio" and not interaction_state.allows(origin, payload.get("purpose", "conversation")):
+                return
             if payload.get("type") == "audio" and payload.get("responseId") in muted_response_ids:
                 return
             if payload.get("type") == "response_status":
@@ -4393,11 +4416,11 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                         if not ws.closed:
                             await ws.send_json({"type": "error", "message": "Model response has no source question; output was blocked. Please retry."})
                     return
-                if origin.get("generation") is not None and origin["generation"] != owner.output_generation and not origin.get("background"):
+                if origin.get("generation") is not None and origin["generation"] != owner.output_generation and not origin.get("background") and payload.get("responseId") not in resumed_response_ids:
                     return
                 if payload.get("type") == "response_status" and origin.get("turnId"):
                     (owner.work_ledger or CaseWorkLedger(owner.journal)).set_turn_delivery(
-                        origin["turnId"], payload["status"], responseId=payload.get("responseId"))
+                        origin.get("answerObligation") or origin["turnId"], "generated" if payload["status"] == "completed" else payload["status"], responseId=payload.get("responseId"))
             if livekit_active and livekit_transport is not None:
                 if payload.get("type") in {"audio", "interrupted", "playback_stop"}:
                     try:
@@ -4875,7 +4898,8 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
             source_turn = ledger.turns().get(source_turn_id) if source_turn_id else None
             source_intent = ledger.intents().get(source_intent_id) if source_intent_id else None
             source_job = ledger.jobs().get(source_job_id) if source_job_id else None
-            if source_turn and source_turn.get("supersededBy"):
+            if source_turn and source_turn.get("supersededBy") and (
+                source_turn.get("revisionScope") != "answer" or not source_intent or source_intent.get("kind") == "foreground-dialogue"):
                 raise RuntimeError("tool call belongs to a corrected user turn")
             if source_intent and source_intent.get("status") in {"suspended", "cancelled", "failed"}:
                 raise RuntimeError("tool call belongs to an inactive intent")
@@ -5021,17 +5045,17 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
         def session_response_lifecycle(origin: dict, status: str) -> None:
             ledger = owner.work_ledger or CaseWorkLedger(harness.journal)
             if origin.get("turnId"):
-                current = origin.get("background") or (
+                current = origin.get("responseId") in resumed_response_ids or origin.get("background") or (
                     owner.socket_token is socket_token and owner.epoch == connection_epoch
                     and origin.get("generation") in {None, owner.output_generation}
                 )
-                ledger.set_turn_delivery(origin["turnId"], "completed" if status == "completed" and current else "interrupted",
+                ledger.set_turn_delivery(origin.get("answerObligation") or origin["turnId"], "generated" if status == "completed" and current else "interrupted",
                                          responseId=origin.get("responseId"))
                 if origin.get("answerObligation"):
                     if status == "completed" and current:
-                        answer_executor.foreground_finished(harness.journal, origin["turnId"], origin.get("responseId"))
+                        answer_executor.foreground_finished(harness.journal, origin["answerObligation"], origin.get("responseId"))
                     else:
-                        answer_executor.interrupt(harness.journal, origin["turnId"])
+                        answer_executor.interrupt(harness.journal, origin["answerObligation"])
             intent_id = str(origin.get("intentId", ""))
             job_id = str(origin.get("jobId", ""))
             if intent_id not in ledger.intents():
@@ -5081,6 +5105,14 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                     if item["turnId"] != turn_id and item["status"] != "cancelled"
                     and int(turns.get(item["turnId"], {}).get("sequence") or 0) < current_sequence
                 ), None),
+                answers=[{"turnId": item["turnId"], "text": item["question"], "status": item["status"]}
+                         for item in list(answer_jobs(harness.journal).values())[-24:]
+                         if item["turnId"] != turn_id and item["status"] != "cancelled"
+                         and int(turns.get(item["turnId"], {}).get("sequence") or 0) < current_sequence],
+                recent_messages=[{"role": item.get("message", {}).get("role"),
+                                  "text": str(item.get("message", {}).get("content", ""))[-600:]}
+                                 for item in harness.journal.entries() if item.get("type") == "message"][-6:],
+                playback=interaction_state.playback_context(), output_permission=interaction_state.snapshot(),
             )
             return await semantic_router.classify(text, catalog)
 
@@ -5228,6 +5260,11 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
             ledger.set_turn_status(turn_id, "classifying")
             async with classification_limit:
                 semantic = await classify_semantic_turn(text, turn_id)
+                if semantic.get("status") == "unavailable":
+                    harness.journal.append("interaction.classification_retry", {"turnId": turn_id, "decision": semantic})
+                    if not ws.closed:
+                        await ws.send_json({"type": "interaction_status", "turnId": turn_id, "status": "retrying"})
+                    semantic = await classify_semantic_turn(text, turn_id)
             ledger.set_turn_status(
                 turn_id, "ready", detail={"semanticMethod": semantic.get("method")},
             )
@@ -5281,6 +5318,7 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                 "input": text,
             })
 
+
         async def process_queued_turn(
             text: str,
             *,
@@ -5306,12 +5344,30 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                     raise asyncio.CancelledError
                 turn_generation = owner.output_generation
                 work_ledger.set_turn_status(turn_id, "processing")
+                from egoassist.realtime.interaction_controller import apply_interaction
+                handled, control = await apply_interaction(semantic, turn_id, turn_sequence,
+                    owner=owner, interaction_state=interaction_state, harness=harness,
+                    answer_executor=answer_executor, user_id=user_id, bridge=bridge, ws=ws, emit=emit,
+                    muted_response_ids=muted_response_ids, resumed_response_ids=resumed_response_ids,
+                    request_bridge_response=request_bridge_response)
+                if handled and not semantic.get("revision"):
+                    session_routing = {**session_routing, "method": semantic.get("method"),
+                        "status": "suppressed-control", "selectedSkill": None, "selectedTask": None,
+                        "interaction": control, "suppressedBy": control["action"]}
+                    owner.routing = session_routing
+                    resolve_semantic_turn(text, {}, semantic)
+                    work_ledger.set_turn_status(turn_id, "completed")
+                    work_ledger.set_turn_delivery(turn_id, "completed", channel="speech-control")
+                    if turn_sequence == owner.latest_input_sequence and not ws.closed:
+                        await ws.send_json({"type": "state", "state": scoped_state_for_user(user_id, session_id)})
+                    return {"control": "stop-speaking", "semanticDecision": semantic}
                 revision = semantic.get("revision")
                 if revision:
                     work_ledger.revise_turn(
                         turn_id,
                         str(revision["supersedesTurnId"]),
                         revision_type=str(revision.get("type", "correction")),
+                        scope="answer",
                     )
                     previous_id = str(revision["supersedesTurnId"])
                     if previous_id in answer_jobs(harness.journal):
@@ -5840,6 +5896,13 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                     },
                 )
             response_generation = turn_generation
+            if control["output"] != "speech" or not interaction_state.allows({"turnId": turn_id}):
+                if primary_instruction:
+                    answer_executor.interrupt(harness.journal, turn_id)
+                if turn_sequence < owner.latest_input_sequence:
+                    session_trace("response.skipped.stale_user_turn", "case-turn-worker",
+                                  {"turnSequence": turn_sequence, "latestInputSequence": owner.latest_input_sequence})
+                return result
             if (
                 not background_intent
                 and
@@ -6018,11 +6081,7 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
             # A newer user turn invalidates all currently queued foreground
             # output. The bridge returns interrupted result-backed responses to
             # the durable inbox; background jobs themselves remain running.
-            if hasattr(bridge, "cancel_response"):
-                try:
-                    bridge.cancel_response(drop_queued_below=101, reason="newer-user-turn")
-                except TypeError:
-                    bridge.cancel_response()
+            interaction_state.pause()
             ledger = owner.work_ledger or CaseWorkLedger(harness.journal)
             mark_interrupted_turns(ledger)
             ledger.suspend_before_sequence(owner.turn_sequence, reason="newer-user-turn")
@@ -6127,6 +6186,9 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                 for pending_turn in recoverable:
                     enqueue_persisted_turn(pending_turn)
             bridge = OmniBrowserBridge(api_key, model, voice, initial_context["system"], emit, transcript_received)
+            bridge.interaction_managed = True
+            bridge.playback_context = interaction_state.playback_context
+            bridge.output_permission = interaction_state.allows
             owner.bridge = bridge
             if hasattr(bridge, "set_context_harness"):
                 bridge.set_context_harness(harness)
@@ -6242,6 +6304,44 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                     session_trace("clock.context.updated", "browser-clock", clock_snapshot)
                 elif kind == "cancel":
                     bridge.cancel_response()
+                elif kind == "playback_progress":
+                    if interaction_state.progress(payload):
+                        row = interaction_state.responses[payload["responseId"]]
+                        if row.get("terminalStatus") == "completed" and row["playedSamples"] == len(row["pcm"]) // 2 and not row["overflow"]:
+                            turn_id = row["origin"].get("answerObligation") or row["origin"].get("turnId")
+                            if turn_id:
+                                CaseWorkLedger(harness.journal).set_turn_delivery(turn_id, "completed", channel="device-playback",
+                                    responseId=payload["responseId"], playedSamples=row["playedSamples"])
+                elif kind == "vad_misfire":
+                    generation = owner.output_generation
+                    async def recover_misfire(expected_generation=generation):
+                        await asyncio.sleep(1.0)
+                        if owner.socket_token is not socket_token or owner.output_generation != expected_generation or ws.closed:
+                            return
+                        if not getattr(bridge, "connected", False) or bridge.has_unresolved_user_input() or interaction_state.snapshot()["quiet"]:
+                            return
+                        progress = interaction_state.playback_context() or {}
+                        tail = interaction_state.tail(progress.get("turnId"))
+                        if not tail or not tail[2]:
+                            return
+                        response_id, row, pcm = tail
+                        interaction_state.release()
+                        muted_response_ids.discard(response_id)
+                        await ws.send_json({"type": "playback_resume", "turnId": row["origin"].get("turnId"),
+                                           "responseId": response_id, "offsetSamples": row["playedSamples"]})
+                        import base64
+                        for offset in range(0, len(pcm), 24000):
+                            await emit({"type": "audio", "responseId": response_id, "origin": row["origin"],
+                                        "purpose": "conversation", "replay": True,
+                                        "audio": base64.b64encode(pcm[offset:offset + 24000]).decode()})
+                        harness.journal.append("interaction.resume", {"responseId": response_id, "method": "local-vad-misfire"})
+                    task = asyncio.create_task(recover_misfire())
+                    owner.classification_tasks.add(task)
+                    task.add_done_callback(owner.classification_tasks.discard)
+                elif kind == "speech_activity":
+                    interaction_state.pause()
+                    if hasattr(bridge, "handle_user_speech_started"):
+                        bridge.handle_user_speech_started(trigger="device-vad")
                 elif kind == "control":
                     transcript = str(payload.get("transcript", "")).strip()
                     if not transcript:
@@ -6265,13 +6365,7 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                     owner.turn_sequence += 1
                     owner.latest_input_sequence = owner.turn_sequence
                     owner.output_generation += 1
-                    if hasattr(bridge, "cancel_response"):
-                        try:
-                            bridge.cancel_response(
-                                drop_queued_below=101, reason="newer-explicit-control",
-                            )
-                        except TypeError:
-                            bridge.cancel_response()
+                    interaction_state.pause()
                     mark_interrupted_turns(ledger)
                     ledger.suspend_before_sequence(
                         owner.turn_sequence, reason="newer-explicit-control",

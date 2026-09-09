@@ -23,9 +23,13 @@ from egoassist.realtime import SemanticTurnRouter
 
 def assess(case, decision):
     revision = decision.get("revision") or {}
-    actual = {"stop": decision.get("speechControl") == "stop-speaking",
-              "cancel": revision.get("type") == "cancellation",
-              "withdrawn": bool(revision)}
+    interaction = decision.get("interaction") or {}
+    action = interaction.get("action")
+    actual = {"stop": decision.get("speechControl") == "stop-speaking" or (
+                  interaction.get("audience") == "assistant" and action in {"listen", "cancel", "pause"}
+                  and interaction.get("output") == "silent"),
+              "cancel": revision.get("type") == "cancellation" or action == "cancel",
+              "withdrawn": bool(revision) or action == "cancel"}
     failures = [key for key in actual if key in case and actual[key] != case[key]]
     # A correction also withdraws the old answer; protecting it must cover both.
     if case.get("cancel") is False and revision and "cancel" not in failures:

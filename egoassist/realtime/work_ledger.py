@@ -169,6 +169,7 @@ class CaseWorkLedger:
             if old_id in values:
                 values[old_id]["supersededBy"] = str(entry.get("turnId", ""))
                 values[old_id]["revisionType"] = str(entry.get("revisionType", "correction"))
+                values[old_id]["revisionScope"] = entry.get("scope", "turn")
         return values
 
     def revise_turn(
@@ -177,6 +178,7 @@ class CaseWorkLedger:
         supersedes_turn_id: str,
         *,
         revision_type: str = "correction",
+        scope: str = "turn",
     ) -> dict[str, Any]:
         turns = self.turns()
         if str(turn_id) not in turns or str(supersedes_turn_id) not in turns:
@@ -189,11 +191,14 @@ class CaseWorkLedger:
                 "turnId": str(turn_id),
                 "supersedesTurnId": str(supersedes_turn_id),
                 "revisionType": str(revision_type),
+                "scope": scope,
             },
             idempotency_key=f"turn-revision:{turn_id}:{supersedes_turn_id}",
         )
         for intent_id, intent in self.intents().items():
             if str(intent.get("turnId")) != str(supersedes_turn_id):
+                continue
+            if scope == "answer" and intent.get("kind") != "foreground-dialogue":
                 continue
             if intent.get("status") not in {"completed", "failed", "cancelled"}:
                 self.set_intent_status(intent_id, "cancelled", detail={"reason": "turn-superseded", "supersededBy": str(turn_id)})
@@ -595,7 +600,7 @@ class CaseWorkLedger:
             elif entry.get("type") == "answer.job":
                 answers[entry["turnId"]] = {k: v for k, v in entry.items() if k not in {"instructions", "question", "context"}}
         for answer in answers.values():
-            if answer.get("status") == "completed" and answer.get("channel") == "speech":
+            if answer.get("status") == "completed" and answer.get("channel") in {"speech", "generated-audio"}:
                 answer["text"] = completed_text.get(answer.get("responseId"), "")
         return {
             "turnInbox": [{**turn, "delivery": deliveries.get(turn["turnId"]), "answer": answers.get(turn["turnId"])}

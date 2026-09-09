@@ -16,7 +16,7 @@ from run_egoassist import create_app
 from verify_real_voice_stop import synthesize
 
 
-async def verify(output):
+async def verify(output, local_vad=False):
     load_env(str(ROOT / ".env"))
     output.mkdir(parents=True, exist_ok=False)
     report = {"passed": False, "mock": False, "hardwareMeasured": False, "pageErrors": [], "viewports": []}
@@ -29,6 +29,7 @@ async def verify(output):
             try:
                 page = await browser.new_page(viewport={"width": 1440, "height": 1000})
                 page.on("pageerror", lambda error: report["pageErrors"].append(str(error)))
+                page.on("console", lambda message: report.setdefault("consoleWarnings", []).append(message.text) if message.type in {"warning", "error"} else None)
                 await page.goto(str(server.make_url("/")))
                 await page.locator("#registerMode").click()
                 await page.locator("#authUsername").fill("voice-stop-browser")
@@ -38,17 +39,39 @@ async def verify(output):
                 await page.locator("#textTurnInput").fill("请详细解释乘法原理，至少讲二十句话。")
                 await page.locator("#textTurnSend").click()
                 await page.wait_for_function("playbackSources.size > 0 && Boolean(captionResponseId)", timeout=45000)
+                if local_vad:
+                    await page.evaluate("""async () => {
+                        window.testVadDestination = audioContext.createMediaStreamDestination();
+                        await startLocalVad(testVadDestination.stream);
+                        if (!localVad) throw Error(document.documentElement.dataset.localVadError || 'Local Silero VAD did not initialize');
+                    }""")
                 await page.evaluate("""() => {
                     window.stopEvidence = {oldResponse: captionResponseId, started: performance.now(), events: []};
                     socket.addEventListener('message', event => {
                         const message = JSON.parse(event.data);
-                        if (['playback_stop', 'speech_control', 'user_transcript'].includes(message.type)) {
+                        if (['playback_stop', 'playback_resume', 'speech_control', 'user_transcript'].includes(message.type)) {
                             stopEvidence.events.push({type: message.type, trigger: message.trigger,
                                 atMs: performance.now() - stopEvidence.started, playingSources: playbackSources.size,
-                                responseId: captionResponseId});
+                                responseId: message.responseId || captionResponseId, offsetSamples: message.offsetSamples});
                         }
                     });
                 }""")
+                if local_vad:
+                    await page.evaluate("""audio => {
+                        const raw = atob(audio), pcm = new Int16Array(raw.length / 2);
+                        for (let i = 0; i < pcm.length; i++) pcm[i] = raw.charCodeAt(i * 2) | raw.charCodeAt(i * 2 + 1) << 8;
+                        const buffer = audioContext.createBuffer(1, pcm.length, 16000);
+                        for (let i = 0; i < pcm.length; i++) buffer.getChannelData(0)[i] = pcm[i] / 32768;
+                        const source = audioContext.createBufferSource();
+                        source.buffer = buffer; source.connect(testVadDestination); source.start();
+                        stopEvidence.localStarted = performance.now();
+                        const original = localVad.options.onSpeechStart;
+                        localVad.options.onSpeechStart = () => {
+                            original();
+                            stopEvidence.localStopMs = performance.now() - stopEvidence.localStarted;
+                            stopEvidence.localPlayingSources = playbackSources.size;
+                        };
+                    }""", base64.b64encode(pcm).decode())
                 data = pcm + bytes(32000)
                 for offset in range(0, len(data), 3200):
                     await page.evaluate("audio => socket.send(JSON.stringify({type:'audio', audio}))",
@@ -59,6 +82,10 @@ async def verify(output):
                 onset = next(e for e in report["playback"]["events"] if e.get("trigger") == "provider-speech-started")
                 assert onset["playingSources"] == 0, onset
                 assert await page.evaluate("playbackSources.size") == 0
+                if local_vad:
+                    assert report["playback"].get("localStopMs") is not None, report["playback"]
+                    assert report["playback"]["localPlayingSources"] == 0
+                    report["localVad"] = "real-Silero-v5"
                 assert "已停止播报" in await page.locator("#duplexState").text_content()
                 for width in (1440, 390):
                     await page.set_viewport_size({"width": width, "height": 1000})
@@ -66,10 +93,24 @@ async def verify(output):
                     layout = await page.evaluate("({width:innerWidth, scrollWidth:document.documentElement.scrollWidth})")
                     assert layout["scrollWidth"] <= layout["width"], layout
                     report["viewports"].append(layout)
+                await page.locator("#textTurnInput").fill("请接着刚才没讲完的地方继续说。")
+                await page.locator("#textTurnSend").click()
+                await page.wait_for_function("playbackSources.size > 0", timeout=45000)
+                report["resume"] = await page.evaluate("({responses:[...playbackAudit.responses.keys()], offsets:[...playbackAudit.responses.values()].map(r=>r.played)})")
+                assert report["playback"]["oldResponse"] in report["resume"]["responses"]
+                assert max(report["resume"]["offsets"]) > 0
+                resume_events = await page.evaluate("stopEvidence.events.filter(e=>e.type==='playback_resume')")
+                assert resume_events and resume_events[-1]["responseId"] == report["playback"]["oldResponse"], resume_events
+                assert resume_events[-1]["offsetSamples"] > 0, resume_events
+                report["resumeEvents"] = resume_events
+                report["resumePreservesCursor"] = True
                 await page.locator("#textTurnInput").fill("请只回答九乘九的结果。")
                 await page.locator("#textTurnSend").click()
                 await page.wait_for_function("playbackSources.size > 0 && captionResponseId !== stopEvidence.oldResponse", timeout=45000)
                 report["newQuestionPlays"] = True
+                await page.reload()
+                await page.wait_for_function("Boolean(state?.interaction?.quiet)", timeout=30000)
+                report["quietSurvivesRefresh"] = True
                 report["passed"] = not report["pageErrors"]
             finally:
                 await browser.close()
@@ -83,5 +124,6 @@ async def verify(output):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", required=True, type=Path)
+    parser.add_argument("--local-vad", action="store_true")
     args = parser.parse_args()
-    raise SystemExit(0 if asyncio.run(verify(args.output)) else 1)
+    raise SystemExit(0 if asyncio.run(verify(args.output, args.local_vad)) else 1)

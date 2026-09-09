@@ -59,7 +59,22 @@ class AnswerJobs:
     def foreground_finished(self, journal, turn_id, response_id):
         row = answer_jobs(journal).get(turn_id)
         if row and row["status"] == "foreground":
-            self.transition(journal, row, status="completed", channel="speech", responseId=response_id)
+            self.transition(journal, row, status="completed", channel="generated-audio", responseId=response_id)
+
+    def pause(self, journal, turn_id):
+        row = answer_jobs(journal).get(turn_id)
+        if row and row["status"] not in {"cancelled", "completed"}:
+            self.transition(journal, row, status="paused", reason="user-paused")
+            task = self.tasks.get((str(journal.path), turn_id))
+            if task:
+                task.cancel()
+
+    def resume(self, user_id, journal, turn_id):
+        row = answer_jobs(journal).get(turn_id)
+        if row and row["status"] != "cancelled":
+            self.journals[str(journal.path)] = (user_id, journal)
+            self.transition(journal, row, status="foreground", reason="user-resumed",
+                            foregroundStartedAt=datetime.now(timezone.utc).isoformat())
 
     def cancel(self, journal, turn_id, *, reason="user-cancelled"):
         row = answer_jobs(journal).get(turn_id)
@@ -103,7 +118,7 @@ class AnswerJobs:
                     ):
                         self.cancel(journal, row["turnId"], reason="question-replaced-or-cancelled")
                     elif row["status"] == "foreground" and (
-                        datetime.now(timezone.utc) - datetime.fromisoformat(row["createdAt"])
+                        datetime.now(timezone.utc) - datetime.fromisoformat(row.get("foregroundStartedAt") or row["createdAt"])
                     ).total_seconds() >= self.foreground_timeout:
                         self.transition(journal, row, status="queued", reason="foreground-deadline")
                 # Give corrections a bounded grace period, including after a disconnect.

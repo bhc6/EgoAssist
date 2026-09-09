@@ -8,7 +8,7 @@ LEGACY_DEFAULTS = dict.fromkeys((
 ), 'none')
 WIRE_FIELDS = {
     'speechControl', 'taskControl', 'preferenceIntent', 'memoryQuery', 'skillControl',
-    'skill', 'memoryDraft', 'memoryAtoms', 'memoryEvents', 'memoryQuerySpec', 'intentKind', 'intents', 'revision',
+    'skill', 'memoryDraft', 'memoryAtoms', 'memoryEvents', 'memoryQuerySpec', 'intentKind', 'intents', 'revision', 'interaction',
 }
 EVENT_CONTENT_FIELDS = {'text', 'subject', 'predicate', 'value', 'kind'}
 

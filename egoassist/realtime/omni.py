@@ -662,7 +662,7 @@ class OmniBrowserBridge:
             turn_detection_type="server_vad",
             turn_detection_threshold=0.2,
             turn_detection_silence_duration_ms=650,
-            turn_detection_param={"create_response": False, "interrupt_response": True},
+            turn_detection_param={"create_response": False, "interrupt_response": not getattr(self, "interaction_managed", False)},
             tools=tools,
         )
         self._last_dialogue_configuration = signature
@@ -1006,6 +1006,8 @@ class OmniBrowserBridge:
         self._schedule({"type": "playback_stop", "trigger": trigger, "responseIds": response_ids})
         self._trace("playback.stop.requested", {"trigger": trigger,
                     "dispatchMs": round((time.perf_counter() - started) * 1000, 3)})
+        if getattr(self, "interaction_managed", False):
+            return "paused"
         with self._response_lock:
             response_keys = set(self._active_response_ids)
             if self._response_pending and not response_keys:
@@ -1754,6 +1756,14 @@ class OmniBrowserBridge:
             self._trace("result.delivery.update_failed", {"resultId": result_id, "error": str(exc)})
 
     def _send_response(self, request: _ResponseRequest) -> None:
+        permission = getattr(self, "output_permission", None)
+        if request.output_mode == "audio" and permission and not permission(request.origin, request.purpose):
+            with self._response_lock:
+                self._response_pending = False
+                self._inflight_response = None
+            self._return_result_to_inbox(request, "output-permission")
+            self._trace("response.permission.blocked", {"origin": request.origin, "purpose": request.purpose})
+            return
         try:
             self._trace("response.dispatched", {"sequence": request.sequence, "priority": request.priority, "speechPolicy": request.speech_policy, "outputMode": request.output_mode, "purpose": request.purpose,
                                                 "instructions": request.instructions, "origin": dict(request.origin or {})})
