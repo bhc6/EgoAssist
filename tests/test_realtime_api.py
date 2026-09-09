@@ -302,6 +302,57 @@ def test_text_retries_and_newer_input_do_not_block_behind_slow_routing(tmp_path,
     asyncio.run(scenario())
 
 
+def test_old_question_completes_after_socket_close_without_replaying_controls(tmp_path, monkeypatch):
+    instances = install_queue_test_bridge(monkeypatch)
+    classified = []
+    generated = []
+
+    async def classify(_self, text, catalog):
+        classified.append(text)
+        return semantic_result(text)
+
+    monkeypatch.setattr(run_egoassist.SemanticTurnRouter, "classify", classify)
+
+    async def scenario():
+        started, release = asyncio.Event(), asyncio.Event()
+
+        async def generate(_self, journal, row):
+            generated.append(row["turnId"])
+            started.set()
+            await release.wait()
+            return {"text": "answer for " + row["question"], "providerRequestId": "test-only"}
+
+        monkeypatch.setattr(run_egoassist.AnswerJobs, "_generate", generate)
+        app = create_app(str(BUILTIN_SKILLS_ROOT), None, str(tmp_path / "runtime.json"), "test", "Ethan")
+        async with TestClient(TestServer(app)) as client:
+            await register_client(client, "automatic-answer")
+            sid = (await (await client.post("/api/sessions")).json())["session"]["id"]
+            ws = await client.ws_connect("/ws/realtime?session=" + sid)
+            await _recv(ws)
+            await _recv(ws)
+            for turn_id in ("first", "second"):
+                instances[0].request_event.clear()
+                await ws.send_json({"type": "control", "transcript": turn_id, "clientRequestId": turn_id})
+                await asyncio.wait_for(instances[0].request_event.wait(), 3)
+            await asyncio.wait_for(started.wait(), 3)
+            await ws.close()
+            release.set()
+            async with asyncio.timeout(5):
+                while True:
+                    state = await (await client.get("/api/state?session=" + sid)).json()
+                    turns = {turn["turnId"]: turn for turn in state["workLedger"]["turnInbox"]}
+                    if turns["first"]["answer"]["status"] == "completed":
+                        break
+                    await asyncio.sleep(0.02)
+            assert turns["first"]["answer"]["text"] == "answer for first"
+            assert classified == ["first", "second"]
+            assert generated.count("first") == 1
+            assert len(instances[0].requests) == 2
+            assert len(turns) == 2
+
+    asyncio.run(scenario())
+
+
 def test_grounded_turn_claims_follow_committed_memory_state(tmp_path, monkeypatch):
     instances = install_queue_test_bridge(monkeypatch)
 

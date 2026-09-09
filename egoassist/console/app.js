@@ -6,6 +6,7 @@ let livekitRoom = null, livekitAudioElements = [];
 let interactionTransport = "websocket-fallback";
 let playbackTime = 0, assistantText = "";
 let captionResponseId = null, currentTurnId = null;
+let detachedStatePolling = false, lastDetachedStatePoll = 0;
 const turnOutbox = () => new TurnOutbox(sessionStorage, currentUser.id, selectedSessionId);
 let connectingPromise = null;
 let connectionGeneration = 0;
@@ -213,7 +214,8 @@ async function enterConsole(user) {
   if (selected?.memoryPolicy) renderMemoryPolicy(selected.memoryPolicy, state.memoryProfiles || []);
   await refreshPrivacy();
   try {
-    if (turnOutbox().entries().length) {
+    if (turnOutbox().entries().length || state?.workLedger?.turnInbox?.some(turn =>
+        ["received", "deferred", "classifying", "ready", "processing"].includes(turn.status))) {
       $("#textTurnError").textContent = "正在恢复未确认的文本请求";
       connectRealtime({media: false}).catch(error => { $("#textTurnError").textContent = error.message; });
     }
@@ -455,12 +457,23 @@ function renderWorkCenter() {
   const turns = ledger.turnInbox || [];
   const recentTurnIds = new Set(turns.slice(-8).map(turn => turn.turnId));
   $("#turnHistory").innerHTML = turns.filter(turn => recentTurnIds.has(turn.turnId) ||
-    !["completed", "cancelled"].includes(turn.delivery?.status || turn.status)).reverse().map(turn => {
+    !["completed", "cancelled"].includes(turn.answer?.status || turn.delivery?.status || turn.status)).reverse().map(turn => {
     const status = turn.delivery?.status || turn.status;
-    const label = !turn.delivery && status === "completed" ? "已处理，查看任务结果" : turnStates[status] || status;
+    const answer = turn.answer;
+    const answerLabels = {queued: "后台补全排队中", running: "正在后台补全", failed: "后台补全失败", cancelled: "已取消或被更正",
+      completed: answer?.channel === "background-text" ? "已在后台回答" : "回答已完成"};
+    const label = answer && answer.status !== "foreground" ? answerLabels[answer.status]
+      : !turn.delivery && status === "completed" ? "已处理，查看任务结果" : turnStates[status] || status;
     return "<div class='turn-history-row' data-turn-id='" + esc(turn.turnId) + "'><p>" + esc(turn.text) +
       "</p><small>" + esc(label) + " · " + esc(turn.turnId) + "</small>" +
-      (["interrupted", "failed"].includes(status) ? "<button type='button' data-reask-turn='" + esc(turn.turnId) + "'>继续这个问题</button>" : "") + "</div>";
+      (answer?.text && answer.status === "completed" ? "<p class='completed-answer'>" + esc(answer.text) + "</p>" : "") +
+      (answer && ["queued", "running", "failed"].includes(answer.status) ? "<small>" + esc(answer.model +
+        (answer.status === "running" ? " · 已等待 " + Math.max(0, (Date.now() - Date.parse(answer.startedAt)) / 1000).toFixed(1) +
+        " s · 请求上限 " + answer.timeoutSeconds + " s" : "") + (answer.error ? " · " + answer.error : "")) + "</small>" : "") +
+      (answer?.durationMs != null ? "<small>" + esc(answer.durationMs + " ms · " + (answer.providerRequestId || "")) + "</small>" : "") +
+      (answer && ["queued", "running"].includes(answer.status) ? "<button type='button' data-answer-action='cancel' data-answer-turn='" + esc(turn.turnId) + "'>取消这个问题</button>" : "") +
+      (answer?.status === "failed" ? "<button type='button' data-answer-action='retry' data-answer-turn='" + esc(turn.turnId) + "'>重试回答</button>" : "") +
+      (!answer && ["interrupted", "failed"].includes(status) ? "<button type='button' data-reask-turn='" + esc(turn.turnId) + "'>重新提问</button>" : "") + "</div>";
   }).join("");
   const capabilities = state.capabilityCatalog?.platform || [];
   const unavailable = capabilities.filter(item => item.status !== "available");
@@ -1231,7 +1244,7 @@ async function connectRealtimeSession(generation, media, retryAttempt) {
         assistantText = "";
         captionResponseId = null;
         stopPlayback();
-        $("#duplexState").textContent = "本轮回答未完成 · 可在问题记录中继续";
+        $("#duplexState").textContent = "语音已中断 · 查看问题处理状态";
         setWorkflowStage("delivery", "failed", "模型响应中断，未完整输出");
         workflow.active = false;
       } else if (message.status === "completed" && message.responseId === captionResponseId) {
@@ -1378,7 +1391,18 @@ $("#textTurnForm").onsubmit = async event => {
   finally { button.disabled = false; }
 };
 
-$("#turnHistory").onclick = event => {
+$("#turnHistory").onclick = async event => {
+  const action = event.target.closest("[data-answer-action]");
+  if (action) {
+    action.disabled = true;
+    try {
+      const result = await post("/api/answers/control", {sessionId: selectedSessionId,
+        turnId: action.dataset.answerTurn, action: action.dataset.answerAction});
+      render(result.state);
+    } catch (error) { $("#textTurnError").textContent = error.message; }
+    finally { action.disabled = false; }
+    return;
+  }
   const button = event.target.closest("[data-reask-turn]");
   if (!button) return;
   const turn = state?.workLedger?.turnInbox?.find(item => item.turnId === button.dataset.reaskTurn);
@@ -1759,8 +1783,19 @@ $("#promptTemplatesDetails").ontoggle = refreshPromptAudit;
 setInterval(() => { if ($("#promptAuditDetails").open || $("#promptTemplatesDetails").open) refreshPromptAudit(); maybeSuggest(); }, 3000);
 
 boot().catch(error => { showLogin(); $("#authError").textContent = error.message; });
-setInterval(() => {
-  if (!socket || socket.readyState !== WebSocket.OPEN) return;
-  socket.send(JSON.stringify({type: "refresh"}));
+setInterval(async () => {
+  if (socket?.readyState === WebSocket.OPEN) {
+    socket.send(JSON.stringify({type: "refresh"}));
+    return;
+  }
+  if (!currentUser || !selectedSessionId || detachedStatePolling || Date.now() - lastDetachedStatePoll < 3000) return;
+  const sid = selectedSessionId, uid = currentUser.id;
+  detachedStatePolling = true;
+  lastDetachedStatePoll = Date.now();
+  try {
+    const latest = await request(selectedStatePath(), {signal: AbortSignal.timeout(8000)});
+    if (selectedSessionId === sid && currentUser?.id === uid) render(latest);
+  } catch (error) { if (selectedSessionId === sid) $("#textTurnError").textContent = "状态更新中断 · " + error.message; }
+  finally { detachedStatePolling = false; }
 }, 1200);
 addEventListener("beforeunload", () => { disconnectRealtime(); stopMedia(); });

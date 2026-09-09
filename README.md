@@ -2,7 +2,7 @@
 
 面向智能眼镜助手的可运行软件 Demo 和记忆研究项目。浏览器提供文本、麦克风与摄像头入口，Python 服务管理用户、任务、记忆与审计，Qwen 提供语义路由、实时回答和独立报告生成。
 
-此前真实验收覆盖云端对话、Skill 工作流、跨会话记忆、带来源的日报/周报/月报和性能审计。本轮新增的问题归属修复已通过软件回归，但真实模型复验被执行环境的自动审批连接故障阻止。**当前不能宣称整版真实验收通过；尚未完成眼镜硬件验收，也不是生产级多机服务。**
+真实验收已覆盖云端对话、Skill 工作流、跨会话记忆、报告和性能审计。新增的自动补答通过七种真实打断场景、带记忆的重启恢复及浏览器刷新/取消检查。完整验收仍发现时间锚点误判、路由超时导致时间索引缺失、月报输出截断。**不能宣称整版全部通过；尚未完成眼镜硬件验收。** 证据见[自动补答验收](docs/ANSWER_COMPLETION_2026-09-09.md)。
 
 - [记忆机制](MEMORY_ARCHITECTURE.md)：保存、检索、时间理解、报告和失败边界。
 - [文档导航](docs/README.md)：架构决策、代码审查和历史实验。
@@ -40,6 +40,7 @@ if (-not (Test-Path .env)) { Copy-Item .env.example .env }
 | 能力 | 实际行为 | 边界 |
 | --- | --- | --- |
 | 实时对话 | 文本/语音输入，真实 Qwen 音频与转写输出 | 文本测试不测量麦克风 ASR、扬声器和眼镜无线链路 |
+| 中断补答 | 新问题优先播报，旧问题自动补完文字并归到原问题 | 明确取消或更正不补答；失败可单独重试，不自动重播旧语音 |
 | Skill | 选择、激活、退出、确认、暂停、恢复、回退 | 用户确认检查点不证明物理动作完成 |
 | 记忆 | 案例事件、显式跨会话保存、偏好与时间检索 | 可能漏检别名、同义词和复杂指代 |
 | 报告 | 按指定日期生成日报、周报、月报，查看来源 | 按需提交，不是每天/月末自动执行的日历调度 |
@@ -74,7 +75,9 @@ flowchart LR
 
 刷新会关闭媒体连接；已接收文本、检查点和持久化结果可恢复，旧连接音频无法原地续播。重启会中断计算，报告恢复的是任务与证据，执行可能重新开始。普通工作账本、Temporal 提醒和工具副作用各有恢复规则，不能统称所有任务无条件不中断。
 
-文本入口为每次提交分配 `clientRequestId`。同一案例内以相同 ID、相同内容重发会去重；同一 ID 改变内容会被拒绝。后续问题可以打断旧播报，旧问题保留在账本中并显示“回答已打断”，可明确重新提问。音频、字幕携带 `turnId/responseId`，服务端过滤过期代次，前端按问题和响应分开字幕。记忆文字回执、后台处理完成、模型响应完成是不同状态；模型完成也不等于扬声器已经播完。
+文本入口为每次提交分配 `clientRequestId`。同一案例内以相同 ID、相同内容重发会去重；同一 ID 改变内容会被拒绝。后续问题可以打断旧播报，旧问题由独立 `AnswerJobs` 自动生成完整文字答案，不需要明确继续。原问题、当时的提示词、检索证据与时钟随任务保留，补答不重跑控制或工具。明确更正和取消阻止旧答案发布；失败显示原因，可只重试回答。
+
+音频、字幕携带 `turnId/responseId`，服务端过滤过期代次，前端按问题和响应分开字幕。已完整生成的语音转写也在原问题下显示，即使播放被打断仍可阅读。补答任务在服务重启后恢复；断线留下的未处理新输入最多阻塞补答一个前台截止窗口。记忆文字回执、后台处理完成、模型响应完成是不同状态；模型完成也不等于扬声器已经播完。补答完成不证明物理任务、工具操作或等待确认的动作已完成。
 
 未获回执的文本暂存在该标签页的 `sessionStorage`，按账户和案例隔离，刷新后连接同一案例会用原 ID 重发，回执后移除。关闭标签页、清除站点数据不在该暂存保证内；已获回执的数据由服务端日志保留。
 
@@ -103,6 +106,10 @@ flowchart LR
 | `--model` | `qwen3.5-omni-flash-realtime` | 实时回答模型 |
 | `EGOASSIST_TURN_ROUTER_MODEL` | `qwen-flash` | 单次语义路由 |
 | `EGOASSIST_TURN_ROUTER_TIMEOUT` | `3.0` 秒 | 路由截止时间 |
+| `EGOASSIST_ANSWER_MODEL` | `qwen-flash` | 中断后自动文字补答 |
+| `EGOASSIST_ANSWER_CONCURRENCY` | `2` | 全局补答并发 |
+| `EGOASSIST_ANSWER_TIMEOUT` | `20` 秒 | 单次补答截止时间，不含排队 |
+| `EGOASSIST_FOREGROUND_ANSWER_TIMEOUT` | `45` 秒 | 前台无终态时转文字补答，以及等待新输入分类的上限 |
 | `EGOASSIST_INSIGHT_MODEL` | `qwen-flash` | 报告模型 |
 | `EGOASSIST_INSIGHT_CONCURRENCY` | `2` | 全局报告并发，不超过待办容量 16 |
 | `EGOASSIST_INSIGHT_TIMEOUT` | `30` 秒 | 单次报告 HTTP 截止时间 |
@@ -132,13 +139,13 @@ flowchart LR
 .venv\Scripts\python.exe scripts/compare_memory_mechanisms.py --output outputs/new-memory-comparison
 .venv\Scripts\python.exe scripts/verify_insight_recovery.py --output outputs/new-report-recovery --source outputs/new-memory-comparison/dataset.json
 
-# 统一真实软件验收：14 组独立运行，失败继续记录，不自动重试
+# 统一真实软件验收：17 组独立运行，失败继续记录，不自动重试
 .venv\Scripts\python.exe scripts/verify_real_acceptance.py --output outputs/new-full-real --source outputs/new-memory-comparison/dataset.json
 ```
 
 真实脚本没有可用供应商时应失败，不以 mock 冒充通过。`compare_memory_mechanisms.py` 使用已下载片段对应的 QA 原始文本标注，不重新推理视频。使用替身的单元测试只证明软件行为。
 
-统一验收包含连续输入、播报中打断、文字口误更正、重复提交、在途断线、延迟、记忆、时间、Skill、浏览器报告和报告重启恢复。它不覆盖实物眼镜、真实麦克风口误识别、所有可选连接器及无限并发。具体证据与未验证项见[代码审查](docs/CODE_REVIEW_2026-09-09.md)。
+统一验收包含连续输入、播报中打断、文字口误更正、重复提交、在途断线、自动补答、取消、带记忆的补答重启、延迟、记忆、时间、Skill、浏览器报告和报告重启恢复。它不覆盖实物眼镜、真实麦克风口误识别、所有可选连接器及无限并发。具体证据与未验证项见[自动补答验收](docs/ANSWER_COMPLETION_2026-09-09.md)。
 
 视频全链路研究另用 `run_egolife_benchmark.py --help`。它的采样、图像编码、视觉回答和定位开销不同，不能把旧视频评测的分钟级耗时当作当前实时延迟。少于两段视频时没有独立测试集，必须检查 `split_status` 和 `n_test`。
 

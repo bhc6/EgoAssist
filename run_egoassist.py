@@ -6,6 +6,7 @@ from __future__ import annotations
 from egoassist.prompts import prompt_text, prompt_catalog, compact_audit_payload
 from egoassist.memory.insights import InsightGenerator
 from egoassist.product.insight_jobs import InsightJobs, InsightQueueFull, visible_insight_jobs
+from egoassist.product.answer_jobs import AnswerJobs, answer_jobs
 
 import argparse
 import asyncio
@@ -580,6 +581,7 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                 sorted((user_memory_root / user_id / "sessions").glob("*.jsonl")))
 
     insight_executor = InsightJobs(insight_generator, insight_sources)
+    answer_executor = AnswerJobs(insight_generator.api_key)
     user_episodics: dict[str, RealtimeEpisodeMemory] = {}
     case_episodics: dict[tuple[str, str], RealtimeEpisodeMemory] = {}
     user_runtimes: dict[str, SkillRuntime] = {}
@@ -1834,6 +1836,7 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                 delivery.get("status") == "received" and turn.get("status") == "completed"
             ):
                 ledger.set_turn_delivery(turn["turnId"], "interrupted", reason="connection-closed")
+                answer_executor.interrupt(owner.journal, turn["turnId"])
         owner.epoch += 1
         socket = owner.socket
         owner.socket_token = None
@@ -2206,10 +2209,25 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
         identity.get_context_session(user_id, session_id)
         owner = case_owner(user_id, session_id)
         rows = owner.journal.entries()
-        actual = [row for row in rows if row.get("type") in {"control_decision", "insight.request", "insight.result", "insight.job"}
+        actual = [row for row in rows if row.get("type") in {"control_decision", "insight.request", "insight.result", "insight.job", "answer.request", "answer.result"}
                   or row.get("eventType") in {"model.prompt", "response.dispatched", "episodic.memory.injected"}]
         return web.json_response({"templates": prompt_catalog(), "requests": actual[-30:],
                                   "sessionId": session_id, "totalAuditEvents": len(actual)})
+
+    async def post_answer_control(request):
+        user_id = request[user_key]["id"]
+        payload = await request.json()
+        session_id = str(payload.get("sessionId", ""))
+        identity.get_context_session(user_id, session_id)
+        owner = case_owner(user_id, session_id)
+        turn_id = str(payload.get("turnId", ""))
+        if payload.get("action") == "cancel":
+            answer_executor.cancel(owner.journal, turn_id)
+        elif payload.get("action") == "retry":
+            answer_executor.retry(user_id, owner.journal, turn_id)
+        else:
+            raise ValueError("unknown answer action")
+        return web.json_response({"state": scoped_state_for_user(user_id, session_id)})
 
     async def get_insights(request):
         user_id = request[user_key]["id"]
@@ -4081,6 +4099,7 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
         deleting_insight_users.add(user_id)
         await insight_executor.delete_user(user_id)
         await invalidate_live_sessions(user_id)
+        await answer_executor.delete_user(user_id)
         evidence = privacy_governance.delete_account(user_id)
         for session_id, owner in list(case_owners.items()):
             if owner.user_id == user_id:
@@ -5001,6 +5020,11 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                 )
                 ledger.set_turn_delivery(origin["turnId"], "completed" if status == "completed" and current else "interrupted",
                                          responseId=origin.get("responseId"))
+                if origin.get("answerObligation"):
+                    if status == "completed" and current:
+                        answer_executor.foreground_finished(harness.journal, origin["turnId"], origin.get("responseId"))
+                    else:
+                        answer_executor.interrupt(harness.journal, origin["turnId"])
             intent_id = str(origin.get("intentId", ""))
             job_id = str(origin.get("jobId", ""))
             if intent_id not in ledger.intents():
@@ -5276,6 +5300,9 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                         str(revision["supersedesTurnId"]),
                         revision_type=str(revision.get("type", "correction")),
                     )
+                    previous_id = str(revision["supersedesTurnId"])
+                    if previous_id in answer_jobs(harness.journal):
+                        answer_executor.cancel(harness.journal, previous_id, reason="explicit-" + str(revision["type"]))
                 pending_draft_before = timeline.pending_draft(
                     user_id=user_id, case_id=session_id,
                 )
@@ -5557,6 +5584,22 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                         job["jobId"], "waiting-result",
                         detail={"turnId": turn_id, "runtimeCheckpoint": runtime_checkpoint(processing_runtime)},
                     )
+                primary_instruction = None
+                if not background_intent and result.get("control") != "stop-speaking" and not (result.get("memoryResponse") or {}).get("requested"):
+                    primary_instruction = grounded_user_instructions(
+                        selected_candidate.text if secondary_response_candidates and selected_candidate is not None
+                        and selected_candidate.kind == "foreground-dialogue" else text, result, session_runtime)
+                    answer_executor.register(user_id, harness.journal, turn_id=turn_id, question=text,
+                                             instructions=primary_instruction,
+                                             context={"retrievalEvidence": evidence,
+                                                      "clock": clock_for_session(user_id, session_id).prompt_payload(),
+                                                      "timelineWrite": result.get("timelineWrite"),
+                                                      "referenceResult": result.get("referenceResult"),
+                                                      "runtime": runtime_checkpoint(processing_runtime)},
+                                             dialogue_job={"intentId": intent["intentId"], "jobId": job["jobId"]}
+                                             if intent_kind == "foreground-dialogue" and not processing_runtime.task
+                                             and not semantic.get("taskControl") else None,
+                                             deferred=turn_sequence < owner.latest_input_sequence)
                 work_ledger.set_turn_status(turn_id, "completed")
 
                 # Phase 2A: build bg task descriptors while holding the lock so
@@ -5786,15 +5829,7 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                     turn_id=turn_id,
                     turn_sequence=turn_sequence,
                     generation=response_generation,
-                    instructions=grounded_user_instructions(
-                        selected_candidate.text
-                        if secondary_response_candidates
-                        and selected_candidate is not None
-                        and selected_candidate.kind == "foreground-dialogue"
-                        else text,
-                        result,
-                        session_runtime,
-                    ),
+                    instructions=primary_instruction,
                     priority=100,
                     interrupt=explicit,
                     speech_policy="immediate" if explicit else selection["policy"],
@@ -5807,6 +5842,7 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                     ),
                     origin={
                         "turnId": turn_id,
+                        "answerObligation": turn_id,
                         "intentId": intent["intentId"],
                         "jobId": job["jobId"],
                         "skill": current_skill_ref,
@@ -5849,6 +5885,7 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                 and bridge.has_unresolved_user_input()
             ):
                 work_ledger.set_turn_delivery(turn_id, "interrupted", reason="unresolved-user-input")
+                answer_executor.interrupt(harness.journal, turn_id)
                 session_trace(
                     "response.skipped.unresolved_user_input",
                     "case-turn-worker",
@@ -5878,6 +5915,7 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                     try:
                         ledger = owner.work_ledger or CaseWorkLedger(harness.journal)
                         ledger.set_turn_delivery(item["turnId"], "failed", error=str(exc))
+                        answer_executor.interrupt(harness.journal, item["turnId"])
                         if ledger.turns()[item["turnId"]]["status"] != "completed":
                             ledger.set_turn_status(item["turnId"], "failed", detail={"error": str(exc)})
                     except Exception:
@@ -5971,6 +6009,7 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                 delivery = turn.get("delivery") or {}
                 if delivery.get("status") in {"received", "responding"}:
                     ledger.set_turn_delivery(turn["turnId"], "interrupted", reason="newer-user-turn")
+                    answer_executor.interrupt(harness.journal, turn["turnId"])
 
         _turn_accumulator = TurnAccumulator(
             _do_enqueue_transcript,
@@ -6452,6 +6491,24 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
         await insight_executor.close()
 
     app.cleanup_ctx.append(insight_jobs_context)
+
+    async def answer_jobs_context(_app):
+        for path in sorted(user_memory_root.glob("*/sessions/*.jsonl")):
+            user_id, session_id = path.parent.parent.name, path.stem
+            try:
+                identity.get_context_session(user_id, session_id)
+                answer_executor.recover(user_id, case_owner(user_id, session_id).journal)
+            except (ValueError, KeyError, OSError):
+                LOGGER.warning("Skipped unavailable answer journal during startup")
+        worker = asyncio.create_task(answer_executor.run(), name="egoassist-answer-completion")
+        try:
+            yield
+        finally:
+            await answer_executor.close()
+            worker.cancel()
+            await asyncio.gather(worker, return_exceptions=True)
+
+    app.cleanup_ctx.append(answer_jobs_context)
     app.add_routes([
         web.post("/api/auth/register", post_register),
         web.post("/api/auth/login", post_login),
@@ -6467,6 +6524,7 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
         web.post("/api/sessions/memory-policy", post_memory_policy),
         web.get("/api/state", get_state),
         web.get("/api/prompts", get_prompt_audit),
+        web.post("/api/answers/control", post_answer_control),
         web.get("/api/insights", get_insights),
         web.post("/api/insights", post_insight),
         web.post("/api/insights/policy", post_insight_policy),

@@ -999,6 +999,11 @@ class TimelineMemory:
             )
             subject_eligible = not query_subject or _subject_identity(card.get("subject")) == _subject_identity(query_subject)
             predicate_eligible = not query_predicate or normalize_identity(card.get("predicate")) == query_predicate
+            # A router can join entity and relation into one subject label.
+            # Accept only that exact composition, never a partial entity match.
+            if query_subject and not query_predicate and card.get("subject") and card.get("predicate"):
+                subject_eligible = subject_eligible or _subject_identity(query_subject) == _subject_identity(
+                    str(card["subject"]) + str(card["predicate"]))
             if card["kind"] == "event":
                 # An interaction can contain several people and relations;
                 # its evidence is not exhausted by a single extracted triple.

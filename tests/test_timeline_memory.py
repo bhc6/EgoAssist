@@ -56,6 +56,15 @@ def test_timeline_persists_and_retrieves_declarative_fact_after_restart(tmp_path
     assert "_embedding" not in result["selected"][0]["card"]
 
 
+def test_joined_entity_relation_query_keeps_exact_owner_boundary(tmp_path):
+    memory = TimelineMemory(tmp_path / "memory.sqlite3")
+    saved = remember(memory, "我的包裹取件码是7392。", subject="包裹", predicate="取件码", value="7392")
+    remember(memory, "同事包裹取件码是8261。", subject="同事包裹", predicate="取件码", value="8261")
+    result = memory.retrieve("我的包裹取件码是多少？", user_id="user-a", case_id="case-a", scope="case",
+                             query_spec={"subject": "包裹取件码", "predicate": None})
+    assert [row["cardId"] for row in result["selected"]] == [saved["id"]]
+
+
 def test_verbatim_memory_resolves_only_constraints_present_in_saved_text(tmp_path):
     path = tmp_path / "timeline.sqlite3"
     memory = TimelineMemory(path)

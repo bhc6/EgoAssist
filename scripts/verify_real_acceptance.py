@@ -24,8 +24,9 @@ def verify(output, source):
     output.mkdir(parents=True, exist_ok=False)
     cases = [
         ("attribution-" + scenario, "verify_real_turn_attribution.py", ["--scenario", scenario])
-        for scenario in ("rapid", "barge-in", "correction", "duplicate-reconnect", "disconnect-inflight")
+        for scenario in ("rapid", "barge-in", "correction", "duplicate-reconnect", "disconnect-inflight", "automatic-completion", "cancellation")
     ] + [
+        ("answer-recovery", "verify_real_answer_recovery.py", []),
         ("latency", "benchmark_realtime_latency.py", ["--repeats", "3"]),
         ("memory", "verify_real_memory.py", []),
         ("social-memory", "verify_real_social_memory.py", []),

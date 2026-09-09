@@ -584,12 +584,22 @@ class CaseWorkLedger:
         return recovered
 
     def snapshot(self) -> dict[str, Any]:
+        answers = {}
         deliveries = {}
+        completed_text = {}
         for entry in self.journal.entries():
+            if entry.get("type") == "message" and entry.get("status") == "completed" and (entry.get("message") or {}).get("role") == "assistant":
+                completed_text[entry.get("responseId")] = entry["message"]["content"]
             if entry.get("type") == "turn_delivery":
                 deliveries[entry["turnId"]] = entry
+            elif entry.get("type") == "answer.job":
+                answers[entry["turnId"]] = {k: v for k, v in entry.items() if k not in {"instructions", "question", "context"}}
+        for answer in answers.values():
+            if answer.get("status") == "completed" and answer.get("channel") == "speech":
+                answer["text"] = completed_text.get(answer.get("responseId"), "")
         return {
-            "turnInbox": [{**turn, "delivery": deliveries.get(turn["turnId"])} for turn in self.turns().values()],
+            "turnInbox": [{**turn, "delivery": deliveries.get(turn["turnId"]), "answer": answers.get(turn["turnId"])}
+                          for turn in self.turns().values()],
             "intents": list(self.intents().values()),
             "foregroundIntentId": self.foreground_intent_id(),
             "jobs": list(self.jobs().values()),

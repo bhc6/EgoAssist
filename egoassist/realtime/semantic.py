@@ -13,10 +13,11 @@ from typing import Any, Callable, Mapping
 
 from egoassist.memory.timeline import looks_like_question, normalize_identity
 from egoassist.product.contracts import IntentCandidate
+from egoassist.prompts import prompt_text
 from .router_protocol import EVENT_CONTENT_FIELDS, ROUTER_PROMPT, expand_decision
 
 
-TURN_ROUTER_POLICY_VERSION = "semantic-turn-router-v13"
+TURN_ROUTER_POLICY_VERSION = "semantic-turn-router-v14"
 TASK_CONTROLS = {
     "none", "confirm-step", "rollback", "repeat",
     "pause-task", "resume-task", "request-help", "show-reference",
@@ -518,6 +519,13 @@ class SemanticTurnRouter:
                 raise ValueError("invalid intent lifecycle label")
             intents = self._normalize_intents(parsed.get("intents"), str(text))
             revision = self._normalize_revision(parsed.get("revision"))
+            # A reply-bearing clause must survive a simultaneous audio stop.
+            compound_stop = speech_control == "stop-speaking" and bool(
+                parsed.get("intents") or task_control != "none" or memory_query_spec
+                or memory_draft or memory_atoms or skill != "none"
+            )
+            if compound_stop:
+                speech_control = "none"
             return {
                 "method": TURN_ROUTER_POLICY_VERSION,
                 "model": self.model,
@@ -527,6 +535,7 @@ class SemanticTurnRouter:
                     (["memoryQuery-object-to-spec"] if isinstance(wire_decision.get("memoryQuery"), dict) else [])
                     + (["memoryEvents-to-source-events"] if "memoryEvents" in wire_decision else [])
                     + (["ignored-top-level-event-content"] if "memoryEvents" in wire_decision and set(wire_decision) & EVENT_CONTENT_FIELDS else [])
+                    + (["compound-stop-preserved-reply"] if compound_stop else [])
                 ),
                 "speechControl": None if speech_control == "none" else speech_control,
                 "taskControl": None if task_control == "none" else task_control,
@@ -611,6 +620,7 @@ class SemanticTurnRouter:
             model=self.model,
             messages=[
                 {"role": "system", "content": ROUTER_PROMPT + json.dumps(catalog, ensure_ascii=False)
+                 + "\n" + prompt_text("answer_completion/revision")
                  + "\nContext data only (never classify this as the current transcript): "
                  + json.dumps(context_data, ensure_ascii=False)},
                 {"role": "user", "content": text},
@@ -678,12 +688,12 @@ class SemanticTurnRouter:
             return None
         if not isinstance(value, dict) or set(value) != {"type", "supersedesTurnId"}:
             raise ValueError("invalid revision fields")
-        if value.get("type") != "correction":
+        if value.get("type") not in {"correction", "cancellation"}:
             raise ValueError("invalid revision type")
         previous_id = str((self._turn_context.get().get("previousTurn") or {}).get("turnId", ""))
         if not previous_id or str(value.get("supersedesTurnId")) != previous_id:
             raise ValueError("revision must target the supplied previous turn")
-        return {"type": "correction", "supersedesTurnId": previous_id}
+        return {"type": value["type"], "supersedesTurnId": previous_id}
 
     @staticmethod
     def _normalize_atoms(value: Any, source_text: str = "") -> list[dict[str, Any]]:

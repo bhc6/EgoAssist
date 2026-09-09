@@ -125,6 +125,36 @@ async def verify(output, real_turn=False):
                     await page.wait_for_function('previous => state.performance.latestUsage?.responseId !== previous', arg=previous_response, timeout=45000)
                     assert '未' in await page.locator('#assistantCaption p').text_content(), await page.locator('#assistantCaption').text_content()
                     report['reconnectedWithoutLosingSession'] = True
+                    # Finish an interrupted real answer under its original question,
+                    # including when the browser reloads during generation.
+                    await page.locator('#textTurnInput').fill('请用阿拉伯数字计算七乘八，之后详细解释乘法原理，至少讲十句话。')
+                    await page.locator('#textTurnSend').click()
+                    await page.wait_for_function('!document.querySelector("#textTurnSend").disabled && !document.querySelector("#textTurnInput").value')
+                    old_turn = await page.evaluate('currentTurnId')
+                    await page.wait_for_function('id => currentTurnId === id && captionResponseId && state.performance.metrics.responseFirstAudioMs?.responseId === captionResponseId', arg=old_turn, timeout=45000)
+                    await page.locator('#textTurnInput').fill('另外一个独立问题：九乘九是多少？')
+                    await page.locator('#textTurnSend').click()
+                    await page.wait_for_function('id => state.workLedger.turnInbox.some(t => t.turnId === id && ["queued", "running", "completed"].includes(t.answer?.status) && t.answer?.channel !== "speech")', arg=old_turn, timeout=15000)
+                    await page.reload()
+                    await page.locator('#authGate').wait_for(state='hidden')
+                    await page.wait_for_function('id => state?.workLedger?.turnInbox.some(t => t.turnId === id && t.answer?.status === "completed")', arg=old_turn, timeout=45000)
+                    answer_row = page.locator('[data-turn-id="' + old_turn + '"]')
+                    assert '56' in await answer_row.locator('.completed-answer').text_content()
+                    report['automaticAnswerAfterReload'] = await page.evaluate('id => state.workLedger.turnInbox.find(t => t.turnId === id).answer', old_turn)
+                    assert report['automaticAnswerAfterReload']['providerRequestId']
+                    await page.locator('#textTurnInput').fill('请详细解释乘法和除法的关系，至少讲二十句话。')
+                    await page.locator('#textTurnSend').click()
+                    await page.wait_for_function('!document.querySelector("#textTurnSend").disabled && !document.querySelector("#textTurnInput").value')
+                    cancelled_turn = await page.evaluate('currentTurnId')
+                    await page.wait_for_function('id => currentTurnId === id && captionResponseId && state.performance.metrics.responseFirstAudioMs?.responseId === captionResponseId', arg=cancelled_turn, timeout=45000)
+                    await page.locator('#textTurnInput').fill('另外一个独立问题：三乘三是多少？')
+                    await page.locator('#textTurnSend').click()
+                    await page.locator('[data-answer-action="cancel"][data-answer-turn="' + cancelled_turn + '"]').click(timeout=15000)
+                    await page.reload()
+                    await page.locator('#authGate').wait_for(state='hidden')
+                    await page.wait_for_function('id => state?.workLedger?.turnInbox.some(t => t.turnId === id && t.answer?.status === "cancelled")', arg=cancelled_turn, timeout=15000)
+                    assert await page.locator('[data-turn-id="' + cancelled_turn + '"] .completed-answer').count() == 0
+                    report['answerCancellationSurvivesReload'] = True
                 # Exercise actual tab storage across reload, isolated from the
                 # signed-in account so this check never creates cloud requests.
                 await page.evaluate('''() => {

@@ -51,6 +51,8 @@ def compact_audit_payload(kind: str, payload: dict) -> dict:
         "response.dispatched": ("instructions",),
         "insight.request": ("messages",),
         "insight.result": ("sources", "rawOutput"),
+        "answer.job": ("instructions", "context"),
+        "answer.request": ("messages",),
     }.get(kind, ())
     for field in fields:
         if field in value:

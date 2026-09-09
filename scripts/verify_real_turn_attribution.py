@@ -22,7 +22,7 @@ from real_session_support import journal
 from verify_real_skill_lifecycle import connect
 
 
-SCENARIOS = ("rapid", "barge-in", "correction", "duplicate-reconnect", "disconnect-inflight")
+SCENARIOS = ("rapid", "barge-in", "correction", "duplicate-reconnect", "disconnect-inflight", "automatic-completion", "cancellation")
 
 
 async def verify(output, scenarios=SCENARIOS):
@@ -79,7 +79,7 @@ async def verify(output, scenarios=SCENARIOS):
                     assert len([r for r in rows if r.get("type") == "turn_inbox"]) == 1
                     assert sum(e.get("deduplicated") is True for e in row["events"]) == 2
                 else:
-                    first = await send("请计算七乘八，之后详细解释乘法原理，至少讲十句话。")
+                    first = await send("请用阿拉伯数字计算七乘八，之后详细解释乘法原理，至少讲十句话。")
                     if scenario == "rapid":
                         await until(lambda e: e.get("type") == "turn_receipt" and e.get("turnId") == first)
                     else:
@@ -90,7 +90,9 @@ async def verify(output, scenarios=SCENARIOS):
                         ws, _ = await connect(client, sid)
                         await send(row["sent"][0]["text"], first)
                         await until(lambda e: e.get("type") == "turn_receipt" and e.get("deduplicated"))
-                    prefix = "我刚才口误，说错了，撤回七乘八。" if scenario == "correction" else "停下，换一个问题。"
+                    prefix = ("我刚才口误，说错了，撤回七乘八。" if scenario == "correction" else
+                              "取消刚才那个问题，不需要再回答七乘八。" if scenario == "cancellation" else
+                              "另外一个独立问题：" if scenario == "automatic-completion" else "停下，换一个问题。")
                     tid = await send(prefix + "现在请计算九乘九，只用阿拉伯数字回答结果。")
                     await until(lambda e: e.get("type") == "response_status" and e.get("status") == "completed" and e.get("origin", {}).get("turnId") == tid)
                     snapshot = await (await client.get("/api/state", params={"session": sid})).json()
@@ -99,8 +101,27 @@ async def verify(output, scenarios=SCENARIOS):
                     assert (old.get("delivery") or {}).get("status") == "interrupted", old
                     cutoff = next(e["atMs"] for e in row["events"] if e.get("type") == "turn_receipt" and e.get("turnId") == tid)
                     assert not [e for e in row["events"] if e["atMs"] > cutoff and e.get("type") in {"audio", "assistant_transcript"} and e.get("origin", {}).get("turnId") == first]
+                    if scenario in {"automatic-completion", "correction", "cancellation"}:
+                        expected = "completed" if scenario == "automatic-completion" else "cancelled"
+                        async with asyncio.timeout(45):
+                            while True:
+                                state = await (await client.get("/api/state", params={"session": sid})).json()
+                                previous = next(t for t in state["workLedger"]["turnInbox"] if t["turnId"] == first)
+                                row["previousAnswer"] = previous.get("answer")
+                                if (previous.get("answer") or {}).get("status") == expected:
+                                    break
+                                assert (previous.get("answer") or {}).get("status") != "failed", previous
+                                await asyncio.sleep(0.1)
+                        if scenario == "automatic-completion":
+                            answer = previous["answer"]
+                            assert "56" in answer["text"] and answer["channel"] == "background-text", answer
+                            assert answer["providerRequestId"] and answer["usage"], answer
+                            assert len([r for r in journal(output, sid) if r.get("type") == "answer.result" and r.get("turnId") == first]) == 1
                 spoken = [e for e in row["events"] if e.get("type") == "assistant_transcript" and e.get("done") and e.get("origin", {}).get("turnId") == tid]
-                assert spoken and "81" in spoken[-1]["text"] and "56" not in spoken[-1]["text"], spoken
+                # Audio transcripts can spell the spoken number in Chinese.
+                # Preserve formatting compliance separately from answer correctness.
+                assert spoken and spoken[-1]["text"].strip().rstrip("。.!！") in {"81", "八十一"}, spoken
+                row["arabicNumeralTranscript"] = spoken[-1]["text"].strip() == "81"
                 response_id = spoken[-1]["responseId"]
                 assert any(e.get("type") == "audio" and e.get("responseId") == response_id and e.get("audioBytesBase64") for e in row["events"])
                 assert all(e.get("responseId") and e.get("origin", {}).get("turnId") for e in row["events"] if e.get("type") in {"audio", "assistant_transcript"})

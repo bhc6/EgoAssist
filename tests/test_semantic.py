@@ -114,6 +114,18 @@ def test_semantic_router_rejects_unconstrained_output_and_fails_open():
 
     assert result["status"] == "invalid"
     assert result["speechControl"] is None
+
+
+def test_compound_stop_cannot_suppress_a_reply_bearing_decision():
+    for extra in ({"taskControl": "request-help"}, {"intents": [
+        {"kind": "foreground-dialogue", "text": "What is nine times nine?", "parameters": {}},
+    ]}):
+        router = SemanticTurnRouter("test-key", generation_call=lambda **_: provider_response(
+            decision(speechControl="stop-speaking", **extra)))
+        result = asyncio.run(router.classify("Stop. What is nine times nine?", []))
+        assert result["status"] == "classified"
+        assert result["speechControl"] is None
+        assert "compound-stop-preserved-reply" in result["protocolNormalizations"]
     assert result["taskControl"] is None
     assert result["selectedSkill"] is None
 
