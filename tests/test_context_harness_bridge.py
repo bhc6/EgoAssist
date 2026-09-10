@@ -77,8 +77,10 @@ def harness_at(path):
     )
 
 
-@pytest.mark.parametrize("mode", ["batch", "timeout", "cancel", "close-executing", "receipted", "no-tools", "proactive"])
-def test_async_tool_loop_lifecycle(tmp_path, mode):
+@pytest.mark.parametrize("mode", ["batch", "budget", "identity-reuse", "timeout", "cancel", "close-executing", "receipted", "no-tools", "proactive"])
+def test_async_tool_loop_lifecycle(tmp_path, monkeypatch, mode):
+    if mode == "budget":
+        monkeypatch.setenv("EGOASSIST_TOOL_MAX_CALLS", "1")
     async def run():
         harness = harness_at(tmp_path / (mode + ".jsonl"))
         bridge = make_bridge(harness)
@@ -90,14 +92,18 @@ def test_async_tool_loop_lifecycle(tmp_path, mode):
         class Selector:
             model = "test-selector"
 
-            async def select(self, *args):
+            async def select(self, *args, history=()):
                 selections.append(args)
                 started.set()
                 if mode == "timeout":
                     raise TimeoutError()
                 if mode == "cancel":
                     await release.wait()
-                return {"tool_calls": [{"id": "call-" + str(i), "function": {"name": "action", "arguments": "{}"}}
+                if history:
+                    if mode == "identity-reuse":
+                        return {"tool_calls": [{"id": "call-1", "function": {"name": "action", "arguments": '{"index":9}'}}]}
+                    return {"content": "completed"}
+                return {"tool_calls": [{"id": "call-" + str(i), "function": {"name": "action", "arguments": json.dumps({"index": i})}}
                                        for i in (1, 2, 1)]}
 
         def execute(name, arguments, confirmed):
@@ -134,7 +140,7 @@ def test_async_tool_loop_lifecycle(tmp_path, mode):
             while bridge._tool_runner.tasks:
                 await asyncio.sleep(0.001)
         results = [e for e in harness.journal.entries() if e["type"] == "tool_result"]
-        if mode == "batch":
+        if mode in {"batch", "identity-reuse"}:
             assert executions == [True, True]
             assert len(results) == 2 and len(bridge.conversation.responses) == 1
             assert bridge._inflight_response.origin["resultIds"] == ["result-call-1", "result-call-2"]
@@ -142,6 +148,12 @@ def test_async_tool_loop_lifecycle(tmp_path, mode):
             bridge.set_result_delivery_handler(lambda *args: deliveries.append(args))
             bridge._return_result_to_inbox(bridge._inflight_response, "test")
             assert deliveries == [("result-call-1", "pending"), ("result-call-2", "pending")]
+            if mode == "identity-reuse":
+                assert any(e["type"] == "tool.selection.finished" and e["status"] == "failed" for e in harness.journal.entries())
+        elif mode == "budget":
+            assert len(executions) == len(results) == 1
+            assert any(e["type"] == "tool.deferred" for e in harness.journal.entries())
+            assert any(e["type"] == "tool.selection.finished" and e["status"] == "budget-exhausted" for e in harness.journal.entries())
         elif mode == "close-executing":
             assert len(results) == 1 and not bridge.conversation.responses
             assert not bridge.conversation.items

@@ -463,7 +463,7 @@ class TimelineMemory:
         supersede: bool = True,
         card_id: str | None = None,
     ) -> dict[str, Any] | None:
-        text = " ".join(str(text).split()).strip()[:1000]
+        text = str(text).strip()
         if not text:
             return None
         if scope not in MEMORY_SCOPES or tier not in MEMORY_TIERS:

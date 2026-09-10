@@ -25,6 +25,7 @@ from uuid import uuid4
 import requests
 
 from .tools import tool_result_succeeded
+from .settings import integer
 from .ambient import AMBIENT_SCHEMA_VERSION, NONE_OBSERVED, UNKNOWN_LOCATION
 from .perception import (
     frame_prompt,
@@ -226,6 +227,8 @@ class _OmniPerceptionLane:
         self._connect_lock = asyncio.Lock()
         self._reconnect_scheduled = False
         self._request_started = None
+        from .settings import perception_settings
+        self.settings = perception_settings()
         self._response_starts = {}
 
     def _new_conversation(self, generation: int):
@@ -358,7 +361,7 @@ class _OmniPerceptionLane:
             })
             started = self._request_started
             def install_deadline():
-                self.loop.call_later(8, self._expire_request, started)
+                self.loop.call_later(self.settings["requestTimeoutSeconds"], self._expire_request, started)
             self.loop.call_soon_threadsafe(install_deadline)
             return True
         except Exception as exc:
@@ -372,7 +375,7 @@ class _OmniPerceptionLane:
     def _expire_request(self, started):
         if self.closed or not self.active or started != self._request_started:
             return
-        self.trace("perception.response.timeout", {"frameId": (self.active_context or {}).get("frame_id"), "timeoutSeconds": 8})
+        self.trace("perception.response.timeout", {"frameId": (self.active_context or {}).get("frame_id"), "timeoutSeconds": self.settings["requestTimeoutSeconds"]})
         self._generation += 1
         self.connected = False
         self._finish("")
@@ -496,7 +499,7 @@ class OmniBrowserBridge:
         self._cancelled_response_ids: set[str] = set()
         self._speech_started_response_ids: set[str] = set()
         self._active_response_requests: dict[str, _ResponseRequest] = {}
-        self._queued_requests: deque[_ResponseRequest] = deque()  # FIFO, max 3 slots
+        self._queued_requests: deque[_ResponseRequest] = deque()
         self._inflight_response: _ResponseRequest | None = None
         self._response_sequence = 0
         self._cancel_when_created = False
@@ -1025,8 +1028,8 @@ class OmniBrowserBridge:
                     self._trace("response.queued", {"sequence": request.sequence, "mode": "replace", "displaced": len(displaced)})
                     for old in displaced:
                         self._return_result_to_inbox(old, "queued-response-replaced")
-                elif len(queue) < 3:
-                    # interrupt=False → addition: append if there is room (max 3).
+                elif len(queue) < integer("EGOASSIST_RESPONSE_QUEUE_LIMIT", 16):
+                    # Additional replies wait in a configurable bounded queue.
                     queue.append(request)
                     self._trace("response.queued", {"sequence": request.sequence, "mode": "append", "depth": len(queue)})
                 else:

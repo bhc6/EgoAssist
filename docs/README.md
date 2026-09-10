@@ -2,6 +2,8 @@
 
 ## 当前说明
 
+- [硬编码改造验收](HARDCODING_REFACTOR_2026-09-10.md)：八项整改、后台记忆恢复、多轮工具、真实语音与尾延迟。
+
 - [项目 README](../README.md)：启动、能力、配置、验证和部署。
 - [记忆机制](../MEMORY_ARCHITECTURE.md)：实际数据流、时间语义、报告与失效模式。
 - [提示词](../egoassist/prompts/README.md)：模板与真实模型请求审计。

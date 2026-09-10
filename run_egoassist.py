@@ -7,6 +7,9 @@ from egoassist.prompts import prompt_text, prompt_catalog, compact_audit_payload
 from egoassist.memory.insights import InsightGenerator
 from egoassist.product.insight_jobs import InsightJobs, InsightQueueFull, visible_insight_jobs
 from egoassist.product.answer_jobs import AnswerJobs, answer_jobs
+from egoassist.memory.recovery import MemoryRecovery, recovery_jobs
+from egoassist.realtime.prompt_audit import audit_page
+from egoassist.realtime.settings import asr_settings, perception_settings, tool_settings
 
 import argparse
 import asyncio
@@ -51,8 +54,6 @@ from egoassist.realtime import (
     SessionJournal,
     SemanticTurnRouter,
     TurnAccumulator,
-    explicit_memory_fallback_atoms,
-    is_explicit_memory_request,
     memory_draft_candidate,
     normalize_intent_candidates,
     TaskSpec,
@@ -597,6 +598,8 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
 
     insight_executor = InsightJobs(insight_generator, insight_sources)
     answer_executor = AnswerJobs(insight_generator.api_key)
+    memory_recovery = MemoryRecovery(insight_generator.api_key, timeline,
+        lambda user, session: identity.get_context_session(user, session)["memoryPolicy"])
     user_episodics: dict[str, RealtimeEpisodeMemory] = {}
     case_episodics: dict[tuple[str, str], RealtimeEpisodeMemory] = {}
     user_runtimes: dict[str, SkillRuntime] = {}
@@ -2280,10 +2283,19 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
         identity.get_context_session(user_id, session_id)
         owner = case_owner(user_id, session_id)
         rows = owner.journal.entries()
-        actual = [row for row in rows if row.get("type") in {"control_decision", "interaction.classification_retry", "scene.request", "scene.result", "scene.question.request", "scene.question.result", "scene.transcription.request", "scene.transcription.result", "insight.request", "insight.result", "insight.job", "answer.request", "answer.result"}
-                  or row.get("eventType") in {"model.prompt", "response.dispatched", "episodic.memory.injected", "context.data.injected"}]
-        return web.json_response({"templates": prompt_catalog(), "requests": actual[-30:],
-                                  "sessionId": session_id, "totalAuditEvents": len(actual)})
+        return web.json_response({"templates": prompt_catalog(),
+            **audit_page(rows, before=request.query.get("before"), limit=int(request.query.get("limit", "30"))),
+            "sessionId": session_id, "configuration": {"asr": asr_settings(),
+            "perception": perception_settings(), "tools": tool_settings()},
+            "memoryRecovery": list(recovery_jobs(owner.journal).values())})
+
+    async def post_memory_recovery_retry(request):
+        user_id = request[user_key]["id"]
+        payload = await request.json()
+        session_id = str(payload.get("sessionId", ""))
+        identity.get_context_session(user_id, session_id)
+        memory_recovery.retry(case_owner(user_id, session_id).journal, str(payload.get("turnId", "")))
+        return web.json_response({"status": "queued"})
 
     async def post_answer_control(request):
         user_id = request[user_key]["id"]
@@ -2910,9 +2922,6 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
             transcript_event = trace_event("audio.transcript.completed", "realtime-user", {"text": transcript})
         semantic_supplied = semantic_decision is not None
         semantic_decision = dict(semantic_decision or {})
-        if semantic_decision.get("speakerRestricted"):
-            preference_enabled = False
-            episodic_settings = {**episodic_settings, "episodic_enabled": False}
         semantic_method = str(semantic_decision.get("method") or "semantic-turn-router-v4")
         speech_control = semantic_decision.get("speechControl")
         task_control = semantic_decision.get("taskControl")
@@ -3268,43 +3277,15 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
         memory_kind = semantic_decision.get("memoryKind")
         memory_consent = semantic_decision.get("memoryConsent")
         memory_case_id = harness.session_id if harness else "local-default"
-        pending_draft = None if semantic_decision.get("speakerRestricted") else timeline.pending_draft(user_id=user_scope, case_id=memory_case_id)
+        pending_draft = timeline.pending_draft(user_id=user_scope, case_id=memory_case_id)
         raw_draft_decision = semantic_decision.get("memoryDraft")
         memory_atoms = list(semantic_decision.get("memoryAtoms") or [])
-        fallback_atoms = []
-        if not semantic_decision.get("speakerRestricted") and not memory_atoms and semantic_decision.get("status") in {"unavailable", "invalid"}:
-            fallback_atoms = explicit_memory_fallback_atoms(transcript, pending_draft)
-            if fallback_atoms:
-                memory_atoms = fallback_atoms
-                first_fallback = fallback_atoms[0]
-                memory_kind = first_fallback["kind"]
-                memory_consent = first_fallback["consent"]
-                semantic_decision.update({
-                    "memoryKind": memory_kind,
-                    "memoryText": first_fallback["text"],
-                    "memoryScope": first_fallback["scope"],
-                    "memoryConsent": memory_consent,
-                    "memoryAtoms": fallback_atoms,
-                    "memoryFallback": "explicit-memory-fallback-v1",
-                })
-        if not memory_atoms and raw_draft_decision and is_explicit_memory_request(transcript):
-            structured_fallback = explicit_memory_fallback_atoms(
-                transcript, pending_draft, allow_verbatim=False,
-            )
-            if structured_fallback:
-                fallback_atoms = structured_fallback
-                memory_atoms = structured_fallback
-                first_fallback = structured_fallback[0]
-                memory_kind = first_fallback["kind"]
-                memory_consent = first_fallback["consent"]
-                semantic_decision.update({
-                    "memoryKind": memory_kind,
-                    "memoryText": first_fallback["text"],
-                    "memoryScope": first_fallback["scope"],
-                    "memoryConsent": memory_consent,
-                    "memoryAtoms": structured_fallback,
-                    "memoryFallback": "explicit-memory-fallback-v1",
-                })
+        recovery_pending = semantic_decision.get("status") in {"unavailable", "invalid"} or any(
+            error.get("component") == "memoryAtoms" for error in semantic_decision.get("componentErrors") or [])
+        if recovery_pending and harness:
+            memory_recovery.submit(harness.journal, user_id=user_scope, turn_id=turn_id or transcript_event["eventId"],
+                text=transcript, source_id=transcript_event["eventId"], clock=clock_context.prompt_payload(),
+                draft=pending_draft, scene=semantic_decision.get("sourceScene"))
         if not memory_atoms and memory_kind in {"fact", "event", "state", "preference"}:
             memory_atoms = [{
                 "kind": memory_kind,
@@ -3317,7 +3298,7 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                 "legacyMemoryKey": semantic_decision.get("memoryKey"),
             }]
         draft_decision = raw_draft_decision
-        if memory_kind == "capture" and not draft_decision and is_explicit_memory_request(transcript):
+        if memory_kind == "capture" and not draft_decision:
             draft_decision = {
                 "mode": "start", "subject": None, "predicate": "memory.value",
                 "language": None, "missingFields": ["subject", "value"],
@@ -3325,11 +3306,7 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
         draft_decision, draft_rejection = memory_draft_candidate(
             transcript, draft_decision, pending_draft,
         )
-        memory_requested = not semantic_decision.get("speakerRestricted") and bool(
-            is_explicit_memory_request(transcript)
-            or fallback_atoms
-            or draft_decision
-        )
+        memory_requested = bool(draft_decision or memory_consent == "explicit")
         ignored_draft = None
         if memory_atoms and raw_draft_decision:
             ignored_draft = {
@@ -3340,7 +3317,7 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
             written_cards = []
             skipped_reasons = []
             consumed_draft = False
-            for atom in memory_atoms[:3]:
+            for atom in memory_atoms:
                 atom_kind = atom.get("kind")
                 atom_consent = atom.get("consent") or "observed"
                 requested_scope = atom.get("scope") or "case"
@@ -3356,7 +3333,6 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                             pending_draft.get("predicate") == "memory.value"
                             and (
                                 semantic_method == "explicit-research-api-labels-v1"
-                                or atom.get("fallback") == "explicit-memory-fallback-v1"
                                 or (
                                     atom.get("scope") == "participant"
                                     and atom.get("consent") == "explicit"
@@ -3368,12 +3344,6 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                 if compatible_draft:
                     requested_scope = "participant"
                     atom_consent = "explicit"
-                scope_adjustment = None
-                if (atom_kind == "event" and requested_scope == "participant" and not compatible_draft
-                        and not is_explicit_memory_request(transcript)
-                        and semantic_method != "explicit-research-api-labels-v1"):
-                    scope_adjustment = "event-durable-consent-not-grounded"
-                    requested_scope, atom_consent = "case", "observed"
                 write_enabled = (
                     preference_enabled if requested_scope == "participant"
                     else episodic_settings["episodic_enabled"]
@@ -3392,16 +3362,11 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                 evidence_context = ground_context(atom.get("context"), transcript, clock_context)
                 evidence_context["sourceText"] = transcript
                 evidence_context["sourceSessionId"] = memory_case_id
-                if scope_adjustment:
-                    evidence_context["scopeAdjustment"] = scope_adjustment
+                evidence_context["speaker"] = (semantic_decision.get("sourceScene") or {}).get("speaker")
                 episode = target_episodic.remember(
                     atom.get("text") or transcript,
                     kind=atom_kind,
-                    source=(
-                        "semantic-memory-fallback"
-                        if atom.get("fallback") == "explicit-memory-fallback-v1"
-                        else "semantic-memory-card"
-                    ),
+                    source="semantic-memory-card",
                     skill=active_runtime.skill.name if active_runtime.skill else None,
                     task=active_runtime.task.spec.id if active_runtime.task else None,
                     evidence_event_id=transcript_event["eventId"],
@@ -3455,7 +3420,6 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                     "consent": "explicit" if consumed_draft else None,
                     "storageScope": next(iter(scopes)) if len(scopes) == 1 else "mixed",
                     "committedCardIds": committed_ids,
-                    "fallback": "explicit-memory-fallback-v1" if fallback_atoms else None,
                     "ignoredDraft": ignored_draft,
                 }
             else:
@@ -3518,6 +3482,9 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                 "reason": "explicit-memory-request-had-no-committable-value",
                 "committedCardIds": [],
             }
+        if recovery_pending:
+            timeline_write = {"action": "not-written", "status": "queued", "card": None, "cards": [],
+                              "reason": "raw-input-retained-memory-recovery-queued", "committedCardIds": []}
         if harness and timeline_write:
             memory_write_ms = round((time.perf_counter() - memory_write_started) * 1000, 3)
             card = timeline_write.get("card", {})
@@ -4209,6 +4176,7 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
         await insight_executor.delete_user(user_id)
         await invalidate_live_sessions(user_id)
         await answer_executor.delete_user(user_id)
+        await memory_recovery.delete_user(user_id)
         evidence = privacy_governance.delete_account(user_id)
         for session_id, owner in list(case_owners.items()):
             if owner.user_id == user_id:
@@ -4779,6 +4747,7 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                 if not validation.accepted or validation.observation is None:
                     return reject(validation.reason)
                 evidence = validation.observation
+                fresh_for_speech = evidence.frame_age_ms <= perception_settings()["liveMaxAgeMs"]
                 # ingest reads the flattened observation fields, which live under
                 # `evidence` on the ObservationEvidence contract.
                 watch.ingest(dict(evidence.evidence))
@@ -4786,6 +4755,7 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                 observation_entry = journal.append("ambient_observation", {
                     **evidence.model_dump(mode="json"),
                     "status": "accepted",
+                    "freshForSpeech": fresh_for_speech,
                     "rawMediaPersisted": bool(captured.media),
                 })
                 policy = current_memory_policy()
@@ -4820,7 +4790,7 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                         })
                 speech = None
                 pending = timeline.pending_draft(user_id=user_id, case_id=session_id)
-                if hypothesis.clarification and hypothesis.salient_change and ambient_options(owner)["questionsEnabled"] and not pending:
+                if fresh_for_speech and hypothesis.clarification and hypothesis.salient_change and ambient_options(owner)["questionsEnabled"] and not pending:
                     timeline.begin_draft(user_id=user_id, case_id=session_id, predicate="memory.value",
                                          missing_fields=[hypothesis.clarification], language="zh",
                                          source_ids=[observation_entry["id"]])
@@ -5422,19 +5392,25 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
             async with classification_limit:
                 try:
                     semantic = await classify_semantic_turn(text, turn_id)
-                    if semantic.get("status") == "unavailable":
+                    if semantic.get("status") in {"unavailable", "invalid"}:
                         harness.journal.append("interaction.classification_retry", {"turnId": turn_id, "decision": semantic})
                         if not ws.closed:
                             await ws.send_json({"type": "interaction_status", "turnId": turn_id, "status": "retrying"})
                         semantic = await classify_semantic_turn(text, turn_id)
-                    scene_turn = await speaker_task
+                    scene_turn = owner.scene.turns.get(turn_id)
                     if scene_turn and not scene_turn["speaker"].get("wearer"):
                         from egoassist.realtime.scene import restrict_unverified_speaker
                         semantic = restrict_unverified_speaker(semantic)
+                    semantic["sourceScene"] = scene_turn
+                    if semantic.get("status") in {"unavailable", "invalid"} or any(
+                            error.get("component") == "memoryAtoms" for error in semantic.get("componentErrors") or []):
+                        source = ledger.ensure_turn_message(turn_id, text, source=ledger.turns()[turn_id].get("source", "input-transcript"))
+                        memory_recovery.submit(harness.journal, user_id=user_id, turn_id=turn_id,
+                            text=text, source_id=source["id"], clock=clock_for_session(user_id, session_id).prompt_payload(),
+                            draft=timeline.pending_draft(user_id=user_id, case_id=session_id), scene=scene_turn)
                 finally:
-                    if not speaker_task.done():
-                        speaker_task.cancel()
-                    await asyncio.gather(speaker_task, return_exceptions=True)
+                    owner.scene.tasks.add(speaker_task)
+                    speaker_task.add_done_callback(owner.scene.tasks.discard)
             ledger.set_turn_status(
                 turn_id, "ready", detail={"semanticMethod": semantic.get("method")},
             )
@@ -6827,6 +6803,23 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
             await asyncio.gather(worker, return_exceptions=True)
 
     app.cleanup_ctx.append(answer_jobs_context)
+    async def memory_recovery_context(_app):
+        for path in sorted(user_memory_root.glob("*/sessions/*.jsonl")):
+            user_id, session_id = path.parent.parent.name, path.stem
+            try:
+                identity.get_context_session(user_id, session_id)
+                memory_recovery.recover(case_owner(user_id, session_id).journal)
+            except (ValueError, KeyError, OSError):
+                LOGGER.warning("Skipped unavailable memory recovery journal")
+        worker = asyncio.create_task(memory_recovery.run(), name="egoassist-memory-recovery")
+        try:
+            yield
+        finally:
+            worker.cancel()
+            await asyncio.gather(worker, return_exceptions=True)
+            await memory_recovery.close()
+
+    app.cleanup_ctx.append(memory_recovery_context)
     app.add_routes([
         web.post("/api/auth/register", post_register),
         web.post("/api/auth/login", post_login),
@@ -6843,6 +6836,7 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
         web.post("/api/sessions/memory-policy", post_memory_policy),
         web.get("/api/state", get_state),
         web.get("/api/prompts", get_prompt_audit),
+        web.post("/api/memory/recovery/retry", post_memory_recovery_retry),
         web.get("/api/scene/media", get_scene_media),
         web.post("/api/scene/identity", post_scene_identity),
         web.post("/api/answers/control", post_answer_control),

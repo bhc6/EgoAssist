@@ -35,4 +35,4 @@ def test_unverified_voice_needs_explicit_addressee_before_answering():
     explicit = restrict_unverified_speaker({"interaction": {"audience": "assistant", "action": "reply", "output": "speech"}})
     assert explicit["interaction"]["action"] == "reply"
     cancel = restrict_unverified_speaker({"interaction": {"audience": "assistant", "action": "cancel", "output": "silent"}})
-    assert cancel["interaction"]["action"] == "uncertain"
+    assert cancel["interaction"]["action"] == "cancel"

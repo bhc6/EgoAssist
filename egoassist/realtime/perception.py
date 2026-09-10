@@ -309,7 +309,7 @@ def validate_ambient_result(
     hypothesis: AmbientObservationHypothesis | Mapping[str, Any],
     *,
     received_at: datetime | None = None,
-    max_frame_age_ms: int = MAX_FRAME_AGE_MS,
+    max_frame_age_ms: int | None = None,
     source: str,
 ) -> PerceptionValidation:
     """Validate a task-free ambient observation.
@@ -341,7 +341,7 @@ def validate_ambient_result(
     age_ms = _frame_age_ms(captured.frame_captured_at, received)
     if age_ms < 0:
         return PerceptionValidation(False, "frame-captured-in-future")
-    if age_ms > max_frame_age_ms:
+    if max_frame_age_ms is not None and age_ms > max_frame_age_ms:
         return PerceptionValidation(False, "stale-frame")
     binding_fields = (
         "context_id",

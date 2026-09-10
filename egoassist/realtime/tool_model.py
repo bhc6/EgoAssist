@@ -23,9 +23,9 @@ class ToolModel:
             await self._session.close()
             self._session = None
 
-    async def select(self, instructions, tools, harness, origin):
+    async def select(self, instructions, tools, harness, origin, *, history=()):
         messages = [{"role": "system", "content": prompt_text("tool_use/select")},
-                    {"role": "user", "content": instructions}]
+                    {"role": "user", "content": instructions}, *history]
         request = harness.journal.append("tool.request", {
             "model": self.model, "messages": messages, "tools": tools, "origin": origin,
         })
@@ -42,7 +42,7 @@ class ToolModel:
                 payload = await response.json()
             message = payload["output"]["choices"][0]["message"]
             calls = message.get("tool_calls") or []
-            if not isinstance(calls, list) or len(calls) > 4:
+            if not isinstance(calls, list):
                 raise ValueError("Tool model returned an invalid call batch")
             for call in calls:
                 arguments = json.loads(call["function"]["arguments"])

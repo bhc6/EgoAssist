@@ -34,6 +34,7 @@ class ToolActivityView {
   render() {
     const labels = {received: "已接收", "waiting-confirmation": "等待自动恢复", recovering: "正在自动恢复",
       selecting: "正在判断工具调用", "selection-finished": "工具判断结束",
+      "budget-exhausted": "已达执行预算，仍有工作未完成",
       running: "执行中", completed: "已完成", accepted: "已受理", scheduled: "已安排", queued: "排队中",
       resolved: "已找到资料", rejected: "已拒绝", failed: "执行失败", error: "执行失败",
       unsupported: "当前不可执行", "demo-only": "仅演示", interrupted: "执行中断，结果未确认"};

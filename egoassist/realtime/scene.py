@@ -19,21 +19,16 @@ from PIL import Image
 from egoassist.prompts import prompt_text
 from .speakers import MODELS, SpeakerRegistry
 from .visual_question import VisualQuestions
+from .settings import asr_settings
 
 
 def restrict_unverified_speaker(semantic):
+    """Retain explicit commands; voice identity is evidence, not authorization."""
     value = dict(semantic)
-    for key in ("taskControl", "preferenceIntent", "memoryKind", "memoryText", "memoryKey", "memoryScope", "memoryConsent",
-                "memoryDraft", "memoryQuery", "memoryQuerySpec", "skillControl", "selectedSkill", "selectedTask", "revision"):
-        value[key] = None
-    value["memoryAtoms"] = []
-    value["intents"] = [i for i in value.get("intents", []) if i.get("kind") == "foreground-dialogue"]
-    value["intentKind"] = "foreground-dialogue"
     control = value.get("interaction") or {}
-    if not control or control.get("action") in {"cancel", "pause"}:
+    if not control:
         value["interaction"] = {"audience": "uncertain", "action": "uncertain", "output": "silent"}
-    value["speakerRestricted"] = True
-    value["executionBoundary"] = "Unconfirmed microphone speaker: conversation evidence only; no owner-memory or task mutation"
+    value["speakerAttribution"] = "unconfirmed"
     return value
 
 
@@ -59,7 +54,8 @@ class SharedScene:
         self.restored = False
         self.visual_questions = VisualQuestions(self)
         self._http = None
-        self.transcription_limit = asyncio.Semaphore(2)
+        self.asr = asr_settings()
+        self.transcription_limit = asyncio.Semaphore(self.asr["concurrency"])
         for row in journal.entries():
             if row.get("type") == "scene.result":
                 self.last_vision = (0, row)
@@ -232,14 +228,14 @@ class SharedScene:
                 wav.setframerate(16000)
                 wav.writeframes(pcm[segment["startMs"] * 32:segment["endMs"] * 32])
             ref = self._save(output.getvalue(), ".wav", "audio/wav")
-            request = {"turnId": turn_id, "audio": ref, "segment": segment, "model": "qwen3-asr-flash", "prompt": prompt_text("scene/asr")}
+            request = {"turnId": turn_id, "audio": ref, "segment": segment, **self.asr, "prompt": prompt_text("scene/asr")}
             self.journal.append("scene.transcription.request", request)
             started = time.perf_counter()
             try:
                 import dashscope
-                async with asyncio.timeout(10), self.transcription_limit:
+                async with asyncio.timeout(self.asr["timeoutSeconds"]), self.transcription_limit:
                     async with self.http().post(dashscope.base_http_api_url.rstrip("/") + "/services/aigc/multimodal-generation/generation",
-                        timeout=aiohttp.ClientTimeout(total=10),
+                        timeout=aiohttp.ClientTimeout(total=self.asr["timeoutSeconds"]),
                         headers={"Authorization": "Bearer " + self.api_key}, json={"model": request["model"],
                         "input": {"messages": [{"role": "system", "content": [{"text": request["prompt"]}]},
                                                 {"role": "user", "content": [{"audio": "data:audio/wav;base64," + base64.b64encode(output.getvalue()).decode()}]}]},
@@ -362,6 +358,7 @@ class SharedScene:
                                    "elapsedMs": round((time.monotonic() - p["started"]) * 1000),
                                    "model": os.getenv("EGOASSIST_SCENE_MODEL", "qwen3-vl-flash"), "requestTimeoutMs": 8000}
                                   for p in self.vision_progress.values()],
+                "asr": dict(self.asr),
                 "speakerModel": "available" if MODELS.available() else "unavailable",
                 "speakers": self.speakers.public(), "utterances": [{**row, "avAssociation": self.association(row)} for row in self.turns.values()],
                 "association": "Names and voice-to-person links require account confirmation; unlinked faces remain unknown"}

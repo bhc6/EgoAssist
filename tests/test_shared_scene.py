@@ -91,12 +91,13 @@ def test_different_clusters_and_omitted_speech_never_become_whole_wearer(tmp_pat
     assert not mixed["wearer"]
 
 
-def test_unknown_speech_cannot_authorize_personal_changes():
+def test_unknown_speech_preserves_commands_without_claiming_identity():
     result = restrict_unverified_speaker({"memoryText": "personal fact", "revision": {"supersedesTurnId": "a"},
         "interaction": {"action": "cancel"}, "taskControl": "start", "intents": [{"kind": "task"}]})
-    assert result["memoryText"] is None and result["revision"] is None
-    assert result["taskControl"] is None and not result["intents"]
-    assert result["interaction"]["action"] == "uncertain"
+    assert result["memoryText"] == "personal fact" and result["revision"]["supersedesTurnId"] == "a"
+    assert result["taskControl"] == "start" and result["intents"]
+    assert result["interaction"]["action"] == "cancel"
+    assert result["speakerAttribution"] == "unconfirmed"
 
 
 def test_scene_media_http_is_owner_scoped_and_history_is_complete(tmp_path):

@@ -114,10 +114,10 @@ class RealtimeEpisodeMemory:
         candidate_scope: str | None = None,
         evidence_context: dict[str, Any] | None = None,
     ) -> dict[str, Any] | None:
-        summary = " ".join(str(summary).split()).strip()[:1000]
+        summary = str(summary).strip()
         if not summary:
             return None
-        if kind in {"utterance", "query", "fact", "event", "state", "preference"} and looks_like_question(summary):
+        if source not in {"semantic-memory-card", "semantic-memory-recovery"} and kind in {"utterance", "query", "fact", "event", "state", "preference"} and looks_like_question(summary):
             return None
         user_id, case_id, configured_scope = self._identity(
             session_id=session_id, user_scope=user_scope,

@@ -54,8 +54,8 @@ function renderTurnWorkflow() {
     row("人物关联", scene?.avAssociation?.status === "account-confirmed" ? "账号已确认参考画面关联" : "声音与画面人物尚未确认关联") +
     row("请求判断", semantic ? [semantic.interaction?.audience, semantic.interaction?.action,
       semantic.selectedSkill, semantic.selectedTask].filter(Boolean).map(workKindLabel).join(" · ") || "已完成分类" : "等待分类记录") +
-    row("记忆与权限", semantic?.speakerRestricted ? "身份未确认：禁止个人记忆和任务变更" :
-      semantic?.memoryQuery ? "本轮请求检索记忆" : semantic?.memoryText ? "本轮包含记忆候选" : "本轮没有显式记忆请求") +
+    row("记忆处理", ["invalid", "unavailable"].includes(semantic?.status) ? "原话已保留，等待后台解析" :
+      semantic?.memoryQuery ? "本轮请求检索记忆" : semantic?.memoryText ? "本轮包含记忆候选" : "本轮没有记忆候选") +
     row("回答模型", answer?.model || "尚无该问题的回答模型记录") +
     row("经手模型", models.length ? models.join(" → ") : "尚无模型记录") +
     row("分类耗时", semantic?.latencyMs != null ? semantic.latencyMs + " ms" : "尚未完成测量") +

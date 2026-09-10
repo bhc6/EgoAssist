@@ -3,8 +3,8 @@ import json
 from types import SimpleNamespace
 
 from egoassist.realtime import (
-    SemanticTurnRouter, TURN_ROUTER_POLICY_VERSION, explicit_memory_fallback_atoms,
-    is_explicit_memory_request, memory_draft_candidate, normalize_intent_candidates,
+    SemanticTurnRouter, TURN_ROUTER_POLICY_VERSION,
+    memory_draft_candidate, normalize_intent_candidates,
 )
 
 
@@ -462,77 +462,20 @@ def test_router_turn_context_is_isolated_between_concurrent_classifications():
     assert supplied == {"first": "previous-1", "second": "previous-2"}
 
 
-def test_server_memory_intent_gate_rejects_questions_and_unrelated_drafts():
-    assert is_explicit_memory_request("你帮我记几个电话吧。") is True
-    assert is_explicit_memory_request("我最后再说一遍，你必须记住这个位置。") is True
-    assert is_explicit_memory_request("你现在记住了吗？") is False
-    assert is_explicit_memory_request("我手上拿的是什么？") is False
-
-    unrelated, reason = memory_draft_candidate(
-        "我手上拿的是什么？",
-        {"mode": "start", "subject": None, "predicate": "phone", "missingFields": ["subject", "value"]},
-        {"subject": None, "predicate": "phone", "missingFields": ["subject", "value"]},
-    )
-    assert unrelated is None
-    assert reason == "draft-start-without-explicit-memory-request"
+def test_model_draft_accepts_natural_request_without_keywords():
+    draft = {"mode": "start", "subject": None, "predicate": "约定", "missingFields": ["subject"]}
+    accepted, reason = memory_draft_candidate("这件事替我留个记录", draft, None)
+    assert accepted == draft and reason is None
+    rejected, reason = memory_draft_candidate("another request", draft, draft)
+    assert rejected is None and reason == "draft-start-conflicts-with-pending-draft"
 
 
 def test_server_memory_draft_continuation_requires_typed_progress():
-    pending = {"subject": None, "predicate": "phone", "missingFields": ["subject", "value"]}
+    pending = {"subject": None, "predicate": "约定", "missingFields": ["subject", "value"]}
     accepted, reason = memory_draft_candidate(
-        "是小李的电话",
-        {"mode": "continue", "subject": "小李", "predicate": "phone", "missingFields": ["value"]},
-        pending,
-    )
-    assert accepted["subject"] == "小李"
-    assert reason is None
-
+        "是小李的约定",
+        {"mode": "continue", "subject": "小李", "predicate": "约定", "missingFields": ["value"]}, pending)
+    assert accepted["subject"] == "小李" and reason is None
     rejected, reason = memory_draft_candidate(
-        "你看我做得对吗？",
-        {"mode": "continue", "subject": None, "predicate": "phone", "missingFields": ["subject", "value"]},
-        pending,
-    )
-    assert rejected is None
-    assert reason == "draft-continuation-made-no-progress"
-
-
-def test_explicit_memory_fallback_extracts_failed_trial_phone_atoms():
-    atoms = explicit_memory_fallback_atoms(
-        "呃，小陈的电话是幺三六五七八九五六三二，小李的电话是二六三五七八。"
-        "然后我们这里的报警电话是九幺幺，你都要记住。",
-        {"subject": None, "predicate": "phone", "missingFields": ["subject", "value"]},
-    )
-    assert [(item["subject"], item["predicate"], item["value"]) for item in atoms] == [
-        ("小陈", "phone", "13657895632"),
-        ("小李", "phone", "263578"),
-        ("报警电话", "phone", "911"),
-    ]
-    assert all(item["scope"] == "participant" for item in atoms)
-
-
-def test_explicit_memory_fallback_keeps_location_and_schedule_separate():
-    atoms = explicit_memory_fallback_atoms(
-        "每天中午十二点提醒我吃开瑞坦，开瑞坦放在书桌右边的架子上。",
-        {"subject": None, "predicate": "memory.value", "missingFields": ["subject", "value"]},
-    )
-    assert {(item["predicate"], item["value"]) for item in atoms} == {
-        ("medication.schedule", "每天中午十二点服用开瑞坦"),
-        ("location", "书桌右边的架子上"),
-    }
-
-
-def test_explicit_numeric_memory_does_not_invent_phone_relation():
-    for text in ("记住：我的储物柜编号是7429。", "记住：预算是1200元。"):
-        for pending in (None, {"predicate": "phone", "subject": None}):
-            atoms = explicit_memory_fallback_atoms(text, pending)
-            assert atoms[0]["text"] == text
-            assert atoms[0]["predicate"] != "phone"
-
-
-def test_explicit_memory_fallback_associates_number_before_subject():
-    atoms = explicit_memory_fallback_atoms(
-        "幺二三四五六七，记住这个号码，这是小陈的小号。",
-    )
-    assert [(item["subject"], item["predicate"], item["value"]) for item in atoms] == [
-        ("小陈", "phone", "1234567"),
-    ]
+        "无关话题", {"mode": "continue", **pending}, pending)
+    assert rejected is None and reason == "draft-continuation-made-no-progress"

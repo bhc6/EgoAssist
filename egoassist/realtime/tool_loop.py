@@ -73,45 +73,81 @@ class ToolCallRunner:
                 return
             bridge._schedule({"type": "tool_status", "callId": selection_id,
                               "tool": bridge.tool_model.model, "status": "selecting", "origin": origin})
-            selection = await bridge.tool_model.select(request.instructions, bridge._provider_tools,
-                                                      bridge._context_harness, {**origin, "selectionId": selection_id})
-            if not current():
-                outcome = "interrupted"
-                return
-            for call in selection.get("tool_calls") or []:
+            from .settings import tool_settings
+            budget = tool_settings()
+            history, receipts = [], {}
+            calls_used = 0
+            selection = {}
+            for round_index in range(budget["maxRounds"]):
+                bridge._context_harness.journal.append("tool.round", {
+                    "selectionId": selection_id, "round": round_index + 1, "budget": budget,
+                    "callsUsed": calls_used, "origin": origin, "model": bridge.tool_model.model})
+                selection = await bridge.tool_model.select(
+                    request.instructions, bridge._provider_tools, bridge._context_harness,
+                    {**origin, "selectionId": selection_id, "round": round_index + 1}, history=history)
                 if not current():
                     outcome = "interrupted"
                     return
-                name, arguments = call["function"]["name"], json.loads(call["function"]["arguments"])
-                call_id = call["id"]
-                signature = (name, json.dumps(arguments, sort_keys=True, ensure_ascii=False, separators=(",", ":")))
-                claim, _ = bridge._claim_tool_call(call_id, signature)
-                if claim != "new":
-                    if claim != "duplicate":
+                calls = selection.get("tool_calls") or []
+                if not calls:
+                    break
+                history.append({"role": "assistant", "content": selection.get("content") or "", "tool_calls": calls})
+                for index, call in enumerate(calls):
+                    if not current():
+                        outcome = "interrupted"
+                        return
+                    if calls_used >= budget["maxCalls"]:
+                        outcome = "budget-exhausted"
+                        bridge._context_harness.journal.append("tool.deferred", {
+                            "selectionId": selection_id, "origin": origin, "pendingCalls": calls[index:], "budget": budget})
+                        break
+                    name, arguments = call["function"]["name"], json.loads(call["function"]["arguments"])
+                    call_id = call["id"]
+                    signature = (name, json.dumps(arguments, sort_keys=True, ensure_ascii=False, separators=(",", ":")))
+                    claim, cached = bridge._claim_tool_call(call_id, signature)
+                    if claim not in {"new", "duplicate"}:
                         raise ValueError("Tool call identity was reused with different arguments")
-                    continue
-                bridge._context_harness.record_tool_call(call_id, name, arguments, metadata={"origin": origin})
-                bridge._context_harness.journal.append("tool_execution", {
-                    "callId": call_id, "accepted": True, "policy": "automatic", "origin": origin,
-                }, idempotency_key=f"tool-execution:{call_id}")
-                bridge._schedule({"type": "tool_status", "callId": call_id, "tool": name,
-                                  "arguments": arguments, "origin": origin, "status": "running"})
-                self.tasks[asyncio.current_task()] = True
-                try:
-                    result = await asyncio.to_thread(bridge._invoke_tool_handler, name, arguments, True, origin)
-                    if not isinstance(result, dict):
-                        raise ValueError("tool handler must return a result object")
-                    is_error = result.get("status") in {"failed", "error", "interrupted", "rejected", "unsupported"}
-                except Exception as exc:
-                    result, is_error = {"status": "error", "error": str(exc)}, True
-                committed = bridge._complete_tool_call(call_id, name, result, is_error, False, origin,
-                                                       continue_response=False, publish_context=current())
-                self.tasks[asyncio.current_task()] = False
-                if committed.get("resultId"):
-                    result_ids.append(committed["resultId"])
+                    # Model retries must not execute the same effect a second time.
+                    if signature in receipts:
+                        result = receipts[signature]
+                    else:
+                        if claim != "new":
+                            raise ValueError("Tool call identity was reused outside this execution")
+                        calls_used += 1
+                        bridge._context_harness.record_tool_call(call_id, name, arguments, metadata={"origin": origin})
+                        bridge._context_harness.journal.append("tool_execution", {
+                            "callId": call_id, "accepted": True, "policy": "automatic", "origin": origin,
+                        }, idempotency_key=f"tool-execution:{call_id}")
+                        bridge._schedule({"type": "tool_status", "callId": call_id, "tool": name,
+                                          "arguments": arguments, "origin": origin, "status": "running"})
+                        self.tasks[asyncio.current_task()] = True
+                        try:
+                            result = await asyncio.to_thread(bridge._invoke_tool_handler, name, arguments, True, origin)
+                            if not isinstance(result, dict):
+                                raise ValueError("tool handler must return a result object")
+                            is_error = result.get("status") in {"failed", "error", "interrupted", "rejected", "unsupported"}
+                        except Exception as exc:
+                            result, is_error = {"status": "error", "error": str(exc)}, True
+                        committed = bridge._complete_tool_call(call_id, name, result, is_error, False, origin,
+                                                               continue_response=False, publish_context=current())
+                        self.tasks[asyncio.current_task()] = False
+                        if committed.get("resultId"):
+                            result_ids.append(committed["resultId"])
+                        receipts[signature] = result
+                    history.append({"role": "tool", "tool_call_id": call_id, "name": name,
+                                    "content": json.dumps(result, ensure_ascii=False)})
+                if outcome == "budget-exhausted":
+                    break
+            else:
+                outcome = "budget-exhausted"
             if current():
-                bridge.inject_context_data("tool_selection", {"content": selection.get("content"), "origin": origin})
-                reply(request.instructions + "\n" + prompt_text("tool_use/after_selection"))
+                bridge.inject_context_data("tool_selection", {"content": selection.get("content"), "origin": origin,
+                                           "status": outcome, "callsUsed": calls_used, "budget": budget})
+                if outcome == "budget-exhausted":
+                    bridge._context_harness.journal.append("tool.budget.exhausted", {
+                        "origin": origin, "selectionId": selection_id, "callsUsed": calls_used, "budget": budget})
+                reply(request.instructions + "\n" + prompt_text(
+                    "tool_use/budget_exhausted" if outcome == "budget-exhausted" else "tool_use/after_selection"))
         except asyncio.CancelledError:
             outcome = "interrupted"
         except Exception as exc:

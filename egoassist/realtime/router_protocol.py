@@ -25,11 +25,11 @@ def expand_decision(parsed):
     result = {**LEGACY_DEFAULTS, **{k: v for k, v in parsed.items() if k != 'v' and k not in ignored}}
     if 'memoryEvents' in result:
         events = result.pop('memoryEvents')
-        if not isinstance(events, list) or len(events) > 3 or result.get('memoryAtoms'):
-            raise ValueError('declare at most three memory events without memoryAtoms')
+        if not isinstance(events, list) or not isinstance(result.get('memoryAtoms', []), list):
+            raise ValueError('memory events and atoms must be lists')
         if any(not isinstance(item, dict) or set(item) - {'scope', 'consent', 'context', 'text'} for item in events):
             raise ValueError('invalid memory event envelope')
-        result['memoryAtoms'] = [{'kind': 'event', **item} for item in events]
+        result['memoryAtoms'] = [*result.get('memoryAtoms', []), *[{'kind': 'event', **item} for item in events]]
     query = result.get('memoryQuery')
     # A bounded read-only query envelope has the same meaning as the canonical
     # query spec. Conflicting envelopes and unknown fields remain invalid.

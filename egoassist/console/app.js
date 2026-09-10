@@ -40,6 +40,9 @@ const insightPhases = {queued: "等待执行名额", collecting: "读取原始�
   "waiting-provider": "等待模型响应", validating: "校验输出与来源", finished: "处理结束"};
 let promptAuditSignature = "";
 let promptAuditPolling = false;
+let promptAuditSession = null;
+let promptAuditCursor = null;
+const promptAuditRows = new Map();
 let stateRefreshPendingAt = 0;
 let pdfjs = null, artifactDocument = null, artifactPageNumber = 1, artifactScale = 1;
 let artifactRenderGeneration = 0, artifactRenderTask = null, pendingHumanHelpPreview = null;
@@ -102,6 +105,11 @@ function showLogin() {
   $("#proactiveSuggestions").checked = false;
   $("#insightResults").replaceChildren();
   $("#actualPromptRequests").replaceChildren();
+  promptAuditRows.clear(); promptAuditSession = null; promptAuditCursor = null;
+  $("#memoryRecoveryJobs").replaceChildren();
+  $("#modelConfiguration").textContent = "";
+  $("#promptAuditCount").textContent = "";
+  $("#olderPromptRequests").hidden = true;
   document.body.classList.add("auth-required");
   $("#authGate").hidden = false;
   $("#authPassword").value = "";
@@ -1701,21 +1709,42 @@ setInterval(() => {
   if (insightJobs.some(job => ["queued", "running"].includes(job.status)) || Date.now() - insightLastPoll > 5000) refreshInsightJobs();
 }, 1200);
 
-async function refreshPromptAudit() {
+async function refreshPromptAudit(older = false) {
+  older = older === true;
   const sid = selectedSessionId;
   if (!currentUser || !sid || promptAuditPolling) return;
   promptAuditPolling = true;
   try {
-    const data = await request("/api/prompts?session=" + encodeURIComponent(sid));
+    if (promptAuditSession !== sid) {
+      promptAuditSession = sid; promptAuditCursor = null; promptAuditRows.clear();
+    }
+    const data = await request("/api/prompts?session=" + encodeURIComponent(sid) +
+      (older && promptAuditCursor ? "&before=" + encodeURIComponent(promptAuditCursor) : ""));
     if (sid !== selectedSessionId || !currentUser) return;
-    const signature = JSON.stringify([sid, data.requests.at(-1)?.id, data.templates.map(item => item.sha256)]);
-    if (signature === promptAuditSignature) return;
-    promptAuditSignature = signature;
-    $("#actualPromptRequests").innerHTML = data.requests.slice().reverse().map(item => "<details><summary>" +
+    const first = promptAuditRows.size === 0;
+    const overlaps = data.requests.some(item => promptAuditRows.has(item.id));
+    for (const item of data.requests) promptAuditRows.set(item.id, item);
+    if (older || first || !overlaps) promptAuditCursor = data.nextBefore;
+    const container = $("#actualPromptRequests");
+    const open = new Set([...container.querySelectorAll("details[open]")].map(el => el.dataset.id));
+    container.innerHTML = [...promptAuditRows.values()].sort((a,b) => b.timestamp.localeCompare(a.timestamp)).map(item =>
+      '<details data-id="' + esc(item.id) + '"' + (open.has(item.id) ? " open" : "") + "><summary>" +
       esc((item.eventType || item.type) + " · " + item.timestamp + " · " + item.id) + "</summary><pre>" +
       esc(JSON.stringify(item, null, 2)) + "</pre></details>").join("") || "暂无已发送请求";
-    $("#promptTemplates").innerHTML = data.templates.map(item => "<details><summary>" + esc(item.path) +
-      "</summary><small>SHA256 " + esc(item.sha256) + "</small><pre>" + esc(JSON.stringify(item.templates, null, 2)) + "</pre></details>").join("");
+    $("#promptAuditCount").textContent = "已加载 " + promptAuditRows.size + " / " + data.totalAuditEvents + " 条";
+    $("#olderPromptRequests").hidden = !promptAuditCursor;
+    $("#modelConfiguration").textContent = JSON.stringify(data.configuration, null, 2);
+    const statuses = {queued:"等待后台记忆解析", running:"正在解析原始记录", failed:"解析失败，原话已保留", completed:"解析完成"};
+    $("#memoryRecoveryJobs").innerHTML = (data.memoryRecovery || []).map(job =>
+      '<p>' + esc((statuses[job.status] || job.status) + " · " + job.text + " · 尝试 " + job.attempt +
+      (job.error ? " · " + job.error : "") + (job.cardIds ? " · 保存 " + job.cardIds.length + " 条" : "")) +
+      (job.status === "failed" ? '<button data-retry-memory="' + esc(job.turnId) + '">重试解析</button>' : "") + "</p>").join("");
+    const signature = JSON.stringify(data.templates.map(item => item.sha256));
+    if (signature !== promptAuditSignature) {
+      promptAuditSignature = signature;
+      $("#promptTemplates").innerHTML = data.templates.map(item => "<details><summary>" + esc(item.path) +
+        "</summary><small>SHA256 " + esc(item.sha256) + "</small><pre>" + esc(JSON.stringify(item.templates, null, 2)) + "</pre></details>").join("");
+    }
   } catch (error) { if (sid === selectedSessionId) $("#actualPromptRequests").textContent = error.message; }
   finally { promptAuditPolling = false; }
 }
@@ -1727,6 +1756,14 @@ $("#proactiveSuggestions").onchange = async event => {
   catch (error) { event.target.checked = !enabled; $("#insightStatus").textContent = error.message; }
 };
 $("#refreshPromptAudit").onclick = refreshPromptAudit;
+$("#olderPromptRequests").onclick = () => refreshPromptAudit(true);
+$("#memoryRecoveryJobs").onclick = async event => {
+  const button = event.target.closest("[data-retry-memory]");
+  if (!button) return;
+  button.disabled = true;
+  try { await post("/api/memory/recovery/retry", {sessionId:selectedSessionId, turnId:button.dataset.retryMemory}); await refreshPromptAudit(); }
+  catch (error) { button.disabled = false; $("#promptAuditCount").textContent = error.message; }
+};
 $("#promptAuditDetails").ontoggle = refreshPromptAudit;
 $("#promptTemplatesDetails").ontoggle = refreshPromptAudit;
 setInterval(() => { if ($("#promptAuditDetails").open || $("#promptTemplatesDetails").open) refreshPromptAudit(); maybeSuggest(); }, 3000);

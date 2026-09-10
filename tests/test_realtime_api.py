@@ -93,7 +93,7 @@ def semantic_result(text, *, selected_skill=None):
     }
 
 
-def test_model_consent_label_cannot_promote_a_field_note_event(tmp_path, monkeypatch):
+def test_semantic_memory_request_does_not_require_save_keyword(tmp_path, monkeypatch):
     install_queue_test_bridge(monkeypatch)
 
     async def classify(_self, text, catalog):
@@ -112,15 +112,13 @@ def test_model_consent_label_cannot_promote_a_field_note_event(tmp_path, monkeyp
             async with client.ws_connect('/ws/realtime?session=' + sid) as ws:
                 await _recv(ws)
                 await _recv(ws)
-                await ws.send_json({"type": "control", "transcript": "请整理现场记录：张岚收到了样机。"})
+                await ws.send_json({"type": "control", "transcript": "这件事替我留个记录：张岚收到了样机。"})
                 async with asyncio.timeout(3):
                     while True:
                         message = await ws.receive_json()
-                        if message.get("type") == "state" and message["state"]["episodicMemory"]["timelineViews"]["case"]["recent"]:
+                        if message.get("type") == "state" and message["state"]["episodicMemory"]["timelineViews"]["participant"]["recent"]:
                             views = message["state"]["episodicMemory"]["timelineViews"]
-                            assert views["participant"]["recent"] == []
-                            evidence = views["case"]["recent"][0]["metadata"]["evidenceContext"]
-                            assert evidence["scopeAdjustment"] == "event-durable-consent-not-grounded"
+                            assert "张岚" in views["participant"]["recent"][0]["text"]
                             break
 
     asyncio.run(scenario())
@@ -449,99 +447,35 @@ def test_grounded_turn_claims_follow_committed_memory_state(tmp_path, monkeypatc
     asyncio.run(scenario())
 
 
-def test_failed_trial_sequence_keeps_draft_advisory_and_falls_back_to_durable_atoms(tmp_path, monkeypatch):
-    instances = install_queue_test_bridge(monkeypatch)
-
+def test_failed_semantic_input_is_retained_without_synthetic_facts(tmp_path, monkeypatch):
+    install_queue_test_bridge(monkeypatch)
     async def classify(_self, text, catalog):
         result = semantic_result(text)
-        result.update({
-            "memoryKind": None,
-            "memoryText": None,
-            "memoryKey": None,
-            "memoryScope": None,
-            "memoryConsent": None,
-            "memoryAtoms": [],
-            "memoryDraft": None,
-            "memoryQuerySpec": None,
-        })
-        if text == "你帮我记几个电话吧。":
-            result.update({
-                "memoryKind": "capture",
-                "memoryScope": "participant",
-                "memoryConsent": "explicit",
-                "memoryDraft": {
-                    "mode": "start", "subject": None, "predicate": "phone",
-                    "language": "zh", "missingFields": ["subject", "value"],
-                },
-            })
-        elif text == "我手上拿的是什么？":
-            result["memoryDraft"] = {
-                "mode": "start", "subject": None, "predicate": "phone",
-                "language": "zh", "missingFields": ["subject", "value"],
-            }
-        else:
-            result.update({"status": "unavailable", "skillStatus": "unavailable"})
+        result.update(status="unavailable", memoryKind=None, memoryText=None, memoryConsent=None,
+                      memoryScope=None, memoryAtoms=[], memoryDraft=None)
         return result
-
     monkeypatch.setattr(run_egoassist.SemanticTurnRouter, "classify", classify)
-
     async def scenario():
-        app = create_app(
-            str(BUILTIN_SKILLS_ROOT), None,
-            str(tmp_path / "memory.json"), "test-realtime", "Ethan",
-        )
+        app = create_app(str(BUILTIN_SKILLS_ROOT), None, str(tmp_path / "memory.json"), "test-realtime", "Ethan")
         async with TestClient(TestServer(app)) as client:
-            user = await register_client(client, "failed-trial-fallback")
-            session_id = (await (await client.post("/api/sessions")).json())["session"]["id"]
-            ws = await client.ws_connect(f"/ws/realtime?session={session_id}")
-            assert (await ws.receive_json())["type"] == "ready"
-            assert (await ws.receive_json())["type"] == "state"
-
-            await ws.send_json({"type": "control", "transcript": "你帮我记几个电话吧。"})
-            first = [await _recv(ws) for _ in range(4)]
-            assert [item["type"] for item in first] == [
-                "user_transcript", "state", "interrupted", "memory_status",
-            ]
-            assert first[-1]["status"] == "needs-input"
-            assert instances[0].requests == []
-
-            timeline = TimelineMemory(tmp_path / "timeline.sqlite3")
-            draft_id = timeline.pending_draft(user_id=user["id"], case_id=session_id)["id"]
-
-            await ws.send_json({"type": "control", "transcript": "我手上拿的是什么？"})
-            second = [await _recv(ws) for _ in range(3)]
-            assert [item["type"] for item in second] == ["user_transcript", "state", "interrupted"]
-            assert timeline.pending_draft(user_id=user["id"], case_id=session_id)["id"] == draft_id
-
-            phone_turn = (
-                "小陈的电话是幺三六五七八九五六三二，小李的电话是二六三五七八，"
-                "这里的报警电话是九幺幺，你都要记住。"
-            )
-            await ws.send_json({"type": "control", "transcript": phone_turn})
-            third = [await _recv(ws) for _ in range(5)]
-            retry = next(item for item in third if item["type"] == "interaction_status")
-            assert retry["status"] == "retrying"
-            third = [item for item in third if item["type"] != "interaction_status"]
-            assert [item["type"] for item in third] == [
-                "user_transcript", "state", "interrupted", "memory_status",
-            ]
-            assert third[-1]["status"] == "committed"
-            assert len(third[-1]["committedCardIds"]) == 3
-            assert "小陈的电话号码是13657895632" in third[-1]["message"]
-            assert len(instances[0].requests) == 1
+            user = await register_client(client, "raw-recovery")
+            sid = (await (await client.post("/api/sessions")).json())["session"]["id"]
+            ws = await client.ws_connect(f"/ws/realtime?session={sid}")
+            await ws.receive_json()
+            await ws.receive_json()
+            text = "记住，今天没有吃过药。"
+            await ws.send_json({"type": "control", "transcript": text})
+            async with asyncio.timeout(8):
+                while True:
+                    await asyncio.sleep(0.05)
+                    audit = await (await client.get("/api/prompts", params={"session": sid})).json()
+                    if audit["memoryRecovery"]:
+                        break
+            job = audit["memoryRecovery"][0]
+            assert job["text"] == text and job["status"] == "queued"
+            assert not TimelineMemory(tmp_path / "timeline.sqlite3").cards(user_id=user["id"], scope="participant")
             await ws.close()
-            return user["id"], session_id
-
-    user_id, session_id = asyncio.run(scenario())
-    timeline = TimelineMemory(tmp_path / "timeline.sqlite3")
-    cards = timeline.cards(user_id=user_id, scope="participant")
-    assert {(card["subject"], card["predicate"], card["value"]) for card in cards} == {
-        ("报警电话", "phone", "911"),
-        ("小李", "phone", "263578"),
-        ("小陈", "phone", "13657895632"),
-    }
-    assert all(card["metadata"]["source"] == "semantic-memory-fallback" for card in cards)
-    assert timeline.pending_draft(user_id=user_id, case_id=session_id) is None
+    asyncio.run(scenario())
 
 
 def test_participant_memory_survives_restart_when_case_timeline_is_disabled(tmp_path):

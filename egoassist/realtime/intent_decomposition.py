@@ -50,7 +50,7 @@ def normalize_intent_candidates(
     raw = semantic.get("intents")
     candidates: list[IntentCandidate] = []
     if isinstance(raw, list):
-        for item in raw[:4]:
+        for item in raw:
             candidates.append(IntentCandidate.model_validate(item))
     if not candidates:
         candidates = [IntentCandidate(
@@ -69,7 +69,7 @@ def normalize_intent_candidates(
                 delay = int(delay) if delay is not None else _delay_seconds(candidate.text)
             except (TypeError, ValueError):
                 delay = None
-            if delay is not None and 1 <= delay <= 86_400:
+            if delay is not None and 1 <= delay <= 31_536_000:
                 parameters["delaySeconds"] = delay
             else:
                 parameters.pop("delaySeconds", None)

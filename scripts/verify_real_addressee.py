@@ -20,7 +20,7 @@ CASES = [
     ("quoted-request", "小王刚才说，助手请告诉我天气，他是在举例。", "silent"),
     ("negated-address", "我不是在问助手，小李，我是在问你会议几点开始。", "silent"),
     ("live-ambiguous", "那算了，我觉得不如开腾讯会议，然后开开电脑。明天再说。", "silent"),
-    ("unknown-write", "助手，记住我的银行卡密码是123456。", "no-write"),
+    ("unknown-write", "助手，这件事替我留个记录：我今天没有吃过药。", "write"),
 ]
 
 
@@ -36,11 +36,13 @@ async def verify(output):
             raw = await router.classify(text, [])
             guarded = restrict_unverified_speaker(raw)
             control = guarded.get("interaction") or {}
-            passed = raw["status"] == "classified" and not guarded.get("memoryAtoms") and not guarded.get("taskControl")
+            passed = raw["status"] == "classified"
             if expected == "reply":
                 passed = passed and control.get("audience") == "assistant" and control.get("action") == "reply" and control.get("output") == "speech"
             elif expected == "silent":
                 passed = passed and control.get("output") == "silent"
+            elif expected == "write":
+                passed = passed and bool(guarded.get("memoryAtoms")) and control.get("audience") == "assistant"
             row = {"case": name, "text": text, "expected": expected, "passed": passed, "raw": raw, "guarded": guarded}
             report["cases"].append(row)
             print(json.dumps({"case": name, "passed": passed, "control": control, "ms": raw["latencyMs"]}), flush=True)
