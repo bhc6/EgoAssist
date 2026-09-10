@@ -109,6 +109,24 @@ def test_retention_deletes_expired_transcripts_and_reports_counts(tmp_path):
     assert applied["evidence"] == "counts-only"
 
 
+def test_global_retention_keeps_other_accounts_with_longer_policy(tmp_path):
+    database = ProductDatabase(tmp_path / "retention.sqlite3")
+    database.create_schema()
+    now = datetime.now(timezone.utc)
+    for user, days in (("short", 1), ("long", 30)):
+        database.set_retention_policy(user, "transcript", days)
+        with database.session() as session:
+            session.add(ConversationTurnRow(
+                turn_id=user, user_id=user, session_id=user, text="retained original",
+                source="test", recorded_at=now - timedelta(days=2),
+            ))
+    assert database.apply_retention(now=now)["deleted"]["transcript"] == 1
+    with database.session() as session:
+        assert session.get(ConversationTurnRow, "short") is None
+        assert session.get(ConversationTurnRow, "long") is not None
+    database.close()
+
+
 def test_memory_retention_uses_timeline_owner(tmp_path):
     user_id, identity, database, timeline, service = _governance(tmp_path)
     timeline.remember("old memory", user_id=user_id, case_id=None, scope="participant", kind="fact")

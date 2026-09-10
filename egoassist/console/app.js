@@ -32,6 +32,8 @@ let insightLastPoll = 0;
 const insightPhases = {queued: "等待执行名额", collecting: "读取原始记录", preparing: "准备报告证据",
   "waiting-provider": "等待模型响应", validating: "校验输出与来源", finished: "处理结束"};
 let promptAuditSignature = "";
+let promptAuditPolling = false;
+let stateRefreshPendingAt = 0;
 let pdfjs = null, artifactDocument = null, artifactPageNumber = 1, artifactScale = 1;
 let artifactRenderGeneration = 0, artifactRenderTask = null, pendingHumanHelpPreview = null;
 let mirrorCamera = localStorage.getItem("egoassist.camera.mirror") !== "false";
@@ -41,17 +43,12 @@ const VIDEO_BUFFER_HIGH_WATER = 128 * 1024;
 let droppedAudioChunks = 0;
 let droppedVideoFrames = 0;
 async function request(path, options = {}) {
-  const response = await fetch(path, options);
-  const body = await response.text();
-  let result;
-  try { result = JSON.parse(body); }
-  catch (_) { throw Error((response.ok ? "服务返回了无效 JSON：" : "请求失败：") + body.slice(0, 180)); }
-  if (response.status === 401) {
-    showLogin();
-    throw Error("登录状态已失效");
+  try {
+    return await fetchJSON(path, options);
+  } catch (error) {
+    if (error.status === 401) showLogin();
+    throw error;
   }
-  if (!response.ok) throw Error(result.message || result.error || "请求失败");
-  return result;
 }
 
 async function post(path, data = {}) {
@@ -220,7 +217,7 @@ async function refreshPrivacy() {
 }
 
 async function downloadPrivacyExport() {
-  const response = await fetch("/api/privacy/export");
+  const response = await fetch("/api/privacy/export", {signal: AbortSignal.timeout(60000)});
   if (!response.ok) throw Error("导出失败");
   const blob = await response.blob();
   const link = document.createElement("a");
@@ -612,18 +609,13 @@ function renderAmbient() {
 }
 
 async function setAmbientConsent(granted) {
-  const response = await fetch("/api/ambient/consent", {
-    method: "POST",
-    headers: {"Content-Type": "application/json"},
-    body: JSON.stringify({granted}),
-  });
-  const payload = await response.json();
-  if (payload.error) {
-    alert(payload.error);
-    return;
+  try {
+    const payload = await post("/api/ambient/consent", {granted});
+    ambientState = {...(ambientState || {}), ...payload.ambient};
+    renderAmbient();
+  } catch (error) {
+    alert(error.message);
   }
-  ambientState = {...(ambientState || {}), ...payload.ambient};
-  renderAmbient();
 }
 
 function defaultToolArguments(declaration) {
@@ -1015,6 +1007,7 @@ async function connectRealtimeSession(generation, media, retryAttempt) {
   ws.onmessage = event => {
     if (socket !== ws || generation !== connectionGeneration) return;
     const message = JSON.parse(event.data);
+    if (message.type === "state") stateRefreshPendingAt = 0;
     if (["audio", "assistant_transcript"].includes(message.type) && stoppedSpeechResponses.has(message.responseId)) return;
     if (["audio", "assistant_transcript", "response_status"].includes(message.type) &&
         message.origin?.turnId && currentTurnId && message.origin.turnId !== currentTurnId && !message.origin.background) return;
@@ -1609,7 +1602,8 @@ setInterval(() => {
 
 async function refreshPromptAudit() {
   const sid = selectedSessionId;
-  if (!currentUser || !sid) return;
+  if (!currentUser || !sid || promptAuditPolling) return;
+  promptAuditPolling = true;
   try {
     const data = await request("/api/prompts?session=" + encodeURIComponent(sid));
     if (sid !== selectedSessionId || !currentUser) return;
@@ -1622,6 +1616,7 @@ async function refreshPromptAudit() {
     $("#promptTemplates").innerHTML = data.templates.map(item => "<details><summary>" + esc(item.path) +
       "</summary><small>SHA256 " + esc(item.sha256) + "</small><pre>" + esc(JSON.stringify(item.templates, null, 2)) + "</pre></details>").join("");
   } catch (error) { if (sid === selectedSessionId) $("#actualPromptRequests").textContent = error.message; }
+  finally { promptAuditPolling = false; }
 }
 
 $("#insightForm").onsubmit = event => { event.preventDefault(); generateInsight(); };
@@ -1638,9 +1633,18 @@ setInterval(() => { if ($("#promptAuditDetails").open || $("#promptTemplatesDeta
 boot().catch(error => { showLogin(); $("#authError").textContent = error.message; });
 setInterval(async () => {
   if (socket?.readyState === WebSocket.OPEN) {
+    if (stateRefreshPendingAt) {
+      if (Date.now() - stateRefreshPendingAt > 8000) {
+        $("#textTurnError").textContent = "状态更新超过 8 秒，等待服务恢复；已受理任务仍保留。";
+      }
+      return;
+    }
+    if (socket.bufferedAmount > VIDEO_BUFFER_HIGH_WATER) return;
+    stateRefreshPendingAt = Date.now();
     socket.send(JSON.stringify({type: "refresh"}));
     return;
   }
+  stateRefreshPendingAt = 0;
   if (!currentUser || !selectedSessionId || detachedStatePolling || Date.now() - lastDetachedStatePoll < 3000) return;
   const sid = selectedSessionId, uid = currentUser.id;
   detachedStatePolling = true;

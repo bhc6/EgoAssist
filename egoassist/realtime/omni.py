@@ -1540,7 +1540,10 @@ class OmniBrowserBridge:
             "role": "user",
             "content": [{"type": "input_text", "text": text}],
         })
-        self._trace("context.data.injected", {"label": label, "tokensEstimate": max(1, len(text) // 4)})
+        self._trace("context.data.injected", {
+            "label": label, "tokensEstimate": max(1, len(text) // 4),
+            "content": text, "claimBoundary": "Sent to provider; not an acknowledgement of model use.",
+        })
         return True
 
     def _response_text_delta(self, payload: dict[str, Any]) -> None:

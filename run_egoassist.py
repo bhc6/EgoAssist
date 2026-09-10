@@ -449,9 +449,8 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
     reminder_start_tasks: set[asyncio.Task] = set()
 
     # --- Ambient (task-free) observation -----------------------------------
-    # Off by default. ADR 007: ambient observation relaxes one ADR 005 property
-    # (a frame may reach the provider with no user-initiated task), so it must be
-    # switched on deliberately, per deployment, with a watchlist on disk.
+    # Enabled by default, but no frame reaches the provider without live account
+    # consent and an applicable watchlist (ADR 007).
     ambient_settings: dict[str, Any] = {
         "enabled": _env_flag("EGOASSIST_AMBIENT_MODE", True),
         "watchlist_path": os.getenv("EGOASSIST_AMBIENT_WATCHLIST", "").strip(),
@@ -2263,7 +2262,7 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
         owner = case_owner(user_id, session_id)
         rows = owner.journal.entries()
         actual = [row for row in rows if row.get("type") in {"control_decision", "interaction.classification_retry", "scene.request", "scene.result", "scene.question.request", "scene.question.result", "scene.transcription.request", "scene.transcription.result", "insight.request", "insight.result", "insight.job", "answer.request", "answer.result"}
-                  or row.get("eventType") in {"model.prompt", "response.dispatched", "episodic.memory.injected"}]
+                  or row.get("eventType") in {"model.prompt", "response.dispatched", "episodic.memory.injected", "context.data.injected"}]
         return web.json_response({"templates": prompt_catalog(), "requests": actual[-30:],
                                   "sessionId": session_id, "totalAuditEvents": len(actual)})
 
@@ -4130,7 +4129,12 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
 
     async def get_privacy_export(request):
         user_id = request[user_key]["id"]
-        response = web.json_response(privacy_governance.export_account(user_id))
+        # Media export and JSON serialization can be large; keep them off the
+        # event loop used for audio delivery and provider deadlines.
+        content = await asyncio.to_thread(
+            lambda: json.dumps(privacy_governance.export_account(user_id), ensure_ascii=False),
+        )
+        response = web.Response(text=content, content_type="application/json")
         response.headers["Content-Disposition"] = 'attachment; filename="egoassist-account-export.json"'
         return response
 
@@ -6481,7 +6485,6 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                     if not hasattr(bridge, "confirm_tool") or not bridge.confirm_tool(call_id, accepted):
                         await ws.send_json({"type": "error", "message": "pending tool call not found"})
                 elif kind in {"state", "refresh"}:
-                    refresh_harness_context(bridge, harness, session_runtime)
                     await ws.send_json({"type": "state", "state": state(
                         session_runtime,
                         routing_override=session_routing,

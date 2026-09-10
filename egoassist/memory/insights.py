@@ -59,12 +59,18 @@ def collect_sources(paths: list[Path], period: dict, *, limit: int = 300, char_b
                 if stamp.tzinfo is None:
                     raise ValueError("missing record timezone")
                 if lower <= stamp < upper:
+                    local_clock = ClockContext.current(
+                        period.get("timezone", "UTC"),
+                        int(lower.utcoffset().total_seconds() // 60), now_utc=stamp,
+                    )
                     records.append({"sourceId": path.stem + ":" + entry["id"], "sessionId": path.stem,
                                     "eventId": entry["id"], "recordedAt": entry["timestamp"],
+                                    "recordedLocalAt": local_clock.local_now.isoformat(),
+                                    "recordTimezone": local_clock.timezone_name,
                                     "text": message["content"]})
             except (ValueError, TypeError, KeyError) as exc:
                 errors.append({"sessionId": path.stem, "line": number, "error": type(exc).__name__})
-    records.sort(key=lambda item: (item["recordedAt"], item["sourceId"]))
+    records.sort(key=lambda item: (datetime.fromisoformat(item["recordedAt"]), item["sourceId"]))
     selected, size = [], 0
     for item in reversed(records):
         cost = len(json.dumps(item, ensure_ascii=False))

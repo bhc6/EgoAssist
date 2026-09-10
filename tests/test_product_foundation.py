@@ -114,6 +114,48 @@ def test_correlation_helpers_never_require_transcript_payloads():
         pass
 
 
+def test_incremental_projection_preserves_updates_and_rebuilds_after_restart(tmp_path):
+    journal = SessionJournal(tmp_path / "session.jsonl", session_id="incremental")
+    ledger = CaseWorkLedger(journal)
+    turn = ledger.capture_turn("retained input", source="test")
+    path = tmp_path / "product.sqlite3"
+    database = ProductDatabase(path)
+    original = database.project_journal(journal, user_id="user-1")
+    ledger.set_turn_status(turn["turnId"], "processing")
+    journal.append("runtime_event", {"eventType": "media.audio.batch"})
+    assert database.project_journal(journal, user_id="user-1") == original
+    with database.session() as session:
+        assert session.get(ConversationTurnRow, turn["turnId"]).status == "processing"
+    # A second projector instance must reconstruct counts without duplicating rows.
+    database.close()
+    restored = ProductDatabase(path)
+    assert restored.project_journal(journal, user_id="user-1") == original
+    assert restored.table_counts()["turns"] == 1
+    with restored.session() as session:
+        assert session.get(ConversationTurnRow, turn["turnId"]).status == "processing"
+    restored.close()
+
+
+def test_projection_does_not_advance_cursor_when_transaction_fails(tmp_path, monkeypatch):
+    journal = SessionJournal(tmp_path / "session.jsonl", session_id="retry")
+    ledger = CaseWorkLedger(journal)
+    turn = ledger.capture_turn("retry input", source="test")
+    database = ProductDatabase(tmp_path / "product.sqlite3")
+    database.project_journal(journal, user_id="user-1")
+    ledger.set_turn_status(turn["turnId"], "processing")
+    project = database._project_entries
+    def fail(*args):
+        raise RuntimeError("disk unavailable")
+    monkeypatch.setattr(database, "_project_entries", fail)
+    with pytest.raises(RuntimeError, match="disk unavailable"):
+        database.project_journal(journal, user_id="user-1")
+    monkeypatch.setattr(database, "_project_entries", project)
+    database.project_journal(journal, user_id="user-1")
+    with database.session() as session:
+        assert session.get(ConversationTurnRow, turn["turnId"]).status == "processing"
+    database.close()
+
+
 def test_local_artifact_port_scopes_catalog_and_rejects_path_escape(tmp_path):
     root = tmp_path / "skill"
     root.mkdir()

@@ -11,6 +11,7 @@ from pathlib import Path
 import subprocess
 import sys
 import time
+from audit_outputs import code_provenance, file_hash, write_manifest
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -41,7 +42,8 @@ def verify(output, source):
         ("report-recovery", "verify_insight_recovery.py", ["--source", str(source)]),
     ]
     report = {"passed": False, "mock": False, "hardwareMeasured": False,
-              "startedAt": datetime.now(timezone.utc).isoformat(), "source": str(source), "cases": []}
+              "startedAt": datetime.now(timezone.utc).isoformat(), "source": str(source),
+              "sourceSha256": file_hash(source), "provenance": code_provenance(), "cases": []}
 
     def persist():
         (output / "acceptance.json").write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -67,6 +69,7 @@ def verify(output, source):
     report["passed"] = all(row["passed"] for row in report["cases"])
     report["finishedAt"] = datetime.now(timezone.utc).isoformat()
     persist()
+    write_manifest(output, output / "manifest.json", provenance=report["provenance"])
     return report["passed"]
 
 

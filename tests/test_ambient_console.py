@@ -1,6 +1,6 @@
 """Ambient consent and disclosure at the HTTP boundary.
 
-Ambient observation is off by default, observes nothing without a live consent
+Ambient observation is enabled by default but observes nothing without live consent
 grant, and is disclosed only while it is actually running -- these tests pin all
 three, because each is a promise made to the participant rather than an
 implementation detail.

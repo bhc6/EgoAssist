@@ -282,6 +282,7 @@ class PreferenceMemory:
             "scopeReason": metadata.get("scopeReason", ""),
             "status": "confirmed" if card["status"] == "active" else "pending",
             "confirmedAt": card["updatedAt"] if card["status"] == "active" else None,
+            "recordedAt": card.get("recordedAt"),
             "kind": card.get("kind"),
             "scope": card.get("scope"),
             "memoryKey": card.get("memoryKey"),

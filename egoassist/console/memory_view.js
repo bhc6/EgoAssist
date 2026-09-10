@@ -56,8 +56,9 @@ function renderMemoryActivity() {
   }).slice(-12).reverse();
   if (state?.memory?.candidate) {
     events.unshift({
-      type: "memory.candidate", eventId: "live-candidate",
-      timestamp: new Date().toISOString(), payload: {status: "等待用户确认", turnId: state.memory.candidate.turnId},
+      type: "memory.candidate", eventId: state.memory.candidate.id || "live-candidate",
+      timestampWall: state.memory.candidate.recordedAt,
+      payload: {status: "等待用户确认", candidateId: state.memory.candidate.id, turnId: state.memory.candidate.turnId},
     });
   }
   if (status) status.textContent = events.length ? "最近 " + events.length + " 个事件" : "暂无记忆事件";

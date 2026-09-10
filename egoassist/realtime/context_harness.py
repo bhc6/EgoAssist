@@ -24,8 +24,9 @@ _VALID_SESSION_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
 _MESSAGE_ROLES = {"user", "assistant"}
 _PATH_LOCKS: dict[str, threading.RLock] = {}
 _PATH_LOCKS_GUARD = threading.Lock()
-# WAL-mode SQLite already provides crash-safe durability; fsync on every append
-# is redundant on the hot path.  Set EGOASSIST_JOURNAL_FSYNC=1 to re-enable.
+# JSONL is the source of truth; the SQLite projection does not protect its tail.
+# Default appends flush to the OS. Set EGOASSIST_JOURNAL_FSYNC=1 for per-entry
+# disk synchronization; without it, power loss can lose acknowledged tail data.
 _JOURNAL_FSYNC: bool = os.getenv("EGOASSIST_JOURNAL_FSYNC", "0").strip() not in {"", "0", "false", "no"}
 
 

@@ -133,6 +133,6 @@ dedup, the task validator rejecting an ambient payload, and the task-mode
 `tests/test_habit_bridge.py` covers absent rows as coverage rather than events,
 civil-time induction, the no-coverage safety property, task rows never being
 read as ambient, and the cross-midnight regression.
-`tests/test_ambient_console.py` covers off-and-undisclosed by default, consent
+`tests/test_ambient_console.py` covers enabled by default, undisclosed without consent, consent
 required and revocable, no bedroom in the shipped watchlist, and consent
 appearing in export and being removed with the account.

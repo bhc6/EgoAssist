@@ -5,6 +5,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
+import threading
 from typing import Any, Iterator
 
 from sqlalchemy import create_engine, select, delete as sql_delete
@@ -50,6 +51,8 @@ class ProductDatabase:
         connect_args = {"check_same_thread": False} if raw.startswith("sqlite") else {}
         self.engine: Engine = create_engine(raw, future=True, connect_args=connect_args)
         self.session_factory = sessionmaker(self.engine, expire_on_commit=False, class_=Session)
+        self._projection_lock = threading.RLock()
+        self._journal_projections: dict[tuple[str, str, str], tuple[int, str | None, dict[str, int]]] = {}
 
     def create_schema(self) -> None:
         Base.metadata.create_all(self.engine)
@@ -148,6 +151,10 @@ class ProductDatabase:
             for model, criterion in order:
                 result = session.execute(sql_delete(model).where(criterion))
                 counts[model.__tablename__] = counts.get(model.__tablename__, 0) + int(result.rowcount or 0)
+        with self._projection_lock:
+            self._journal_projections = {
+                key: value for key, value in self._journal_projections.items() if key[2] != user_id
+            }
         return counts
 
     def set_retention_policy(self, user_id: str, category: str, retention_days: int, *, deletion_mode: str = "hard-delete") -> dict[str, Any]:
@@ -186,9 +193,7 @@ class ProductDatabase:
                 if model_column is None:
                     continue
                 model, column = model_column
-                criterion = column < cutoff
-                if users:
-                    criterion = criterion & (model.user_id == str(user_id))
+                criterion = (column < cutoff) & (model.user_id == policy.user_id)
                 result = session.execute(sql_delete(model).where(criterion))
                 deleted[category] = deleted.get(category, 0) + int(result.rowcount or 0)
         return {"appliedAt": now.isoformat(), "deleted": deleted, "evidence": "counts-only"}
@@ -310,11 +315,40 @@ class ProductDatabase:
         user_id: str,
         display_name: str | None = None,
     ) -> dict[str, int]:
-        """Project old JSONL state without mutating it or dropping memory data."""
-        self.create_schema()
+        """Replay only new events; advance the cursor only after the DB commit.
+
+        Cursors are process-local. A restart safely replays the retained journal
+        once, using the existing idempotent rows to rebuild the projection.
+        """
         source = journal if isinstance(journal, SessionJournal) else SessionJournal(journal)
-        entries = source.entries()
+        key = (str(source.path.resolve()), source.session_id, str(user_id))
+        with self._projection_lock:
+            entries = source.entries()
+            offset, leaf, previous = self._journal_projections.get(
+                key, (0, None, {"turns": 0, "intents": 0, "jobs": 0, "results": 0}),
+            )
+            if offset > len(entries) or (offset and entries[offset - 1]["id"] != leaf):
+                offset, previous = 0, {"turns": 0, "intents": 0, "jobs": 0, "results": 0}
+            if key in self._journal_projections and offset == len(entries):
+                return dict(previous)
+            if not offset:
+                self.create_schema()
+                self.ensure_user(str(user_id), display_name=display_name)
+            counts = self._project_entries(source, entries[offset:], str(user_id), display_name)
+            totals = {name: previous[name] + counts[name] for name in previous}
+            self._journal_projections[key] = (len(entries), entries[-1]["id"] if entries else None, totals)
+            return dict(totals)
+
+    def _project_entries(
+        self, source: SessionJournal, entries: list[dict[str, Any]],
+        user_id: str, display_name: str | None,
+    ) -> dict[str, int]:
         counts = {"turns": 0, "intents": 0, "jobs": 0, "results": 0}
+        projected_types = {"turn_inbox", "turn_inbox_state", "intent_envelope", "intent_state",
+                           "job_ledger", "job_state", "result_inbox", "result_delivery"}
+        entries = [entry for entry in entries if entry.get("type") in projected_types]
+        if not entries:
+            return counts
         with self.session() as session:
             user = session.get(UserRow, str(user_id))
             if user is None:

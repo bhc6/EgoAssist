@@ -55,6 +55,19 @@ def test_report_rejects_fabricated_citations_and_confidence():
         validate_insights('{"summary":[],"suggestions":[],"confidence":0.99}', [])
 
 
+def test_report_sources_keep_utc_and_local_midnight_anchor(tmp_path):
+    path = tmp_path / "midnight.jsonl"
+    row = {"type": "message", "id": "source", "status": "completed",
+           "timestamp": "2026-09-09T16:30:00+00:00",
+           "message": {"role": "user", "content": "今天收到样机，验收未完成。"}}
+    path.write_text(json.dumps(row, ensure_ascii=False) + "\n", encoding="utf-8")
+    clock = ClockContext.current("Asia/Shanghai", now_utc=datetime(2026, 9, 9, 17, tzinfo=timezone.utc))
+    source = collect_sources([path], calendar_period("daily", None, clock))["records"][0]
+    assert source["recordedAt"] == row["timestamp"]
+    assert source["recordedLocalAt"] == "2026-09-10T00:30:00+08:00"
+    assert source["text"] == row["message"]["content"]
+
+
 def test_insight_endpoints_enforce_owner_and_auto_policy(tmp_path):
     async def run():
         app = create_app(str(BUILTIN_SKILLS_ROOT), None, str(tmp_path / "runtime.json"), "unused", "Ethan")
