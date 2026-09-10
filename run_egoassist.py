@@ -351,6 +351,11 @@ class CaseRuntimeOwner:
     ambient: Any = None
     interaction: Any = None
     scene: Any = None
+    lanes: Any = field(default=None, init=False)
+
+    def __post_init__(self):
+        from egoassist.runtime import ThreeLaneRuntime
+        self.lanes = ThreeLaneRuntime(self.journal, self.user_id)
 
 
 def runtime_root() -> Path:
@@ -1368,6 +1373,15 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
             "dialogue": {"connected": False, "microphone": True, "turnDetection": "server-vad-explicit-response", "userVisibleOutput": True},
             "perception": {"connected": False, "microphoneShared": False, "turnDetection": "disabled-explicit-response"},
         }
+        owner = case_owners.get(visible_session_id)
+        ambient_state = ambient_snapshot(user_scope, visible_session_id) if harness_override else None
+        runtime_lanes = owner.lanes.snapshot(
+            observation=ambient_state, scheduler=scheduler,
+            pending_inputs=owner.turn_queue.qsize() if owner.turn_queue else 0,
+            classifying=sum(not task.done() for task in owner.classification_tasks),
+            consolidating=bool(owner.maintenance_task and not owner.maintenance_task.done()),
+            memory_enabled=bool(episodic_settings["episodic_enabled"] or preference_settings["preference_enabled"]),
+        ) if owner else None
         default_policy = TurnTakingPolicy()
         audio_attribution = {
             "input": "microphone transcript -> acoustic speaker hypothesis; API user role does not identify wearer",
@@ -1467,7 +1481,8 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                 "toolAudit": list(reversed(active_tools.audit[-8:])),
                 "toolActivity": harness_override.journal.tool_activity() if harness_override else [],
                 "toolApproval": "automatic",
-                "ambient": ambient_snapshot(user_scope, visible_session_id) if harness_override else None,
+                "ambient": ambient_state,
+                "runtimeLanes": runtime_lanes,
                 "events": visible_events,
                 "performance": performance_snapshot(visible_events),
                 "sessionId": visible_session_id,
@@ -1585,7 +1600,8 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
             "toolAudit": list(reversed(active_tools.audit[-8:])),
             "toolActivity": harness_override.journal.tool_activity() if harness_override else [],
             "toolApproval": "automatic",
-            "ambient": ambient_snapshot(user_scope, visible_session_id) if harness_override else None,
+            "ambient": ambient_state,
+            "runtimeLanes": runtime_lanes,
             "events": visible_events,
             "performance": performance_snapshot(visible_events),
             "sessionId": visible_session_id,
@@ -4076,7 +4092,6 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
         }
 
     def ambient_snapshot(user_id, session_id):
-        from egoassist.realtime.observation_context import memory_work_snapshot
         owner = case_owner(user_id, session_id)
         watch = ambient_watch_session(owner)
         snapshot = {**ambient_status(user_id), **(watch.snapshot() if watch else {}), **ambient_options(owner)}
@@ -4089,7 +4104,6 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
         snapshot["taskActive"] = owner.runtime.task is not None
         snapshot["lane"] = lane.snapshot() if lane else None
         snapshot["taskLane"] = bridge.perception.snapshot() if bridge and hasattr(bridge, "perception") else None
-        snapshot["memoryWork"] = memory_work_snapshot(owner.journal)
         snapshot["elapsedMs"] = round((time.monotonic() - lane._request_started) * 1000) if lane and lane.active and lane._request_started else None
         return snapshot
 
@@ -4672,9 +4686,8 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                 frame_id=frame_id,
                 captured_at=captured_at,
             ).model_dump(mode="python")
-            from egoassist.realtime.observation_context import observation_references
-            context["reference_context"] = observation_references(
-                journal, timeline, user_id=user_id, session_id=session_id,
+            context["reference_context"] = owner.lanes.observation_references(
+                timeline,
                 task=session_runtime.task.snapshot() if session_runtime.task else None,
             )
             frame = getattr(bridge, "_latest_perception_frame", None)

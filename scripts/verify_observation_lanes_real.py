@@ -58,6 +58,10 @@ async def verify(output):
                 report["observation"] = await page.evaluate("state.ambient.observation")
                 assert report["observation"]["media"]["sha256"] == report["frameSha256"]
                 assert await page.evaluate("!!state.task")
+                report["runtimeLanes"] = await page.evaluate("state.runtimeLanes")
+                assert report["runtimeLanes"]["schemaVersion"] == "three-lanes.v1"
+                assert report["runtimeLanes"]["observation"]["latestEvidenceId"]
+                assert "memoryWork" not in await page.evaluate("state.ambient")
                 await page.wait_for_function("state?.episodicMemory?.timelineViews?.case?.recent?.some(c => c.kind === 'observation')", timeout=15000)
                 report["memory"] = await page.evaluate("state.episodicMemory.timelineViews.case.recent")
                 await page.evaluate("""() => socket.send(JSON.stringify({type:'control',

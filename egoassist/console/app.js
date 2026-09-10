@@ -615,18 +615,20 @@ function render(next) {
 function renderExecutionLanes() {
   const root = $("#executionLanes");
   if (!root) return;
-  const ambient = state?.ambient || {}, lane = ambient.lane || {};
-  const scheduler = state?.scheduler || {}, work = ambient.memoryWork || {};
-  const pendingTurns = (state?.workLedger?.turnInbox || []).filter(t => ["received", "queued", "processing"].includes(t.status)).length;
-  const observedAt = ambient.observation?.capturedAt;
-  const observation = !ambient.consented ? "未开启" : !ambient.connected ? "等待连接" :
+  const lanes = state?.runtimeLanes;
+  if (!lanes) { root.replaceChildren(); return; }
+  const ambient = lanes.observation, lane = ambient.ambient || {};
+  const scheduler = lanes.interaction.scheduler || {}, work = lanes.memory.jobs || {};
+  const pendingTurns = lanes.interaction.pendingInputs + lanes.interaction.classifying;
+  const observedAt = ambient.processedThrough;
+  const observation = !ambient.enabled ? "未开启" : !ambient.connected ? "等待连接" :
     lane.active ? "分析中 · " + (lane.elapsedMs || 0) + " ms" :
     !ambient.cameraAt || Date.now() - Date.parse(ambient.cameraAt) > 10000 ? "等待摄像头画面" : "等待采样";
-  const interaction = scheduler.pending || scheduler.activeResponseIds?.length ? "回答生成中" : pendingTurns ? "问题处理中" : "等待输入";
+  const interaction = scheduler.pending || scheduler.activeResponseIds?.length || lanes.interaction.answers.running ? "回答生成中" : pendingTurns ? "问题处理中" : "等待输入";
   const memory = "运行 " + (work.running || 0) + " · 等待 " + (work.queued || 0) + " · 失败 " + (work.failed || 0);
   root.innerHTML = [["现场观察", observation, observedAt ? "已分析画面 " + new Date(observedAt).toLocaleTimeString() : "尚无已分析画面"],
-    ["用户交互", interaction, "排队回答 " + (scheduler.queued?.length || 0)],
-    ["后台记忆与报告", memory, "已完成后台任务 " + (work.completed || 0)]]
+    ["用户交互", interaction, "排队回答 " + ((scheduler.queued?.length || 0) + lanes.interaction.answers.queued)],
+    ["记忆与报告", memory, lanes.memory.consolidating ? "正在整理记忆索引" : "已完成后台任务 " + (work.completed || 0)]]
     .map(([name, status, detail]) => "<div><b>" + esc(name) + "</b><span>" + esc(status) + "</span><small>" + esc(detail) + "</small></div>")
     .join("");
 }

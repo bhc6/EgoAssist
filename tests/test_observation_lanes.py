@@ -56,11 +56,30 @@ def test_observation_snapshot_excludes_future_and_survives_restart(tmp_path):
 
 
 def test_observation_references_exclude_assistant_messages(tmp_path):
-    from egoassist.realtime.observation_context import observation_references
+    from egoassist.runtime import ThreeLaneRuntime
     journal = SessionJournal(tmp_path / "session.jsonl", session_id="session")
     user = journal.append("message", {"message": {"role": "user", "content": "Watch my keys"}})
     journal.append("message", {"message": {"role": "assistant", "content": "Keys are on the table"}})
     timeline = SimpleNamespace(cards=lambda **kw: [], pending_draft=lambda **kw: None)
-    value = observation_references(journal, timeline, user_id="user", session_id="session")
+    value = ThreeLaneRuntime(journal, "user").observation_references(timeline)
     assert [r["sourceId"] for r in value["userMessages"]] == [user["id"]]
     assert "Keys are on the table" not in str(value)
+
+
+def test_three_lanes_keep_memory_and_answers_independent_of_observation(tmp_path):
+    from egoassist.runtime import ThreeLaneRuntime
+    journal = SessionJournal(tmp_path / "session.jsonl", session_id="session")
+    journal.append("memory.recovery.job", {"turnId": "one", "status": "queued"})
+    journal.append("memory.recovery.job", {"turnId": "one", "status": "completed"})
+    journal.append("insight.job", {"jobId": "report", "status": "running", "phase": "model"})
+    journal.append("answer.job", {"turnId": "two", "status": "running"})
+    framework = ThreeLaneRuntime(journal, "user")
+    snapshot = framework.snapshot(observation=None, scheduler={}, classifying=2)
+    assert snapshot["observation"]["enabled"] is False
+    assert snapshot["memory"]["jobs"]["completed"] == 1
+    assert snapshot["memory"]["jobs"]["queued"] == 0
+    assert snapshot["memory"]["jobs"]["running"] == 1
+    assert snapshot["interaction"]["answers"]["running"] == 1
+    assert snapshot["interaction"]["classifying"] == 2
+    restored = ThreeLaneRuntime(SessionJournal(journal.path), "user").snapshot(observation=None, scheduler={})
+    assert restored["memory"] == snapshot["memory"]

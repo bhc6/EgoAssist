@@ -8,7 +8,11 @@
 
 每条观察通道最多一个在途请求和一个待处理最新帧，合并被覆盖的待处理帧时记录 `perception.frame.coalesced`。提交帧及其历史背景先进入审计日志，嵌套上下文深拷贝，防止排队期间内容被改变。单通道超时沿用 `EGOASSIST_PERCEPTION_TIMEOUT`。这不是跨供应商的全局优先级调度器；增加并行连接仍需监测账号限流和资源竞争。
 
-`observation_context.py` 向环境观察提供近期用户原话、当前案例的活动记忆卡片、待澄清记录和任务状态。数量与文本预算分别由 `EGOASSIST_OBSERVATION_REFERENCE_LIMIT` / `EGOASSIST_OBSERVATION_REFERENCE_CHARS` 控制，默认 4 条 / 1000 字符；截断有标记，完整原文仍留在日志。助手消息不作为用户背景输入。卡片带来源、类型及时间，不新增行为类别。
+`runtime.py::ThreeLaneRuntime` 向环境观察提供近期用户原话、当前案例的活动记忆卡片、待澄清记录和任务状态。数量与文本预算分别由 `EGOASSIST_OBSERVATION_REFERENCE_LIMIT` / `EGOASSIST_OBSERVATION_REFERENCE_CHARS` 控制，默认 4 条 / 1000 字符；截断有标记，完整原文仍留在日志。助手消息不作为用户背景输入。卡片带来源、类型及时间，不新增行为类别。
+
+三链路现已作为顶层主框架：案例持有 `ThreeLaneRuntime`，接口分别提供 `runtimeLanes.observation / interaction / memory`。后台记忆状态不再寄存在 ambient 对象中，补答作业归入交互。模块归属和后续迁移边界见 [ARCHITECTURE.md](../ARCHITECTURE.md)。
+
+主框架调整后再次真实验收：`outputs/runs/three-lane-framework-real-01` 通过，环境模型 2183.1 ms、任务模型 1034.5 ms、浏览器观察 2601.4 ms；问答首音频 2949 ms，完整回答 9184 ms。确认新接口、两路观察及回答的重叠执行，1440 / 390 布局和刷新恢复通过。最终全量回归 451 项通过，0 失败、0 跳过，证据 `outputs/three-lane-framework-final.xml`。
 
 提示词 `perception/reference_context` 明确要求历史背景只影响关注点，不能证明当前画面存在某件事，也不能关闭无关变化的开放观察。提示词约束不等于事实正确率保证；模型仍可受到历史背景影响，需要持续做反事实与误报评估。
 
