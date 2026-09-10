@@ -83,3 +83,16 @@ def test_three_lanes_keep_memory_and_answers_independent_of_observation(tmp_path
     assert snapshot["interaction"]["classifying"] == 2
     restored = ThreeLaneRuntime(SessionJournal(journal.path), "user").snapshot(observation=None, scheduler={})
     assert restored["memory"] == snapshot["memory"]
+
+
+def test_preparation_progress_clears_on_answer_terminal_and_survives_reload(tmp_path):
+    from egoassist.runtime import ThreeLaneRuntime
+    journal = SessionJournal(tmp_path / "session.jsonl", session_id="session")
+    journal.append("turn.progress", {"turnId": "one", "phase": "waiting-vision"})
+    journal.append("turn_inbox_state", {"turnId": "one", "status": "completed"})
+    journal.append("turn.progress", {"turnId": "one", "phase": "generating"})
+    journal.append("answer.job", {"turnId": "one", "status": "completed"})
+    journal.append("turn.progress", {"turnId": "two", "phase": "classifying", "queueMs": 42})
+    snapshot = ThreeLaneRuntime(SessionJournal(journal.path), "user").snapshot(observation=None, scheduler={})
+    assert [(p["turnId"], p["phase"], p["queueMs"]) for p in snapshot["interaction"]["preparation"]] == [
+        ("two", "classifying", 42)]

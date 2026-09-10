@@ -8,6 +8,13 @@ from egoassist.prompts import prompt_text
 from .work_ledger import CaseWorkLedger
 
 
+def is_output_control(semantic):
+    """Only semantic output controls can bypass ordered task/effect commits."""
+    return ((semantic.get("interaction") or {}).get("action") in {"listen", "pause", "cancel", "uncertain"}
+            and not any(semantic.get(key) for key in
+                        ("intents", "memoryAtoms", "memoryQuerySpec", "memoryDraft", "revision", "taskControl", "skillControl")))
+
+
 async def apply_interaction(semantic, turn_id, turn_sequence, *, owner, interaction_state,
                             harness, answer_executor, user_id, bridge, ws, emit,
                             muted_response_ids, resumed_response_ids, request_bridge_response):

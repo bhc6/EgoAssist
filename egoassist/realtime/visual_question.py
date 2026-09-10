@@ -9,6 +9,7 @@ import time
 import aiohttp
 
 from egoassist.prompts import prompt_text
+from .settings import integer
 
 
 class VisualQuestions:
@@ -16,7 +17,7 @@ class VisualQuestions:
         self.scene = scene
         self.pending = {}
         self.results = {}
-        self.limit = asyncio.Semaphore(2)
+        self.limit = asyncio.Semaphore(integer("EGOASSIST_VISUAL_QUESTION_CONCURRENCY", 2, maximum=8))
         self.timeout = float(os.getenv("EGOASSIST_VISUAL_QUESTION_TIMEOUT", "4"))
         if not 0.1 <= self.timeout <= 10:
             raise ValueError("visual question timeout must be between 0.1 and 10 seconds")
@@ -36,6 +37,13 @@ class VisualQuestions:
             task.add_done_callback(lambda _: self.progress.pop(turn_id, None))
         return await asyncio.shield(task)
 
+    async def cancel(self, turn_id, *, reason):
+        task = self.pending.get(turn_id)
+        if task and not task.done():
+            self.scene.journal.append("scene.question.cancelled", {"turnId": turn_id, "reason": reason})
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
     async def _observe(self, turn_id, question, frame):
         import dashscope
         started = time.perf_counter()
@@ -46,7 +54,9 @@ class VisualQuestions:
         result = {"turnId": turn_id, "frame": frame, "model": model, "scope": "question-specific"}
         try:
             async with asyncio.timeout(self.timeout), self.limit:
+                result["queueMs"] = round((time.perf_counter() - started) * 1000, 1)
                 self.progress[turn_id]["status"] = "waiting-provider"
+                self.progress[turn_id]["queueMs"] = result["queueMs"]
                 async with self.scene.http().post(dashscope.base_http_api_url.rstrip("/") + "/services/aigc/multimodal-generation/generation",
                     timeout=aiohttp.ClientTimeout(total=self.timeout),
                     headers={"Authorization": "Bearer " + self.scene.api_key}, json={"model": model,

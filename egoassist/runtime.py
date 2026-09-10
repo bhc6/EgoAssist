@@ -41,11 +41,17 @@ class ThreeLaneRuntime:
 
     def snapshot(self, *, observation, scheduler, pending_inputs=0, classifying=0,
                  consolidating=False, memory_enabled=True):
-        jobs, latest_observation = {}, None
+        jobs, latest_observation, phases = {}, None, {}
         for row in self.journal.entries():
             kind = row.get("type")
+            if kind == "turn.progress":
+                phases[row["turnId"]] = row
+            if kind == "turn_inbox_state" and row.get("status") in {"completed", "failed", "cancelled"}:
+                phases.pop(row["turnId"], None)
             if kind in {"memory.recovery.job", "insight.job", "answer.job"}:
                 jobs[(kind, row.get("turnId") or row.get("jobId"))] = row
+            if kind == "answer.job" and row.get("status") in {"completed", "failed", "cancelled", "paused"}:
+                phases.pop(row["turnId"], None)
             if kind == "ambient_observation" and row.get("status") == "accepted":
                 if latest_observation is None or str(row.get("frame_captured_at", "")) >= str(latest_observation.get("frame_captured_at", "")):
                     latest_observation = row
@@ -71,6 +77,8 @@ class ThreeLaneRuntime:
             "interaction": {
                 "scheduler": deepcopy(scheduler), "pendingInputs": pending_inputs,
                 "classifying": classifying, "answers": _counts(answer_jobs),
+                "preparation": [{"turnId": row["turnId"], "phase": row["phase"], "updatedAt": row["timestamp"],
+                                 "queueMs": row.get("queueMs")} for row in phases.values()],
             },
             "memory": {
                 "enabled": memory_enabled, "jobs": _counts(memory_jobs), "consolidating": consolidating,

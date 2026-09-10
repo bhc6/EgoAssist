@@ -20,7 +20,7 @@ from real_session_support import journal
 from verify_shared_scene import decode
 
 
-async def verify(output):
+async def verify(output, burst=False):
     load_env(str(ROOT / ".env"))
     os.environ["EGOASSIST_AMBIENT_WATCHLIST"] = ""
     os.environ["EGOASSIST_AMBIENT_INTERVAL_SECONDS"] = "2"
@@ -93,6 +93,34 @@ async def verify(output):
                     and r.get("payload", {}).get("origin", {}).get("turnId") == "cooking-lanes")
                 report["dialogueOverlappedObservation"] = max(ambient_request["timestamp"], dialogue_start["timestamp"]) < min(ambient_done["timestamp"], dialogue_end["timestamp"])
                 assert report["dialogueOverlappedObservation"]
+                if burst:
+                    await page.evaluate("""image => {
+                        window.burstAudit = {started:performance.now(), events:[]};
+                        socket.addEventListener('message', event => {
+                            const row = JSON.parse(event.data);
+                            if (['turn_receipt', 'interaction_status'].includes(row.type))
+                                burstAudit.events.push({...row, atMs:performance.now()-burstAudit.started});
+                        });
+                        socket.send(JSON.stringify({type:'video', image}));
+                        for (const [id, text] of [
+                            ['burst-one', '画面上桌布是什么颜色？请用一句话回答。'],
+                            ['burst-two', '另一个独立问题：画面中能看到白板吗？请用一句话回答。']])
+                            socket.send(JSON.stringify({type:'control', transcript:text, clientRequestId:id}));
+                    }""", base64.b64encode(image).decode())
+                    await page.wait_for_function("['burst-one','burst-two'].every(id => state.workLedger.turnInbox.some(t => t.turnId === id && t.answer?.status === 'completed'))", timeout=65000)
+                    report["burst"] = await page.evaluate("({events:burstAudit.events, turns:state.workLedger.turnInbox.filter(t=>t.turnId.startsWith('burst-'))})")
+                    receipts = [e for e in report["burst"]["events"] if e["type"] == "turn_receipt"]
+                    assert {e["turnId"] for e in receipts} == {"burst-one", "burst-two"}
+                    assert max(e["atMs"] for e in receipts) < 2000, receipts
+                    rows = journal(output, sid)
+                    requests = [r for r in rows if r.get("type") == "scene.question.request" and r.get("turnId", "").startswith("burst-")]
+                    results = [r for r in rows if r.get("type") == "scene.question.result" and r.get("turnId", "").startswith("burst-")]
+                    assert len(requests) == len(results) == 2
+                    assert all(r["status"] == "observed" and r["requestId"] for r in results), results
+                    report["burst"]["visionOverlapped"] = max(r["timestamp"] for r in requests) < min(r["timestamp"] for r in results)
+                    assert report["burst"]["visionOverlapped"]
+                    assert all(r["frame"]["sha256"] == report["frameSha256"] for r in results)
+                    report["burst"]["visualResults"] = results
                 await page.reload()
                 await page.wait_for_function("state?.ambient?.observation?.media")
                 report["restoredObservation"] = await page.evaluate("state.ambient.observation")
@@ -106,7 +134,9 @@ async def verify(output):
                 await browser.close()
         report["passed"] = True
     except Exception as exc:
+        import traceback
         report["error"] = type(exc).__name__ + ": " + str(exc)
+        report["traceback"] = traceback.format_exc()
     (output / "report.json").write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf8")
     print(json.dumps({k: report.get(k) for k in ("passed", "error", "observationWallMs", "observersOverlapped")}), flush=True)
     return report["passed"]
@@ -115,5 +145,6 @@ async def verify(output):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--burst", action="store_true")
     args = parser.parse_args()
-    raise SystemExit(0 if asyncio.run(verify(args.output)) else 1)
+    raise SystemExit(0 if asyncio.run(verify(args.output, args.burst)) else 1)

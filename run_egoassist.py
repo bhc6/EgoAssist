@@ -338,6 +338,8 @@ class CaseRuntimeOwner:
     output_generation: int = 0
     work_ledger: CaseWorkLedger | None = None
     classification_tasks: set[asyncio.Task] = field(default_factory=set)
+    prepared_scenes: dict[str, asyncio.Task] = field(default_factory=dict)
+    applied_controls: dict[str, dict] = field(default_factory=dict)
     queued_turn_ids: set[str] = field(default_factory=set)
     job_scheduler_task: asyncio.Task | None = None
     bridge: Any = None
@@ -1913,6 +1915,14 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                 task.cancel()
         if classification_tasks:
             await asyncio.gather(*classification_tasks, return_exceptions=True)
+        prepared = tuple(owner.prepared_scenes.values())
+        owner.prepared_scenes.clear()
+        owner.applied_controls.clear()
+        for task in prepared:
+            if not task.done():
+                task.cancel()
+        if prepared:
+            await asyncio.gather(*prepared, return_exceptions=True)
         if queue:
             while not queue.empty():
                 try:
@@ -2019,6 +2029,7 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
         instructions += (
             prompt_text('run_egoassist/grounded_user_instructions.2')
         )
+        instructions += prompt_text('interaction/responsive_answer')
         active_runtime = target_runtime or runtime
         observation = active_runtime.task.observation if active_runtime.task else None
         shared = result.get("sharedScene")
@@ -5409,17 +5420,36 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                         error=str(exc)[:120],
                     )
 
+        async def turn_progress(turn_id, status, **detail):
+            row = harness.journal.append("turn.progress", {"turnId": turn_id, "phase": status, **detail})
+            if not ws.closed:
+                await ws.send_json({"type": "interaction_status", "turnId": turn_id, "status": status, "updatedAt": row["timestamp"], **detail})
+
         async def classify_persisted_turn(turn_id: str, text: str) -> dict:
             ledger = owner.work_ledger or CaseWorkLedger(harness.journal)
-            ledger.set_turn_status(turn_id, "classifying")
-            speaker_task = asyncio.create_task(owner.scene.resolve_speaker(turn_id))
+            queued_at = time.perf_counter()
+            await turn_progress(turn_id, "queued")
             async with classification_limit:
+                queue_ms = round((time.perf_counter() - queued_at) * 1000, 1)
+                ledger.set_turn_status(turn_id, "classifying", detail={"queueMs": queue_ms})
+                await turn_progress(turn_id, "classifying", queueMs=queue_ms)
+                turn = ledger.turns()[turn_id]
+                scene_task = None
+                from egoassist.realtime.settings import integer
+                if len(owner.prepared_scenes) < integer("EGOASSIST_VISUAL_QUESTION_CONCURRENCY", 2, maximum=8):
+                    scene_task = asyncio.create_task(owner.scene.context(turn_id,
+                        describe_frame=turn.get("source") == "explicit-control", question=text),
+                        name=f"egoassist-turn-scene:{turn_id}")
+                    owner.prepared_scenes[turn_id] = scene_task
+                    owner.scene.tasks.add(scene_task)
+                    scene_task.add_done_callback(owner.scene.tasks.discard)
+                speaker_task = asyncio.create_task(owner.scene.resolve_speaker(turn_id))
                 try:
                     semantic = await classify_semantic_turn(text, turn_id)
                     if semantic.get("status") in {"unavailable", "invalid"}:
                         harness.journal.append("interaction.classification_retry", {"turnId": turn_id, "decision": semantic})
                         if not ws.closed:
-                            await ws.send_json({"type": "interaction_status", "turnId": turn_id, "status": "retrying"})
+                            await turn_progress(turn_id, "retrying")
                         semantic = await classify_semantic_turn(text, turn_id)
                     scene_turn = owner.scene.turns.get(turn_id)
                     if scene_turn and not scene_turn["speaker"].get("wearer"):
@@ -5435,9 +5465,35 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                 finally:
                     owner.scene.tasks.add(speaker_task)
                     speaker_task.add_done_callback(owner.scene.tasks.discard)
+                control_only = (semantic.get("interaction") or {}).get("action") in {"listen", "pause", "cancel", "uncertain"} or semantic.get("speechControl")
+                if control_only and scene_task is not None:
+                    scene_task.cancel()
+                    await asyncio.gather(scene_task, return_exceptions=True)
+                    await owner.scene.visual_questions.cancel(turn_id, reason="interaction-does-not-need-vision")
+                    owner.prepared_scenes.pop(turn_id, None)
+                from egoassist.realtime.interaction_controller import apply_interaction, is_output_control
+                control_target = (semantic.get("interaction") or {}).get("targetTurnId")
+                target_available = not control_target or control_target in answer_jobs(harness.journal)
+                if is_output_control(semantic) and target_available and turn.get("sequence") == owner.latest_input_sequence:
+                    async with owner.mutation_lock:
+                        if owner.socket_token is socket_token and owner.epoch == connection_epoch and turn.get("sequence") == owner.latest_input_sequence:
+                            handled, control = await apply_interaction(semantic, turn_id, turn["sequence"],
+                                owner=owner, interaction_state=interaction_state, harness=harness,
+                                answer_executor=answer_executor, user_id=user_id, bridge=bridge, ws=ws, emit=emit,
+                                muted_response_ids=muted_response_ids, resumed_response_ids=resumed_response_ids,
+                                request_bridge_response=request_bridge_response)
+                            if handled:
+                                owner.applied_controls[turn_id] = control
+                                resolve_semantic_turn(text, {}, semantic, turn_id)
+                                ledger.set_turn_status(turn_id, "completed")
+                                ledger.set_turn_delivery(turn_id, "completed", channel="speech-control")
+                                if not ws.closed:
+                                    await ws.send_json({"type": "state", "state": scoped_state_for_user(user_id, session_id)})
+                                return semantic
             ledger.set_turn_status(
                 turn_id, "ready", detail={"semanticMethod": semantic.get("method")},
             )
+            await turn_progress(turn_id, "ready")
             return semantic
 
         async def admit_foreground_response(
@@ -5504,20 +5560,30 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                 session_trace("audio.transcript.ignored", "realtime-user", {"reason": "empty-transcript"})
                 return {}
             work_ledger = owner.work_ledger or CaseWorkLedger(harness.journal)
-            scene_task = asyncio.create_task(owner.scene.context(turn_id, describe_frame=explicit, question=text))
+            scene_task = None
             try:
                 semantic = await semantic_task if semantic_task is not None else await classify_persisted_turn(turn_id, text)
+                applied = owner.applied_controls.pop(turn_id, None)
+                if applied is not None:
+                    return {"control": applied, "semanticDecision": semantic}
                 control_only = (semantic.get("interaction") or {}).get("action") in {"listen", "pause", "cancel", "uncertain"} or semantic.get("speechControl")
+                scene_task = owner.prepared_scenes.pop(turn_id, None)
+                if scene_task is None:
+                    scene_task = asyncio.create_task(owner.scene.context(turn_id, describe_frame=explicit and not control_only, question=text))
+                if not control_only and not scene_task.done():
+                    await turn_progress(turn_id, "waiting-vision")
                 shared_scene = await owner.scene.context(turn_id) if control_only else await scene_task
             finally:
-                if not scene_task.done():
-                    scene_task.cancel()
-                await asyncio.gather(scene_task, return_exceptions=True)
+                if scene_task is not None:
+                    if not scene_task.done():
+                        scene_task.cancel()
+                    await asyncio.gather(scene_task, return_exceptions=True)
             if shared_scene:
                 shared_scene["speaker"] = owner.scene.turns[turn_id]["speaker"]
             if owner.socket_token is not socket_token or owner.epoch != connection_epoch:
                 raise asyncio.CancelledError
             _bg_task_queue: list[tuple[TaskSlot, str, str, SkillRuntime, dict]] = []
+            await turn_progress(turn_id, "committing")
             async with owner.mutation_lock:
                 if owner.socket_token is not socket_token or owner.epoch != connection_epoch:
                     raise asyncio.CancelledError
@@ -6100,6 +6166,7 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                 )
             ):
                 selection = turn_policy(session_runtime).select(result["decision"])
+                await turn_progress(turn_id, "generating")
                 await admit_foreground_response(
                     turn_id=turn_id,
                     turn_sequence=turn_sequence,

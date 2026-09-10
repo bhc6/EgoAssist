@@ -610,7 +610,7 @@ class CaseWorkLedger:
             if entry.get("type") == "turn_delivery":
                 deliveries[entry["turnId"]] = entry
             elif entry.get("type") == "answer.job":
-                answers[entry["turnId"]] = {k: v for k, v in entry.items() if k not in {"instructions", "question", "context"}}
+                answers[entry["turnId"]] = {k: v for k, v in entry.items() if k not in {"instructions", "question", "context", "preparedResult"}}
         for answer in answers.values():
             created = response_turns.get(answer["turnId"])
             if answer.get("status") == "foreground" and created:
@@ -625,6 +625,8 @@ class CaseWorkLedger:
                                       ("response.finished", "inputToCompleteMs")):
                     if response.get(event) and (event != "response.finished" or answer.get("status") == "completed"):
                         answer[metric] = round((datetime.fromisoformat(response[event]["timestamp"]) - datetime.fromisoformat(received_at)).total_seconds() * 1000, 1)
+                if answer.get("status") == "completed" and answer.get("channel") == "background-text":
+                    answer["inputToCompleteMs"] = round((datetime.fromisoformat(answer["timestamp"]) - datetime.fromisoformat(received_at)).total_seconds() * 1000, 1)
             if answer.get("status") == "completed" and answer.get("channel") in {"speech", "generated-audio"}:
                 answer["text"] = completed_text.get(answer.get("responseId"), "")
                 response = responses.get(answer.get("responseId"), {})

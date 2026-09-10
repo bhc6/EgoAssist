@@ -419,17 +419,22 @@ function renderWorkCenter() {
   const historyHTML = turns.map(turn => {
     const status = turn.delivery?.status || turn.status;
     const answer = turn.answer;
+    const preparation = state.runtimeLanes?.interaction?.preparation?.find(row => row.turnId === turn.turnId);
     const answerLabels = {queued: "后台补全排队中", running: "正在后台补全", paused: "已暂停计算", failed: "后台补全失败", cancelled: "已取消或被更正",
       completed: answer?.channel === "background-text" ? "已在后台回答" : status === "completed" && turn.delivery?.channel === "device-playback" ? "设备已播完" : "已生成 · 播放未确认"};
-    const label = turn.delivery?.channel === "memory-receipt" && turn.delivery?.memoryStatus === "committed" ? "记忆已保存" : !answer && turn.status === "completed" && turn.semantic?.interaction?.action === "listen" ? "现场对话已记录，无需助手回答" : answer && answer.status !== "foreground" ? answerLabels[answer.status]
+    const label = answer?.phase === "waiting-corrections" && answer.status === "queued" ? "答案已准备 · 等待当前话语是否有纠正" : turn.delivery?.channel === "memory-receipt" && turn.delivery?.memoryStatus === "committed" ? "记忆已保存" : !answer && turn.status === "completed" && turn.semantic?.interaction?.action === "listen" ? "现场对话已记录，无需助手回答" : answer && answer.status !== "foreground" ? answerLabels[answer.status]
       : !turn.delivery && status === "completed" ? "已处理，查看任务结果" : turnStates[status] || status;
     return "<div class='turn-history-row' data-turn-id='" + esc(turn.turnId) + "'><p>" + esc(turn.text) +
       "</p><small>" + esc(label) + "</small>" +
+      (preparation ? "<small>" + esc(interactionPhases[preparation.phase] || preparation.phase) +
+        " · 本阶段 " + Math.max(0, (Date.now() - Date.parse(preparation.updatedAt)) / 1000).toFixed(1) + " s" +
+        (preparation.queueMs != null ? " · 排队 " + esc(preparation.queueMs) + " ms" : "") + "</small>" : "") +
       (answer?.text && answer.status === "completed" ? "<p class='completed-answer'>" + esc(answer.text) + "</p>" : "") +
       (answer && ["queued", "running", "failed"].includes(answer.status) ? "<small>" + esc(answer.model +
         (answer.status === "running" ? " · 已等待 " + Math.max(0, (Date.now() - Date.parse(answer.startedAt)) / 1000).toFixed(1) +
         " s · 请求上限 " + answer.timeoutSeconds + " s" : "") + (answer.error ? " · " + answer.error : "")) + "</small>" : "") +
       (answer?.durationMs != null ? "<small>回答耗时 " + esc(answer.durationMs) + " ms</small>" : "") +
+      (answer?.inputToCompleteMs != null ? "<small>接收到完整答案 " + esc(answer.inputToCompleteMs) + " ms</small>" : "") +
       (() => {
         const models = [...new Set([
           turn.semantic?.model,
@@ -612,6 +617,9 @@ function render(next) {
   renderExecutionLanes();
 }
 
+const interactionPhases = {queued:"请求已保留 · 等待处理名额", classifying:"正在理解你的请求", ready:"理解完成 · 等待按序处理", retrying:"理解请求暂未成功 · 正在重试",
+  "waiting-vision":"正在核对提问时的画面", committing:"正在检索记忆与处理请求", generating:"正在生成回答"};
+
 function renderExecutionLanes() {
   const root = $("#executionLanes");
   if (!root) return;
@@ -619,15 +627,16 @@ function renderExecutionLanes() {
   if (!lanes) { root.replaceChildren(); return; }
   const ambient = lanes.observation, lane = ambient.ambient || {};
   const scheduler = lanes.interaction.scheduler || {}, work = lanes.memory.jobs || {};
-  const pendingTurns = lanes.interaction.pendingInputs + lanes.interaction.classifying;
+  const pendingTurns = lanes.interaction.pendingInputs;
   const observedAt = ambient.processedThrough;
   const observation = !ambient.enabled ? "未开启" : !ambient.connected ? "等待连接" :
     lane.active ? "分析中 · " + (lane.elapsedMs || 0) + " ms" :
     !ambient.cameraAt || Date.now() - Date.parse(ambient.cameraAt) > 10000 ? "等待摄像头画面" : "等待采样";
-  const interaction = scheduler.pending || scheduler.activeResponseIds?.length || lanes.interaction.answers.running ? "回答生成中" : pendingTurns ? "问题处理中" : "等待输入";
+  const interaction = scheduler.pending || scheduler.activeResponseIds?.length || lanes.interaction.answers.running ? "回答生成中" :
+    pendingTurns || lanes.interaction.classifying || lanes.interaction.preparation?.length ? "问题处理中" : "等待输入";
   const memory = "运行 " + (work.running || 0) + " · 等待 " + (work.queued || 0) + " · 失败 " + (work.failed || 0);
   root.innerHTML = [["现场观察", observation, observedAt ? "已分析画面 " + new Date(observedAt).toLocaleTimeString() : "尚无已分析画面"],
-    ["用户交互", interaction, "排队回答 " + ((scheduler.queued?.length || 0) + lanes.interaction.answers.queued)],
+    ["用户交互", interaction, "排队输入 " + pendingTurns + " · 后台排队回答 " + lanes.interaction.answers.queued],
     ["记忆与报告", memory, lanes.memory.consolidating ? "正在整理记忆索引" : "已完成后台任务 " + (work.completed || 0)]]
     .map(([name, status, detail]) => "<div><b>" + esc(name) + "</b><span>" + esc(status) + "</span><small>" + esc(detail) + "</small></div>")
     .join("");
@@ -1141,8 +1150,17 @@ async function connectRealtimeSession(generation, media, retryAttempt) {
     } else if (message.type === "speech_control") {
       if (message.action !== "resume") stopPlayback();
       $("#duplexState").textContent = message.action === "resume" ? "正在继续原回答" : message.action === "uncertain" ? "暂不播报 · 等待明确意图" : message.action === "cancel-answer" ? "已取消指定回答 · 正在听" : "已停止播报 · 正在听";
-    } else if (message.type === "interaction_status" && (!message.turnId || !currentTurnId || message.turnId === currentTurnId)) {
-      $("#duplexState").textContent = "语义服务超时 · 保持静默并重试一次";
+    } else if (message.type === "interaction_status") {
+      if (message.turnId && state?.runtimeLanes?.interaction) {
+        const lane = state.runtimeLanes.interaction;
+        lane.preparation = (lane.preparation || []).filter(row => row.turnId !== message.turnId);
+        lane.preparation.push({turnId:message.turnId, phase:message.status, queueMs:message.queueMs, updatedAt:message.updatedAt});
+        renderWorkCenter();
+      }
+      if (!message.turnId || !currentTurnId || message.turnId === currentTurnId) {
+        $("#duplexState").textContent = (interactionPhases[message.status] || message.status) +
+          (message.queueMs != null ? " · 排队 " + message.queueMs + " ms" : "");
+      }
     } else if (message.type === "interrupted") {
       stopPlayback();
       assistantText = "";
@@ -1184,7 +1202,7 @@ async function connectRealtimeSession(generation, media, retryAttempt) {
       try { turnOutbox().acknowledge(message.turnId); }
       catch (error) { $("#textTurnError").textContent = error.message; return; }
       if (currentTurnId && message.turnId !== currentTurnId) return;
-      $("#textTurnError").textContent = (message.deduplicated ? "已受理过，未重复执行 · " : "已接收 · ") + message.turnId;
+      $("#textTurnError").textContent = message.deduplicated ? "请求已受理，继续等待结果" : "请求已接收";
     } else if (message.type === "memory_status") {
       $("#assistantCaption").innerHTML = "<span>记忆事务 · 服务端确认</span><p>" + esc(message.message) + "</p>";
       $("#duplexState").textContent = message.status === "committed"

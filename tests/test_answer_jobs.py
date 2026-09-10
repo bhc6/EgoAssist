@@ -29,6 +29,39 @@ async def wait_status(journal, turn_id, status):
     return answer_jobs(journal)[turn_id]
 
 
+def test_prepare_answer_during_slow_correction_without_publishing_or_regenerating(tmp_path, monkeypatch):
+    monkeypatch.setenv("EGOASSIST_ANSWER_CORRECTION_GRACE", "0.1")
+
+    async def run():
+        journal = SessionJournal(tmp_path / "case.jsonl", session_id="case")
+        ledger = CaseWorkLedger(journal)
+        capture(ledger, "old", 1)
+        calls = []
+
+        async def generate(journal, row):
+            calls.append(row["turnId"])
+            return {"text": "prepared once"}
+
+        manager = AnswerJobs("unused", generate=generate)
+        manager.register("u", journal, turn_id="old", question="old", instructions="evidence", deferred=True)
+        ledger.capture_turn("new", source="test", turn_id="new", sequence=2)
+        async with running(manager):
+            async with asyncio.timeout(3):
+                while not answer_jobs(journal)["old"].get("preparedResult"):
+                    await asyncio.sleep(0.01)
+            assert "preparedResult" not in ledger.snapshot()["turnInbox"][0]["answer"]
+            assert answer_jobs(journal)["old"]["status"] == "queued"
+            generation_ms = answer_jobs(journal)["old"]["generationMs"]
+            ledger.set_turn_status("new", "completed")
+            result = await wait_status(journal, "old", "completed")
+            assert result["text"] == "prepared once" and calls == ["old"]
+            assert result["durationMs"] == generation_ms
+            snapshot = ledger.snapshot()["turnInbox"][0]["answer"]
+            assert snapshot["inputToCompleteMs"] >= generation_ms
+
+    asyncio.run(run())
+
+
 def test_interrupted_answers_complete_once_without_reprocessing_turns(tmp_path):
     async def run():
         journal = SessionJournal(tmp_path / "case.jsonl", session_id="case")

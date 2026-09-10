@@ -125,33 +125,16 @@ def test_semantic_memory_request_does_not_require_save_keyword(tmp_path, monkeyp
 
 
 async def _recv(ws):
-    """Read the next protocol message, skipping out-of-band memory_trace events.
-
-    memory_trace is an observability event emitted from SDK worker threads via
-    run_coroutine_threadsafe (see MemoryEventBus.record); it interleaves
-    non-deterministically into the WebSocket stream and is dispatched by type on
-    the frontend (app.js), independent of the ordered protocol. These tests
-    assert the ordered protocol contract (user_transcript/state/interrupted/...),
-    so they must skip memory_trace exactly as the client does — filtering it here
-    is not loosening the contract, only ignoring noise the contract never covered.
-    """
+    """Read ordered protocol messages, ignoring asynchronous memory/turn progress."""
     while True:
         message = await ws.receive_json()
-        if message.get("type") != "memory_trace":
+        if message.get("type") not in {"memory_trace", "interaction_status"}:
             return message
 
 
 async def _recv_wait(ws, *, timeout):
-    """_recv with a per-message timeout, for the response-gate race tests.
-
-    Skips memory_trace like _recv; the timeout applies to each underlying read
-    so a burst of observability events cannot starve the protocol message the
-    caller is waiting for.
-    """
-    while True:
-        message = await asyncio.wait_for(ws.receive_json(), timeout=timeout)
-        if message.get("type") != "memory_trace":
-            return message
+    """Apply one deadline to the entire wait, including progress messages."""
+    return await asyncio.wait_for(_recv(ws), timeout=timeout)
 
 
 def install_queue_test_bridge(monkeypatch):
@@ -228,6 +211,51 @@ def install_queue_test_bridge(monkeypatch):
     monkeypatch.setenv("QWEN_API_KEY", "test-key")
     monkeypatch.setattr("egoassist.realtime.omni.OmniBrowserBridge", FakeBridge)
     return instances
+
+
+def test_vision_prepares_in_parallel_and_stop_bypasses_blocked_question(tmp_path, monkeypatch):
+    from egoassist.realtime.scene import SharedScene
+    install_queue_test_bridge(monkeypatch)
+
+    async def scenario():
+        started = {name: asyncio.Event() for name in ("first", "second")}
+        release = asyncio.Event()
+
+        async def context(_self, turn_id, **kwargs):
+            if turn_id in started:
+                started[turn_id].set()
+                await release.wait()
+            return {}
+
+        async def classify(_self, text, catalog):
+            result = semantic_result(text)
+            if text == "stop":
+                result["interaction"] = {"audience": "assistant", "action": "listen", "output": "silent",
+                                         "quiet": {"mode": "set", "allowReplies": True}}
+            return result
+
+        monkeypatch.setattr(SharedScene, "context", context)
+        monkeypatch.setattr(run_egoassist.SemanticTurnRouter, "classify", classify)
+        app = create_app(str(BUILTIN_SKILLS_ROOT), None, str(tmp_path / "runtime.json"), "test", "Ethan")
+        async with TestClient(TestServer(app)) as client:
+            await register_client(client, "parallel-control")
+            sid = (await (await client.post("/api/sessions")).json())["session"]["id"]
+            ws = await client.ws_connect("/ws/realtime?session=" + sid)
+            for name in ("first", "second"):
+                await ws.send_json({"type": "control", "transcript": name, "clientRequestId": name})
+                await asyncio.wait_for(started[name].wait(), 3)
+            await ws.send_json({"type": "control", "transcript": "stop", "clientRequestId": "stop"})
+            async with asyncio.timeout(3):
+                while True:
+                    event = await ws.receive_json()
+                    if event.get("type") == "speech_control":
+                        assert event["turnId"] == "stop" and event["action"] == "stop-speaking"
+                        break
+            assert not release.is_set()
+            release.set()
+            await ws.close()
+
+    asyncio.run(scenario())
 
 
 def test_text_retries_and_newer_input_do_not_block_behind_slow_routing(tmp_path, monkeypatch):
@@ -1696,7 +1724,7 @@ def test_new_vad_segment_blocks_old_answer_before_its_transcript_arrives(tmp_pat
             await asyncio.wait_for(classification_started.wait(), timeout=1)
             instances[0].unresolved_input = True
             release.set()
-            assert (await asyncio.wait_for(ws.receive_json(), timeout=1))["type"] == "state"
+            assert (await _recv_wait(ws, timeout=1))["type"] == "state"
             assert instances[0].requests == []
             await ws.close()
 

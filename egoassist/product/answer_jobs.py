@@ -35,6 +35,8 @@ class AnswerJobs:
         self.journals = {}
         self.tasks = {}
         self.closing = False
+        from egoassist.realtime.settings import number
+        self.correction_grace = number("EGOASSIST_ANSWER_CORRECTION_GRACE", 2, maximum=30)
 
     @staticmethod
     def transition(journal, row, **changes):
@@ -122,11 +124,7 @@ class AnswerJobs:
                     ).total_seconds() >= self.foreground_timeout:
                         self.transition(journal, row, status="queued", reason="foreground-deadline")
                 # Give corrections a bounded grace period, including after a disconnect.
-                if any(turn.get("status") in {"received", "deferred", "classifying", "ready", "processing"}
-                       and (datetime.now(timezone.utc) - datetime.fromisoformat(
-                           turn.get("updatedAt") or turn["timestamp"])).total_seconds() < self.foreground_timeout
-                       for turn in turns.values()):
-                    continue
+                unsettled = self._unsettled(turns)
                 for row in rows.values():
                     key = (str(journal.path), row["turnId"])
                     if len(self.tasks) >= self.concurrency:
@@ -134,10 +132,19 @@ class AnswerJobs:
                     current = answer_jobs(journal).get(row["turnId"], {})
                     if current.get("status") != "queued" or key in self.tasks:
                         continue
+                    queued_age = (datetime.now(timezone.utc) - datetime.fromisoformat(current["timestamp"])).total_seconds()
+                    if unsettled and (current.get("preparedResult") or queued_age < self.correction_grace):
+                        continue
                     task = asyncio.create_task(self._execute(journal, current), name="answer-" + row["turnId"])
                     self.tasks[key] = task
                     task.add_done_callback(lambda finished, key=key: self._finished(key, finished))
             await asyncio.sleep(0.25)
+
+    def _unsettled(self, turns):
+        return any(turn.get("status") in {"received", "deferred", "classifying", "ready", "processing"}
+                   and (datetime.now(timezone.utc) - datetime.fromisoformat(
+                       turn.get("updatedAt") or turn["timestamp"])).total_seconds() < self.foreground_timeout
+                   for turn in turns.values())
 
     def _finished(self, key, task):
         self.tasks.pop(key, None)
@@ -147,16 +154,23 @@ class AnswerJobs:
 
     async def _execute(self, journal, row):
         started = time.perf_counter()
-        row = self.transition(journal, row, status="running", attempt=row["attempt"] + 1,
+        prepared = row.get("preparedResult")
+        row = self.transition(journal, row, status="running", attempt=row["attempt"] + (0 if prepared else 1),
                               startedAt=datetime.now(timezone.utc).isoformat(), timeoutSeconds=self.timeout)
         try:
-            result = await asyncio.wait_for(self.generate(journal, row), self.timeout)
+            result = prepared or await asyncio.wait_for(self.generate(journal, row), self.timeout)
+            duration_ms = row.get("generationMs", 0) if prepared else round((time.perf_counter() - started) * 1000, 3)
             current = answer_jobs(journal)[row["turnId"]]
             turn = CaseWorkLedger(journal).turns().get(row["turnId"], {})
             if current["status"] == "running" and not turn.get("supersededBy") and turn.get("status") != "cancelled":
-                self.transition(journal, current, **result, status="completed", channel="background-text",
-                                durationMs=round((time.perf_counter() - started) * 1000, 3))
-                self._finish_dialogue(journal, current)
+                if self._unsettled(CaseWorkLedger(journal).turns()):
+                    self.transition(journal, current, status="queued", preparedResult=result,
+                                    generationMs=duration_ms, phase="waiting-corrections", reason="result-ready-awaiting-turn-decisions")
+                else:
+                    self.transition(journal, current, **result, status="completed", channel="background-text",
+                                    preparedResult=None, phase="completed",
+                                    durationMs=duration_ms, generationMs=duration_ms)
+                    self._finish_dialogue(journal, current)
         except asyncio.CancelledError:
             current = answer_jobs(journal)[row["turnId"]]
             if current["status"] == "running":

@@ -68,6 +68,22 @@ def test_focused_question_deduplicates_and_ignores_slow_scene_request(tmp_path, 
     asyncio.run(run())
 
 
+def test_visual_control_cancellation_releases_request(tmp_path):
+    async def run():
+        scene = scene_with_frame(tmp_path)
+        await scene.visual_questions.limit.acquire()
+        await scene.visual_questions.limit.acquire()
+        task = asyncio.create_task(scene.context("question-one", describe_frame=True, question="stop"))
+        await asyncio.sleep(0.02)
+        await scene.visual_questions.cancel("question-one", reason="control")
+        result = await asyncio.gather(task, return_exceptions=True)
+        assert isinstance(result[0], asyncio.CancelledError)
+        assert not scene.visual_questions.pending
+        assert any(row["type"] == "scene.question.cancelled" for row in scene.journal.entries())
+        await scene.close()
+    asyncio.run(run())
+
+
 def test_visual_deadline_includes_queue_and_keeps_original_frame(tmp_path, monkeypatch):
     monkeypatch.setenv("EGOASSIST_VISUAL_QUESTION_TIMEOUT", "0.1")
 
