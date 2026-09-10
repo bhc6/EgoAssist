@@ -37,6 +37,7 @@ function renderTurnWorkflow() {
   const models = [...new Set([
     semantic?.model,
     ...events.flatMap(e => [e.model, e.payload?.model, e.payload?.request?.model]),
+    ...(state.toolActivity || []).filter(c => c.origin?.turnId === turn.turnId && c.request).map(c => c.tool),
     answer?.model,
     scene?.model,
   ].filter(Boolean))];

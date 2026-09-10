@@ -4,8 +4,11 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 from datetime import datetime, timedelta, timezone
+from copy import deepcopy
 import inspect
+import json
 from typing import Any
+from jsonschema import Draft202012Validator, ValidationError, SchemaError
 
 from .capabilities import tool_truth
 
@@ -41,7 +44,7 @@ def tool_result_succeeded(result: Any, *, is_error: bool = False) -> bool:
     if is_error or not isinstance(result, dict):
         return False
     return str(result.get("status", "")).casefold() in {
-        "accepted", "completed", "ok", "scheduled", "success", "succeeded",
+        "accepted", "completed", "ok", "scheduled", "success", "succeeded", "resolved",
     }
 
 
@@ -69,6 +72,28 @@ class SkillToolExecutor:
         declared_tools: list[dict[str, Any]],
         confirmed: bool = False,
     ) -> dict[str, Any]:
+        declaration, validated, blocked = self.prepare(tool, arguments, declared_tools, confirmed)
+        if blocked is not None:
+            return blocked
+        handler_name = str(declaration.get("handler", ""))
+        handler = self._handlers.get(handler_name)
+        if handler is None:
+            raise ValueError(f"tool handler is not registered: {handler_name or '<missing>'}")
+        result = handler(validated, declaration)
+        if inspect.isawaitable(result):
+            if inspect.iscoroutine(result):
+                result.close()
+            raise TypeError(f"tool handler must be synchronous: {handler_name}")
+        self.audit.append({
+            "time": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "tool": tool, "handler": handler_name, "arguments": validated, "result": result,
+        })
+        return result
+
+    def prepare(self, tool, arguments, declared_tools, confirmed=False):
+        """Apply the same contract before built-in and registered adapters."""
+        if not isinstance(confirmed, bool):
+            raise ValueError("confirmed must be a boolean")
         declaration = next((item for item in declared_tools if item.get("name") == tool), None)
         if declaration is None:
             raise ValueError(f"tool is not available in the active skill: {tool}")
@@ -89,29 +114,11 @@ class SkillToolExecutor:
                 "arguments": validated,
                 "result": result,
             })
-            return result
+            return declaration, validated, result
         if declaration.get("requires_confirmation", True) and not confirmed:
-            return {"status": "confirmation_required", "tool": tool, "arguments": validated}
-        handler_name = str(declaration.get("handler", ""))
-        handler = self._handlers.get(handler_name)
-        if handler is None:
-            raise ValueError(f"tool handler is not registered: {handler_name or '<missing>'}")
-        result = handler(validated, declaration)
-        if inspect.isawaitable(result):
-            if inspect.iscoroutine(result):
-                result.close()
-            raise TypeError(
-                f"tool handler must be synchronous: {handler_name}; "
-                "call asynchronous providers from an async integration boundary"
-            )
-        self.audit.append({
-            "time": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-            "tool": tool,
-            "handler": handler_name,
-            "arguments": validated,
-            "result": result,
-        })
-        return result
+            return declaration, validated, {"status": "confirmation_required", "tool": tool,
+                                            "arguments": validated, "description": declaration.get("description", "")}
+        return declaration, validated, None
 
     @staticmethod
     def _validate_arguments(arguments: dict[str, Any], schema: dict[str, Any]) -> dict[str, Any]:
@@ -121,34 +128,15 @@ class SkillToolExecutor:
         unknown = set(arguments) - set(properties)
         if unknown and not schema.get("additionalProperties", False):
             raise ValueError(f"undeclared tool arguments: {', '.join(sorted(unknown))}")
-        validated = dict(arguments)
+        validated = deepcopy(arguments)
         for name, field in properties.items():
             if name not in validated and "default" in field:
-                validated[name] = field["default"]
-        missing = set(schema.get("required", [])) - set(validated)
-        if missing:
-            raise ValueError(f"missing required tool arguments: {', '.join(sorted(missing))}")
-        for name, value in validated.items():
-            field = properties.get(name)
-            if field:
-                SkillToolExecutor._validate_value(name, value, field)
+                validated[name] = deepcopy(field["default"])
+        contract = {"type": "object", "additionalProperties": False, **schema}
+        try:
+            json.dumps(validated, allow_nan=False)
+            Draft202012Validator.check_schema(contract)
+            Draft202012Validator(contract).validate(validated)
+        except (ValidationError, SchemaError) as exc:
+            raise ValueError(f"invalid tool arguments: {exc.message}") from exc
         return validated
-
-    @staticmethod
-    def _validate_value(name: str, value: Any, field: dict[str, Any]) -> None:
-        expected = field.get("type")
-        valid = {
-            "integer": isinstance(value, int) and not isinstance(value, bool),
-            "number": isinstance(value, (int, float)) and not isinstance(value, bool),
-            "string": isinstance(value, str),
-            "boolean": isinstance(value, bool),
-        }.get(expected, True)
-        if not valid:
-            raise ValueError(f"invalid type for tool argument {name}: expected {expected}")
-        if expected in {"integer", "number"}:
-            if "minimum" in field and value < field["minimum"]:
-                raise ValueError(f"tool argument below minimum: {name}")
-            if "maximum" in field and value > field["maximum"]:
-                raise ValueError(f"tool argument above maximum: {name}")
-        if expected == "string" and len(value) > field.get("maxLength", len(value)):
-            raise ValueError(f"tool argument exceeds maxLength: {name}")

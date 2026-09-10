@@ -79,7 +79,8 @@
           <button id="textTurnSend" type="submit" class="primary">发送</button>
           <span id="textTurnError" role="status" aria-live="polite"></span>
         </form>
-        <div class="speech-stream">
+          <section id="toolActivity" class="tool-activity" aria-label="工具执行记录" hidden></section>
+          <div class="speech-stream">
           <article><span>现场语音转写</span><p id="transcript">等待语音</p></article>
           <article id="assistantCaption"><span>助手正在说</span><p>等待语音输出</p></article>
         </div>
@@ -253,6 +254,7 @@
   <script src="memory_view.js?v=20260909"></script>
   <script src="workflow.js?v=20260909-workspace"></script>
   <script src="request.js?v=20260910"></script>
+  <script src="tool_activity.js?v=20260910"></script>
   <script src="app.js?v=20260910"></script>
 </body>
 </html>

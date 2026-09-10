@@ -127,6 +127,8 @@ class SessionJournal:
         self._entries: list[dict[str, Any]] = []
         self._idempotency: dict[str, str] = {}
         self._loaded_size = 0
+        self._tool_projection = {}
+        self._tool_projection_count = 0
         with self._lock, _file_lock(self.path):
             if self.path.exists():
                 self._load()
@@ -157,6 +159,8 @@ class SessionJournal:
 
     def _load(self) -> None:
         self.recovered_partial_tail = False
+        self._tool_projection = {}
+        self._tool_projection_count = 0
         self._entries = []
         self._idempotency = {}
         raw = self.path.read_bytes()
@@ -288,6 +292,14 @@ class SessionJournal:
             self._refresh()
             return [dict(item) for item in self._entries]
 
+    def tool_activity(self) -> list[dict[str, Any]]:
+        from .tool_activity import tool_activity
+        with self._lock, _file_lock(self.path):
+            self._refresh()
+            tool_activity(self._entries[self._tool_projection_count:], self._tool_projection)
+            self._tool_projection_count = len(self._entries)
+            return [dict(row) for row in self._tool_projection.values()]
+
     def append_message(
         self,
         role: str,
@@ -398,8 +410,10 @@ class SessionJournal:
         entries = self.entries()
         completed = {
             str(entry.get("callId")) for entry in entries
-            if entry.get("type") == "tool_result"
+            if entry.get("type") in {"tool_result", "tool_execution"}
         }
+        origins = {str(entry.get("callId")): entry.get("metadata", {}).get("origin")
+                   for entry in entries if entry.get("type") == "tool_call"}
         for entry in entries:
             if entry.get("type") == "tool_confirmation" and entry.get("status") == "pending":
                 call_id = str(entry.get("callId", ""))
@@ -409,6 +423,9 @@ class SessionJournal:
                         "arguments": dict(entry.get("arguments", {})),
                         "generation": None,
                     }
+                    origin = entry.get("origin") or origins.get(call_id)
+                    if origin:
+                        pending[call_id]["origin"] = dict(origin)
         return pending
 
 

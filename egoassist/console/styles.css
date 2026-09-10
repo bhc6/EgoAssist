@@ -1003,3 +1003,8 @@ header select {
 }
 
 }
+.tool-activity { max-height: 420px; overflow: auto; margin-block: 12px; grid-column: 1 / -1; }
+.tool-call { border-top: 1px solid #cbd5d6; padding: 12px 0; overflow-wrap: anywhere; }
+.tool-call header { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; justify-content: space-between; }
+.tool-call p { margin: 6px 0; }
+.tool-call pre { white-space: pre-wrap; overflow-wrap: anywhere; }

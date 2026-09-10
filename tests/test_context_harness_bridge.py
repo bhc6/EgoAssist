@@ -1,5 +1,6 @@
 import json
 import threading
+import asyncio
 import pytest
 from collections import deque
 
@@ -74,6 +75,152 @@ def harness_at(path):
         SessionJournal(path, session_id="bridge-session"),
         ContextSettings(context_window=2048, reserve_tokens=256, keep_recent_tokens=512, max_summary_tokens=256),
     )
+
+
+@pytest.mark.parametrize("mode", ["batch", "timeout", "cancel", "close-executing", "receipted", "no-tools", "proactive"])
+def test_async_tool_loop_lifecycle(tmp_path, mode):
+    async def run():
+        harness = harness_at(tmp_path / (mode + ".jsonl"))
+        bridge = make_bridge(harness)
+        bridge.loop = asyncio.get_running_loop()
+        bridge._schedule_queued_dispatch = lambda: None
+        started, release = asyncio.Event(), asyncio.Event()
+        executions, selections = [], []
+
+        class Selector:
+            model = "test-selector"
+
+            async def select(self, *args):
+                selections.append(args)
+                started.set()
+                if mode == "timeout":
+                    raise TimeoutError()
+                if mode == "cancel":
+                    await release.wait()
+                return {"tool_calls": [{"id": "call-" + str(i), "function": {"name": "action", "arguments": "{}"}}
+                                       for i in (1, 2, 1)]}
+
+        def execute(name, arguments, confirmed):
+            executions.append(confirmed)
+            if mode == "close-executing":
+                bridge.loop.call_soon_threadsafe(started.set)
+                asyncio.run_coroutine_threadsafe(release.wait(), bridge.loop).result(timeout=5)
+            return {"status": "completed"}
+
+        bridge.tool_model = Selector()
+        bridge.set_tools([] if mode == "no-tools" else [{"name": "action", "arguments": {"type": "object"}}], execute)
+        bridge.set_tool_result_handler(lambda call_id, *args: {"resultId": "result-" + call_id})
+        if mode == "receipted":
+            harness.record_tool_result("already", "action", {"status": "completed"}, metadata={"origin": {"turnId": "turn"}})
+        bridge.request_response("Perform the action", origin={"turnId": "turn"},
+                                purpose="proactive-utterance" if mode == "proactive" else "conversation")
+        if mode in {"receipted", "no-tools", "proactive"}:
+            assert not selections and len(bridge.conversation.responses) == 1
+            return
+        await asyncio.wait_for(started.wait(), 2)
+        if mode == "cancel":
+            bridge.cancel_response()
+        if mode == "close-executing":
+            while not executions:
+                await asyncio.sleep(0.001)
+            bridge.closed = True
+            bridge.connected = False
+            close_task = asyncio.create_task(bridge._tool_runner.close())
+            await asyncio.sleep(0)
+            assert not close_task.done()
+            release.set()
+            await close_task
+        else:
+            while bridge._tool_runner.tasks:
+                await asyncio.sleep(0.001)
+        results = [e for e in harness.journal.entries() if e["type"] == "tool_result"]
+        if mode == "batch":
+            assert executions == [True, True]
+            assert len(results) == 2 and len(bridge.conversation.responses) == 1
+            assert bridge._inflight_response.origin["resultIds"] == ["result-call-1", "result-call-2"]
+            deliveries = []
+            bridge.set_result_delivery_handler(lambda *args: deliveries.append(args))
+            bridge._return_result_to_inbox(bridge._inflight_response, "test")
+            assert deliveries == [("result-call-1", "pending"), ("result-call-2", "pending")]
+        elif mode == "close-executing":
+            assert len(results) == 1 and not bridge.conversation.responses
+            assert not bridge.conversation.items
+        else:
+            assert not executions and not results
+            assert len(bridge.conversation.responses) == (1 if mode == "timeout" else 0)
+            if mode == "cancel":
+                assert not bridge._response_pending
+
+    asyncio.run(run())
+
+
+def test_incremental_tool_activity_retains_unknown_outcome_and_selection(tmp_path):
+    harness = harness_at(tmp_path / "projection.jsonl")
+    journal = harness.journal
+    journal.append("tool.request", {"model": "actual-model", "messages": [{"content": "input"}],
+                                    "origin": {"selectionId": "select-1"}})
+    assert journal.tool_activity()[0]["status"] == "selecting"
+    journal.append("tool.selection", {"model": "actual-model", "latencyMs": 42,
+                                      "origin": {"selectionId": "select-1"}, "message": {"content": "clarify"}})
+    harness.record_tool_call("call", "action", {})
+    harness.record_tool_result("call", "action", {"status": "interrupted"}, is_error=True)
+    rows = journal.tool_activity()
+    assert rows[0]["latencyMs"] == 42 and rows[1]["status"] == "interrupted"
+    assert SessionJournal(journal.path).tool_activity() == rows
+    assert journal.tool_activity() == rows
+
+
+def test_automatic_tools_execute_once_without_confirmation(tmp_path):
+    harness = harness_at(tmp_path / "automatic.jsonl")
+    bridge = make_bridge(harness)
+    bridge.auto_approve_tools = True
+    calls, messages = [], []
+    bridge._schedule = messages.append
+    bridge.set_tools([{"name": "action", "arguments": {"type": "object"}}],
+                     lambda name, arguments, confirmed: calls.append(confirmed) or {"status": "completed"})
+    event = {"call_id": "auto-1", "name": "action", "arguments": "{}"}
+    bridge._handle_tool_call_event(event)
+    bridge._handle_tool_call_event(event)
+    assert calls == [True]
+    assert not any(m["type"] == "tool_confirmation_required" for m in messages)
+    assert [e["type"] for e in harness.journal.entries()] == ["tool_call", "tool_execution", "tool_result"]
+    assert messages[-1]["status"] == "completed"
+
+
+def test_invalid_json_returns_error_instead_of_leaving_tool_unanswered(tmp_path):
+    bridge = make_bridge(harness_at(tmp_path / "invalid.jsonl"))
+    bridge._handle_tool_call_event({"call_id": "invalid-1", "name": "action", "arguments": "[1]"})
+    result = json.loads(bridge.conversation.items[-1]["output"])
+    assert result["status"] == "error"
+    assert "JSON object" in result["error"]
+
+
+def test_recovery_preserves_source_and_does_not_reexecute_unknown_effect(tmp_path):
+    harness = harness_at(tmp_path / "crash.jsonl")
+    origin = {"turnId": "original-question", "tools": [{"name": "action"}]}
+    harness.record_tool_call("pending", "action", {}, metadata={"origin": origin})
+    harness.journal.append("tool_confirmation", {"callId": "pending", "name": "action", "arguments": {}, "status": "pending"})
+    harness.record_tool_call("executing", "action", {}, metadata={"origin": origin})
+    harness.journal.append("tool_execution", {"callId": "executing", "accepted": True, "origin": origin})
+    bridge = make_bridge(harness)
+    bridge.set_context_harness(harness)
+    assert bridge._pending_tool_calls["pending"]["origin"] == origin
+    assert "executing" not in bridge._pending_tool_calls
+    result = harness.journal.entries()[-1]
+    assert result["result"]["status"] == "interrupted" and result["isError"]
+    assert result["metadata"]["origin"] == origin
+
+
+def test_duplicate_confirmation_is_idempotent_and_bool_is_strict(tmp_path):
+    bridge = make_bridge(harness_at(tmp_path / "duplicate-confirm.jsonl"))
+    calls = []
+    bridge.set_tools([], lambda *args: calls.append(args) or {"status": "completed"})
+    bridge._pending_tool_calls["one"] = {"name": "action", "arguments": {}, "generation": 3}
+    with pytest.raises(ValueError, match="boolean"):
+        bridge.confirm_tool("one", "false")
+    assert bridge.confirm_tool("one", True)
+    assert bridge.confirm_tool("one", True)
+    assert len(calls) == 1
 
 
 def test_speech_onset_stops_device_playback_even_after_cloud_finished(tmp_path):

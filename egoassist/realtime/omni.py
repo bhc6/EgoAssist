@@ -653,13 +653,17 @@ class OmniBrowserBridge:
         # The isolated observation lane connects when its first frame is requested.
         self.connecting = False
         await self.emit({"type": "ready", "lanes": self.provider_lanes_snapshot()})
-        for call_id, pending in getattr(self, "_pending_tool_calls", {}).items():
+        for call_id, pending in list(getattr(self, "_pending_tool_calls", {}).items()):
+            if getattr(self, "auto_approve_tools", False):
+                await asyncio.to_thread(self.confirm_tool, call_id, True)
+                continue
             await self.emit({
                 "type": "tool_confirmation_required",
                 "callId": call_id,
                 "tool": pending["name"],
                 "arguments": pending["arguments"],
                 "recovered": pending.get("generation") is None,
+                "origin": pending.get("origin", {}),
             })
 
     def _new_dialogue_conversation(self, generation: int):
@@ -671,7 +675,7 @@ class OmniBrowserBridge:
         )
 
     def _configure_dialogue(self, conversation) -> None:
-        tools = getattr(self, "_provider_tools", [])
+        tools = [] if getattr(self, "tool_model", None) else getattr(self, "_provider_tools", [])
         signature = (conversation, self.voice, self.instructions, json.dumps(tools, sort_keys=True))
         if getattr(self, "_last_dialogue_configuration", None) == signature:
             return
@@ -1031,6 +1035,8 @@ class OmniBrowserBridge:
             self._send_response(request)
         elif disconnected:
             self._schedule_reconnect("response-requested-while-disconnected")
+        elif interrupt and getattr(self, "_tool_runner", None):
+            self._tool_runner.cancel_selection()
         return should_dispatch
 
     def handle_user_speech_started(self, *, trigger: str = "provider-speech-started") -> str:
@@ -1272,6 +1278,15 @@ class OmniBrowserBridge:
             self._trace("tool.call.invalid", {
                 "callId": call_id or None, "name": name or None, "arguments": raw_arguments,
             }, response_id=response_id)
+            if call_id and name:
+                claim, _ = self._claim_tool_call(call_id, (name, str(raw_arguments)))
+                if claim == "new":
+                    if self._context_harness:
+                        self._context_harness.record_tool_call(call_id, name, {"invalidArguments": raw_arguments},
+                                                              metadata={"origin": origin})
+                    self._complete_tool_call(call_id, name,
+                        {"status": "error", "error": "Tool arguments must be a valid JSON object. Correct the arguments before trying again."},
+                        True, origin=origin)
             return
         signature = (name, json.dumps(arguments, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
         claim, known = self._claim_tool_call(call_id, signature)
@@ -1298,6 +1313,8 @@ class OmniBrowserBridge:
         self._trace("tool.call.received", {
             "callId": call_id, "name": name, "arguments": arguments,
         }, response_id=response_id)
+        self._schedule({"type": "tool_status", "callId": call_id, "tool": name,
+                        "arguments": arguments, "origin": origin, "status": "received"})
         if self._tool_handler is None:
             self._complete_tool_call(
                 call_id, name, {"status": "error", "error": "tool handler unavailable"},
@@ -1305,7 +1322,16 @@ class OmniBrowserBridge:
             )
             return
         try:
-            result = self._invoke_tool_handler(name, arguments, False, origin)
+            automatic = getattr(self, "auto_approve_tools", False)
+            if automatic and self._context_harness:
+                self._context_harness.journal.append("tool_execution", {
+                    "callId": call_id, "accepted": True, "policy": "automatic", "origin": origin,
+                }, idempotency_key=f"tool-execution:{call_id}")
+            self._schedule({"type": "tool_status", "callId": call_id, "tool": name,
+                            "origin": origin, "status": "running"})
+            result = self._invoke_tool_handler(name, arguments, automatic, origin)
+            if not isinstance(result, dict):
+                raise ValueError("tool handler must return a result object")
         except Exception as exc:
             self._complete_tool_call(
                 call_id, name, {"status": "error", "error": str(exc)}, True, origin=origin,
@@ -1319,12 +1345,15 @@ class OmniBrowserBridge:
             if self._context_harness:
                 self._context_harness.journal.append("tool_confirmation", {
                     "callId": call_id, "name": name, "arguments": arguments, "status": "pending",
+                    "origin": origin, "description": result.get("description", ""),
                 }, idempotency_key=f"tool-confirmation:{call_id}")
             self._schedule({
                 "type": "tool_confirmation_required",
                 "callId": call_id,
                 "tool": name,
                 "arguments": arguments,
+                "origin": origin,
+                "description": result.get("description", ""),
             })
             return
         self._complete_tool_call(call_id, name, result, False, origin=origin)
@@ -1389,13 +1418,26 @@ class OmniBrowserBridge:
                 values.pop(next(iter(values)))
 
     def confirm_tool(self, call_id: str, accepted: bool) -> bool:
-        pending = self._pending_tool_calls.pop(str(call_id), None)
+        if not isinstance(accepted, bool):
+            raise ValueError("accepted must be a boolean")
+        with self._response_lock:
+            pending = self._pending_tool_calls.get(str(call_id))
+            if pending is not None:
+                if self._context_harness:
+                    self._context_harness.journal.append("tool_execution", {
+                        "callId": call_id, "accepted": accepted, "origin": pending.get("origin", {}),
+                    }, idempotency_key=f"tool-execution:{call_id}")
+                self._pending_tool_calls.pop(str(call_id))
         if pending is None:
-            return False
+            return bool(self._context_harness and any(
+                entry.get("callId") == call_id and entry.get("type") in {"tool_result", "tool_execution"}
+                for entry in self._context_harness.journal.entries()))
         name = pending["name"]
         arguments = pending["arguments"]
         origin = dict(pending.get("origin") or {})
         provider_call_active = pending.get("generation") == self._dialogue_generation
+        self._schedule({"type": "tool_status", "callId": call_id, "tool": name,
+                        "arguments": arguments, "origin": origin, "status": "running"})
         if not accepted:
             self._complete_tool_call(
                 call_id, name, {"status": "rejected"}, False, provider_call_active, origin,
@@ -1425,7 +1467,9 @@ class OmniBrowserBridge:
         is_error: bool,
         provider_call_active: bool = True,
         origin: dict[str, Any] | None = None,
-    ) -> None:
+        continue_response: bool = True,
+        publish_context: bool = True,
+    ) -> dict[str, Any]:
         journal_entry = None
         if self._context_harness:
             journal_entry = self._context_harness.record_tool_result(
@@ -1445,32 +1489,31 @@ class OmniBrowserBridge:
         self._trace("tool.result.committed", {
             "callId": call_id, "name": name, "result": result, "isError": is_error,
         })
-        if self.conversation and self.connected and provider_call_active:
+        self._schedule({"type": "tool_status", "callId": call_id, "tool": name,
+                        "origin": origin or {}, "status": "failed" if is_error else
+                        result.get("status", "completed") if isinstance(result, dict) else "completed",
+                        "result": result, "isError": is_error})
+        if publish_context and self.conversation and self.connected and provider_call_active:
             self.conversation.create_item({
                 "id": "item_" + uuid4().hex,
                 "type": "function_call_output",
                 "call_id": call_id,
                 "output": json.dumps(result, ensure_ascii=False),
             })
-        elif self.conversation and self.connected:
+        elif publish_context and self.conversation and self.connected:
             self.inject_context_data("recovered_tool_result", {
                 "callId": call_id, "name": name, "result": result, "isError": is_error,
             })
-        if self.conversation and self.connected:
+        if self.conversation and self.connected and continue_response:
             succeeded = tool_result_succeeded(result, is_error=is_error)
-            outcome_instruction = (
-                "The committed tool_result reports success; state only its exact effect and limits."
-                if succeeded else
-                "The committed tool_result does not report success; do not claim the action was completed."
-            )
             self.request_response(
-                "Continue only the source intent using the committed tool result. Do not repeat the tool call. "
-                + outcome_instruction,
+                prompt_text("tool_use/continue_success" if succeeded else "tool_use/continue_failure"),
                 priority=100,
                 reason="tool-result",
                 purpose="conversation",
                 origin=dict(origin or {}) or None,
             )
+        return dict(origin or {})
 
     def set_result_delivery_handler(self, handler: Callable[[str, str], Any] | None) -> None:
         self._result_delivery_handler = handler
@@ -1517,6 +1560,17 @@ class OmniBrowserBridge:
 
     def set_context_harness(self, harness: ContextHarness) -> None:
         self._context_harness = harness
+        entries = harness.journal.entries()
+        finished = {e.get("callId") for e in entries if e.get("type") == "tool_result"}
+        calls = {e.get("callId"): e for e in entries if e.get("type") == "tool_call"}
+        # A process loss can occur after an external effect but before its receipt.
+        # Preserve the unknown outcome; replaying the action could duplicate it.
+        for entry in entries:
+            if entry.get("type") == "tool_execution" and entry.get("callId") not in finished:
+                call = calls.get(entry.get("callId"), {})
+                harness.record_tool_result(entry["callId"], call.get("name", "unknown"), {
+                    "status": "interrupted", "reason": "Execution ended without a committed result; effect is unconfirmed and was not repeated.",
+                }, is_error=True, metadata={"origin": entry.get("origin", {})})
         self._pending_tool_calls = harness.journal.pending_tool_confirmations()
         for entry in harness.journal.entries()[-512:]:
             if entry.get("type") == "tool_call" and entry.get("callId"):
@@ -1777,6 +1831,9 @@ class OmniBrowserBridge:
                 self._cancel_when_created = True
         if should_cancel:
             self.conversation.cancel_response()
+        runner = getattr(self, "_tool_runner", None)
+        if runner:
+            runner.cancel_selection()
         self._trace("response.cancel.requested", {
             "reason": reason,
             "providerSent": should_cancel,
@@ -1785,17 +1842,41 @@ class OmniBrowserBridge:
         return True
 
     def _return_result_to_inbox(self, request: _ResponseRequest, reason: str) -> None:
-        result_id = str((request.origin or {}).get("resultId", ""))
         handler = getattr(self, "_result_delivery_handler", None)
-        if not result_id or handler is None:
+        if handler is None:
             return
-        try:
-            handler(result_id, "pending")
-            self._trace("result.delivery.requeued", {"resultId": result_id, "reason": reason})
-        except Exception as exc:
-            self._trace("result.delivery.update_failed", {"resultId": result_id, "error": str(exc)})
+        for result_id in self._request_result_ids(request):
+            try:
+                handler(result_id, "pending")
+                self._trace("result.delivery.requeued", {"resultId": result_id, "reason": reason})
+            except Exception as exc:
+                self._trace("result.delivery.update_failed", {"resultId": result_id, "error": str(exc)})
+
+    @staticmethod
+    def _request_result_ids(request):
+        origin = request.origin or {} if request else {}
+        return list(dict.fromkeys(str(value) for value in [origin.get("resultId"), *origin.get("resultIds", [])] if value))
 
     def _send_response(self, request: _ResponseRequest) -> None:
+        if (getattr(self, "tool_model", None) and self._provider_tools
+                and request.purpose == "conversation" and request.reason != "tool-result"
+                and (request.origin or {}).get("turnId")):
+            turn_id = request.origin["turnId"]
+            receipts = [entry for entry in self._context_harness.journal.entries()
+                        if entry.get("type") in {"tool_result", "tool_execution"}
+                        and (entry.get("origin") or entry.get("metadata", {}).get("origin", {})).get("turnId") == turn_id]
+            if receipts:
+                self.inject_context_data("committed_tool_receipts", receipts)
+                self._send_response_direct(request)
+                return
+            from .tool_loop import ToolCallRunner
+            if not getattr(self, "_tool_runner", None):
+                self._tool_runner = ToolCallRunner(self)
+            self._tool_runner.start(request)
+            return
+        self._send_response_direct(request)
+
+    def _send_response_direct(self, request: _ResponseRequest) -> None:
         permission = getattr(self, "output_permission", None)
         if request.output_mode == "audio" and permission and not permission(request.origin, request.purpose):
             with self._response_lock:
@@ -2020,13 +2101,13 @@ class OmniBrowserBridge:
                 )
             except Exception as exc:
                 self._trace("intent.lifecycle.update_failed", {"error": str(exc)})
-        result_id = str((request.origin or {}).get("resultId", "")) if request else ""
         delivery_handler = getattr(self, "_result_delivery_handler", None)
-        if result_id and delivery_handler:
-            try:
-                delivery_handler(result_id, "pending" if interrupted else "delivered")
-            except Exception as exc:
-                self._trace("result.delivery.update_failed", {"resultId": result_id, "error": str(exc)})
+        if delivery_handler:
+            for result_id in self._request_result_ids(request):
+                try:
+                    delivery_handler(result_id, "pending" if interrupted else "delivered")
+                except Exception as exc:
+                    self._trace("result.delivery.update_failed", {"resultId": result_id, "error": str(exc)})
         if fragment:
             self._last_assistant_utterance = fragment
             self._last_assistant_utterance_at = time.monotonic()
@@ -2271,6 +2352,10 @@ class OmniBrowserBridge:
         self.connected = False
         self._drop_open_input_segments("bridge-closed")
         self._dialogue_generation += 1
+        if getattr(self, "_tool_runner", None):
+            await self._tool_runner.close()
+        if getattr(self, "tool_model", None):
+            await self.tool_model.close()
         await self.perception.close()
         if self.conversation:
             try:

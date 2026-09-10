@@ -50,6 +50,7 @@ const VIDEO_BUFFER_HIGH_WATER = 128 * 1024;
 let droppedAudioChunks = 0;
 let droppedVideoFrames = 0;
 const responseScopes = new WeakMap();
+const toolActivityView = new ToolActivityView($("#toolActivity"));
 async function request(path, options = {}) {
   const isCurrent = sessionScope();
   try {
@@ -95,6 +96,7 @@ function showLogin() {
   state = null;
   localSubmittedTurns.clear();
   sessionDrafts.clear();
+  toolActivityView.reset(null);
   $("#textTurnInput").value = "";
   $("#textTurnSend").disabled = false;
   $("#proactiveSuggestions").checked = false;
@@ -537,6 +539,7 @@ function render(next) {
   if (!currentUser || !next || next.sessionId !== selectedSessionId) return;
   if (responseScopes.has(next) && !responseScopes.get(next)()) return;
   state = next;
+  toolActivityView.snapshot(selectedSessionId, state.toolActivity);
   renderSharedScene(state.sharedScene);
   renderPerformance(state.performance);
   syncInsightSession();
@@ -1140,11 +1143,9 @@ async function connectRealtimeSession(generation, media, retryAttempt) {
         ? (stream ? "记忆已提交 · 正在听" : "记忆已提交 · 文本会话在线")
         : message.status === "needs-input" ? "等待补充要记住的内容" : "记忆未提交";
     } else if (message.type === "tool_confirmation_required") {
-      const details = JSON.stringify(message.arguments || {}, null, 2);
-      const accepted = window.confirm("Allow tool " + message.tool + "?\n\n" + details);
-      if (socket === ws && ws.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify({type: "tool_confirmation", callId: message.callId, accepted}));
-      }
+      toolActivityView.event(selectedSessionId, message);
+    } else if (message.type === "tool_status") {
+      toolActivityView.event(selectedSessionId, message);
     } else if (message.type === "media_gap") {
       $("#duplexState").textContent = "Media gap detected; live capture continues";
     } else if (message.type === "performance_metric") {
@@ -1486,6 +1487,7 @@ async function changeSession(targetId, label = null) {
       targetId = created.session.id;
     }
     selectedSessionId = targetId;
+    toolActivityView.reset(targetId);
     state = null;
     localSubmittedTurns.clear();
     $("#textTurnInput").value = sessionDrafts.get(targetId) || "";

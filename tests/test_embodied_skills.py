@@ -135,6 +135,25 @@ def test_tool_contract_drives_defaults_and_fails_closed():
         SkillToolExecutor({}).execute("demo_action", {}, declaration)
 
 
+@pytest.mark.parametrize("arguments", [
+    {"action": "invented", "items": [1]},
+    {"action": "read", "items": ["wrong"]},
+    {"action": "read", "items": []},
+    {"action": "read", "items": [float("nan")]},
+])
+def test_nested_schema_and_enum_are_checked_before_execution(arguments):
+    calls = []
+    executor = SkillToolExecutor({"test": lambda *args: calls.append(args)})
+    declaration = [{"name": "action", "handler": "test", "requires_confirmation": False,
+                    "arguments": {"type": "object", "required": ["action", "items"], "properties": {
+                        "action": {"type": "string", "enum": ["read"]},
+                        "items": {"type": "array", "minItems": 1, "items": {"type": "integer"}},
+                    }}}]
+    with pytest.raises(ValueError):
+        executor.execute("action", arguments, declaration)
+    assert not calls
+
+
 def test_tool_executor_rejects_async_handlers_without_audit():
     declaration = [{
         "name": "async_action",

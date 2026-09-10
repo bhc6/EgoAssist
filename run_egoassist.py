@@ -71,6 +71,7 @@ from egoassist.realtime.ambient import AMBIENT_SCHEMA_VERSION
 from egoassist.realtime.media_audit import MediaAuditAccumulator
 from egoassist.realtime.locale_prompts import PROMPTS
 from egoassist.realtime.tools import tool_result_succeeded
+from egoassist.realtime.tool_model import ToolModel
 from egoassist.realtime.routed_tools import execute_reference_request
 from egoassist.realtime.performance import event_metric, performance_snapshot
 from egoassist.realtime.episodes import retrieval_audit_from_events
@@ -339,6 +340,7 @@ class CaseRuntimeOwner:
     queued_turn_ids: set[str] = field(default_factory=set)
     job_scheduler_task: asyncio.Task | None = None
     bridge: Any = None
+    tool_confirmation_tasks: dict[str, asyncio.Task] = field(default_factory=dict)
     intent_runtimes: dict[str, SkillRuntime] = field(default_factory=dict)
     memory_bus: Any = None  # MemoryEventBus — Phase 1 observability
     background_tasks: dict[str, "TaskSlot"] = field(default_factory=dict)  # Phase 2A: fanout slots
@@ -1449,6 +1451,8 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                 "audioAttribution": audio_attribution,
                 "episodicMemory": episodic_state,
                 "toolAudit": list(reversed(active_tools.audit[-8:])),
+                "toolActivity": harness_override.journal.tool_activity() if harness_override else [],
+                "toolApproval": "automatic",
                 "events": visible_events,
                 "performance": performance_snapshot(visible_events),
                 "sessionId": visible_session_id,
@@ -1564,6 +1568,8 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
             "audioAttribution": audio_attribution,
             "episodicMemory": episodic_state,
             "toolAudit": list(reversed(active_tools.audit[-8:])),
+            "toolActivity": harness_override.journal.tool_activity() if harness_override else [],
+            "toolApproval": "automatic",
             "events": visible_events,
             "performance": performance_snapshot(visible_events),
             "sessionId": visible_session_id,
@@ -4314,6 +4320,29 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
             "state": scoped_state_for_user(user_id, session_id, runtime_override=owner.runtime),
         })
 
+    def submit_tool_confirmation(owner, call_id, accepted):
+        if not isinstance(accepted, bool):
+            raise ValueError("accepted must be a boolean")
+        if call_id in owner.tool_confirmation_tasks:
+            return
+        if any(e.get("callId") == call_id and e.get("type") in {"tool_result", "tool_execution"}
+               for e in owner.journal.entries()):
+            return
+        if call_id not in owner.journal.pending_tool_confirmations():
+            raise web.HTTPNotFound(text="pending tool call not found")
+        bridge = owner.bridge
+        if not bridge or not getattr(bridge, "connected", False):
+            raise web.HTTPConflict(text="Reconnect the assistant to confirm this tool call")
+
+        async def execute():
+            try:
+                await asyncio.to_thread(bridge.confirm_tool, call_id, accepted)
+            except Exception:
+                logging.exception("Tool confirmation failed for %s", call_id)
+            finally:
+                owner.tool_confirmation_tasks.pop(call_id, None)
+        owner.tool_confirmation_tasks[call_id] = asyncio.create_task(execute())
+
     async def post_tool(request):
         user_id = request[user_key]["id"]
         payload = await request.json()
@@ -4335,8 +4364,11 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                 tool_name = str(payload.get("tool", ""))
                 arguments = payload.get("arguments", {})
                 runtime_declarations = runtime_tool_declarations(active_runtime.skill)
-                declaration = next((item for item in runtime_declarations if item.get("name") == tool_name), None)
-                if tool_name == "set_timer" and declaration and declaration.get("handler") == "builtin.temporal-reminder.v1":
+                declaration, arguments, blocked = active_tools.prepare(
+                    tool_name, arguments, runtime_declarations, True)
+                if blocked is not None:
+                    result = blocked
+                elif tool_name == "set_timer" and declaration and declaration.get("handler") == "builtin.temporal-reminder.v1":
                     result = queue_reminder(
                         owner,
                         seconds=arguments.get("seconds"),
@@ -4366,7 +4398,7 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                         tool=tool_name,
                         arguments=arguments,
                         declared_tools=runtime_declarations,
-                        confirmed=bool(payload.get("confirmed", False)),
+                        confirmed=True,
                     )
                 persist_tool_audit(owner, audit_count)
         else:
@@ -4376,7 +4408,7 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                 tool=str(payload.get("tool", "")),
                 arguments=payload.get("arguments", {}),
                 declared_tools=active_runtime.skill.manifest.get("tools", []),
-                confirmed=bool(payload.get("confirmed", False)),
+                confirmed=True,
             )
         state_payload = scoped_state_for_user(
             user_id,
@@ -4937,9 +4969,6 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
             source = dict(origin or {})
             ledger = owner.work_ledger or CaseWorkLedger(harness.journal)
             source_turn_id = str(source.get("turnId", ""))
-            evidence = owner.scene.turns.get(source_turn_id)
-            if evidence and not evidence["speaker"].get("wearer"):
-                raise PermissionError("unconfirmed microphone speaker cannot authorize tools")
             source_intent_id = str(source.get("intentId", ""))
             source_job_id = str(source.get("jobId", ""))
             source_generation = source.get("generation")
@@ -4964,7 +4993,10 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
             declared_tools = source.get("tools")
             if not isinstance(declared_tools, list):
                 declared_tools = session_tool_declarations()
-            declaration = next((item for item in declared_tools if item.get("name") == name), None)
+            declaration, arguments, blocked = session_tools.prepare(name, arguments, declared_tools, confirmed)
+            if blocked is not None:
+                persist_tool_audit(owner, audit_count)
+                return blocked
             if name == "set_timer" and declaration and declaration.get("handler") == "builtin.temporal-reminder.v1":
                 result = queue_reminder(
                     owner,
@@ -5065,7 +5097,7 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                     delivery="speech-or-display",
                 )
                 ledger.set_job_status(
-                    source_origin.get("jobId"), "completed",
+                    source_origin.get("jobId"), "failed" if is_error else "completed",
                     detail={"resultId": result_entry["resultId"]},
                 ) if source_origin.get("jobId") in ledger.jobs() else None
             card = remember_tool_effect(
@@ -5666,7 +5698,7 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                     job_id=f"job-{turn_id}",
                 )
                 if not background_intent and hasattr(bridge, "set_tools"):
-                    bridge.set_tools([] if semantic.get("speakerRestricted") else session_tool_declarations(), session_tool_handler)
+                    bridge.set_tools(session_tool_declarations(), session_tool_handler)
                 if not background_intent and result.get("taskControl") == "show-reference":
                     result["referenceResult"] = execute_reference_request(
                         harness, execute_session_tool, session_tool_declarations(),
@@ -5880,7 +5912,7 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                         "intentId": _child_intent["intentId"],
                         "jobId": _child_job["jobId"],
                         "skill": current_skill_ref,
-                        "tools": [] if semantic.get("speakerRestricted") else session_tool_declarations(),
+                        "tools": session_tool_declarations(),
                         "runtimeCheckpoint": runtime_checkpoint(processing_runtime),
                         "waitingInput": _candidate_waiting,
                         "unsupportedCapability": "background-execution" if _candidate_unsupported else None,
@@ -6017,7 +6049,7 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                         "intentId": intent["intentId"],
                         "jobId": job["jobId"],
                         "skill": current_skill_ref,
-                        "tools": [] if semantic.get("speakerRestricted") else session_tool_declarations(),
+                        "tools": session_tool_declarations(),
                         "runtimeCheckpoint": runtime_checkpoint(processing_runtime),
                     },
                 )
@@ -6278,6 +6310,8 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                 for pending_turn in recoverable:
                     enqueue_persisted_turn(pending_turn)
             bridge = OmniBrowserBridge(api_key, model, voice, initial_context["system"], emit, transcript_received)
+            bridge.auto_approve_tools = True
+            bridge.tool_model = ToolModel(api_key)
             bridge.on_transcript_evidence = transcript_with_evidence
             bridge.interaction_managed = True
             bridge.playback_context = interaction_state.playback_context
@@ -6481,9 +6515,8 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                     enqueue_persisted_turn(captured, explicit=True)
                 elif kind == "tool_confirmation":
                     call_id = str(payload.get("callId", ""))
-                    accepted = bool(payload.get("accepted", False))
-                    if not hasattr(bridge, "confirm_tool") or not bridge.confirm_tool(call_id, accepted):
-                        await ws.send_json({"type": "error", "message": "pending tool call not found"})
+                    submit_tool_confirmation(owner, call_id, payload.get("accepted"))
+                    await ws.send_json({"type": "tool_confirmation_receipt", "callId": call_id})
                 elif kind in {"state", "refresh"}:
                     await ws.send_json({"type": "state", "state": state(
                         session_runtime,
@@ -6523,6 +6556,7 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                     LOGGER.exception("failed to flush aggregated media audit for case %s", session_id)
                 if bridge:
                     live_bridges.discard(bridge)
+                    await asyncio.gather(*tuple(owner.tool_confirmation_tasks.values()), return_exceptions=True)
                     await bridge.close()
             finally:
                 await semantic_router.aclose()

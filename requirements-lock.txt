@@ -58,3 +58,7 @@ urllib3==2.7.0
 websocket-client==1.9.0
 yarl==1.24.2
 pytest==9.1.1
+jsonschema==4.26.0
+jsonschema-specifications==2025.9.1
+referencing==0.37.0
+rpds-py==2026.6.3
