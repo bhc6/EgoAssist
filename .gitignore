@@ -25,6 +25,7 @@ outputs/
 .cache/
 .egoassist/
 .egoassist-real-demo/
+.egoassist-tools-demo/
 research_references/
 *.log
 
