@@ -9,7 +9,7 @@ from egoassist.product.insight_jobs import InsightJobs, InsightQueueFull, visibl
 from egoassist.product.answer_jobs import AnswerJobs, answer_jobs
 from egoassist.memory.recovery import MemoryRecovery, recovery_jobs
 from egoassist.realtime.prompt_audit import audit_page
-from egoassist.realtime.settings import asr_settings, perception_settings, tool_settings
+from egoassist.realtime.settings import asr_settings, perception_settings, tool_settings, number
 
 import argparse
 import asyncio
@@ -494,7 +494,8 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
         if owner.ambient_options is None:
             saved = next((e["settings"] for e in reversed(owner.journal.entries()) if e.get("type") == "ambient.settings"), {})
             owner.ambient_options = {"intervalSeconds": ambient_settings["interval_seconds"],
-                                     "questionsEnabled": True, **saved}
+                                      "questionsEnabled": True,
+                                      "questionCooldownSeconds": number("EGOASSIST_AMBIENT_QUESTION_COOLDOWN", 90, maximum=3600), **saved}
         return owner.ambient_options
 
     def ambient_watch_session(owner: "CaseRuntimeOwner") -> Any:
@@ -1377,6 +1378,8 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
         }
         owner = case_owners.get(visible_session_id)
         ambient_state = ambient_snapshot(user_scope, visible_session_id) if harness_override else None
+        if owner and any(row.get("draftId") and row["status"] in {"audio-sent", "played"} for row in owner.lanes.reviews.rows.values()):
+            owner.lanes.reviews.reconcile(timeline.pending_draft(user_id=user_scope, case_id=visible_session_id))
         runtime_lanes = owner.lanes.snapshot(
             observation=ambient_state, scheduler=scheduler,
             pending_inputs=owner.turn_queue.qsize() if owner.turn_queue else 0,
@@ -3415,6 +3418,7 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                     value=atom.get("value"),
                     candidate_scope=memory_case_id,
                     evidence_context=evidence_context,
+                    replaces_card_id=atom.get("replaces"),
                 )
                 if episode:
                     written_cards.append(episode)
@@ -4164,10 +4168,13 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
         owner = case_owner(user_id, session_id)
         interval = payload.get("intervalSeconds")
         questions = payload.get("questionsEnabled")
+        cooldown = payload.get("questionCooldownSeconds", ambient_options(owner)["questionCooldownSeconds"])
         if type(interval) not in {int, float} or not 2 <= interval <= 120 or not isinstance(questions, bool):
             raise ValueError("intervalSeconds must be 2-120 and questionsEnabled must be boolean")
+        if type(cooldown) not in {int, float} or not 1 <= cooldown <= 3600:
+            raise ValueError("questionCooldownSeconds must be 1-3600")
         async with owner.mutation_lock:
-            settings = {"intervalSeconds": float(interval), "questionsEnabled": questions}
+            settings = {"intervalSeconds": float(interval), "questionsEnabled": questions, "questionCooldownSeconds": float(cooldown)}
             owner.journal.append("ambient.settings", {"settings": settings})
             owner.ambient_options = settings
         return web.json_response({"state": scoped_state_for_user(user_id, session_id)})
@@ -4549,6 +4556,9 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                 if payload.get("type") in {"audio", "interrupted", "playback_stop"}:
                     try:
                         await livekit_transport.publish(session_id, payload)
+                        if payload.get("type") == "audio" and origin.get("observationReviewId"):
+                            owner.lanes.reviews.audio_sent(origin["observationReviewId"], timeline, user_id=user_id,
+                                case_id=session_id, response_id=payload.get("responseId"))
                     except Exception:
                         LOGGER.exception("LiveKit output publish failed for case %s", session_id)
             if not ws.closed:
@@ -4561,6 +4571,9 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                 if livekit_active and payload.get("type") == "audio":
                     return
                 await ws.send_json(payload)
+                if payload.get("type") == "audio" and origin.get("observationReviewId"):
+                    owner.lanes.reviews.audio_sent(origin["observationReviewId"], timeline, user_id=user_id,
+                        case_id=session_id, response_id=payload.get("responseId"))
 
         bridge = None
         try:
@@ -4825,12 +4838,17 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                         })
                 speech = None
                 pending = timeline.pending_draft(user_id=user_id, case_id=session_id)
-                if fresh_for_speech and hypothesis.clarification and hypothesis.salient_change and ambient_options(owner)["questionsEnabled"] and not pending:
-                    timeline.begin_draft(user_id=user_id, case_id=session_id, predicate="memory.value",
-                                         missing_fields=[hypothesis.clarification], language="zh",
-                                         source_ids=[observation_entry["id"]])
-                    journal.append("ambient.clarification", {"question": hypothesis.clarification,
-                                   "observationId": evidence.observation_id, "capturedAt": captured.frame_captured_at.isoformat()})
+                scheduler = bridge.scheduler_snapshot() if hasattr(bridge, "scheduler_snapshot") else {}
+                playback = interaction_state.playback_context() or {}
+                busy = bool(owner.queued_turn_ids or scheduler.get("pending") or scheduler.get("activeResponseIds") or
+                            scheduler.get("queued") or playback.get("generatedMs", 0) > playback.get("playedMs", 0) or
+                            (hasattr(bridge, "has_unresolved_user_input") and bridge.has_unresolved_user_input()))
+                review = owner.lanes.reviews.consider(captured, hypothesis, observation_entry,
+                    fresh=fresh_for_speech, enabled=ambient_options(owner)["questionsEnabled"], busy=busy,
+                    allowed=interaction_state.allows({}, "proactive-utterance"), pending=pending,
+                    cooldown=ambient_options(owner)["questionCooldownSeconds"])
+                owner.scene.ingest_review(review)
+                if review["status"] == "ready":
                     speech = {"utterance": prompt_text("perception/ambient_question", question=hypothesis.clarification),
                               "reason": "clarification"}
                 snapshot = watch.snapshot()
@@ -4845,6 +4863,8 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                 # directly advance a task or assert an inferred action occurred.
                 "speech": speech,
                 "origin": {
+                    "observationReviewId": review["candidateId"],
+                    "generation": owner.output_generation,
                     "watchlistId": captured.watchlist_id,
                     "watchlistVersion": captured.watchlist_version,
                     "watchEpoch": captured.watch_epoch,
@@ -5208,6 +5228,8 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
 
         def session_response_lifecycle(origin: dict, status: str) -> None:
             ledger = owner.work_ledger or CaseWorkLedger(harness.journal)
+            if origin.get("observationReviewId") and status != "completed":
+                session_loop.call_soon_threadsafe(owner.lanes.reviews.interrupted, origin["observationReviewId"])
             if origin.get("turnId"):
                 current = origin.get("responseId") in resumed_response_ids or origin.get("background") or (
                     owner.socket_token is socket_token and owner.epoch == connection_epoch
@@ -6450,7 +6472,11 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
             bridge.on_transcript_evidence = transcript_with_evidence
             bridge.interaction_managed = True
             bridge.playback_context = interaction_state.playback_context
-            bridge.output_permission = interaction_state.allows
+            def session_output_permission(origin=None, purpose="conversation"):
+                if (origin or {}).get("observationReviewId") and origin.get("generation") != owner.output_generation:
+                    return False
+                return interaction_state.allows(origin, purpose)
+            bridge.output_permission = session_output_permission
             owner.bridge = bridge
             if hasattr(bridge, "set_context_harness"):
                 bridge.set_context_harness(harness)
@@ -6571,6 +6597,8 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                 elif kind == "playback_progress":
                     if interaction_state.progress(payload):
                         row = interaction_state.responses[payload["responseId"]]
+                        if row["playedSamples"] > 0 and row["origin"].get("observationReviewId"):
+                            owner.lanes.reviews.played(row["origin"]["observationReviewId"])
                         if row.get("terminalStatus") == "completed" and row["playedSamples"] == len(row["pcm"]) // 2 and not row["overflow"]:
                             turn_id = row["origin"].get("answerObligation") or row["origin"].get("turnId")
                             if turn_id:

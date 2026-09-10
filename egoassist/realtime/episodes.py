@@ -113,6 +113,7 @@ class RealtimeEpisodeMemory:
         value: str | None = None,
         candidate_scope: str | None = None,
         evidence_context: dict[str, Any] | None = None,
+        replaces_card_id: str | None = None,
     ) -> dict[str, Any] | None:
         summary = str(summary).strip()
         if not summary:
@@ -159,6 +160,7 @@ class RealtimeEpisodeMemory:
             importance=importance,
             metadata=metadata,
             supersede=bool(memory_key),
+            replaces_card_id=replaces_card_id,
         )
         if not card:
             return None

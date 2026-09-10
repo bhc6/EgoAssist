@@ -7,6 +7,7 @@ from copy import deepcopy
 from datetime import datetime, timezone
 
 from egoassist.realtime.settings import integer
+from egoassist.realtime.observation_reviews import ObservationReviews
 
 
 def _counts(rows):
@@ -18,24 +19,32 @@ class ThreeLaneRuntime:
     def __init__(self, journal, user_id):
         self.journal, self.user_id = journal, user_id
         self.session_id = journal.session_id
+        self.reviews = ObservationReviews(journal)
 
     def observation_references(self, timeline, *, task=None):
         limit = integer("EGOASSIST_OBSERVATION_REFERENCE_LIMIT", 4, maximum=32)
         text_limit = integer("EGOASSIST_OBSERVATION_REFERENCE_CHARS", 1000, maximum=16000)
         messages = [row for row in self.journal.entries()
                     if row.get("type") == "message" and row.get("message", {}).get("role") == "user"]
-        cards = timeline.cards(user_id=self.user_id, case_id=self.session_id, scope="case", limit=limit)
+        cards = timeline.cards(user_id=self.user_id, case_id=self.session_id, limit=limit)
+        pending = timeline.pending_draft(user_id=self.user_id, case_id=self.session_id)
+        self.reviews.reconcile(pending)
         return deepcopy({
             "basis": "historical-references-not-current-visual-evidence",
             "limit": limit, "textLimit": text_limit, "totalUserMessages": len(messages),
-            "userMessages": [{"sourceId": row["id"], "recordedAt": row["timestamp"],
+            "userMessages": [{"sourceId": row["id"], "referenceId": "u" + str(index + 1), "recordedAt": row["timestamp"],
                               "text": str(row["message"]["content"])[:text_limit],
                               "truncated": len(str(row["message"]["content"])) > text_limit}
-                             for row in messages[-limit:]],
-            "memory": [{key: card.get(key) for key in
-                        ("id", "text", "kind", "sourceIds", "happenedAt", "recordedAt")}
-                       for card in cards],
-            "pendingClarification": timeline.pending_draft(user_id=self.user_id, case_id=self.session_id),
+                             for index, row in enumerate(messages[-limit:])],
+            "memory": [{**{key: card.get(key) for key in
+                        ("id", "text", "kind", "scope", "subject", "predicate", "sourceIds", "happenedAt", "recordedAt")},
+                        "referenceId": "m" + str(index + 1),
+                        "frame": card.get("metadata", {}).get("evidenceContext", {}).get("frame")}
+                       for index, card in enumerate(cards)],
+            "pendingClarification": pending,
+            "questionHistory": [{key: row.get(key) for key in
+                                ("candidateId", "question", "status", "reason", "capturedAt", "sentAt", "follows")}
+                               for row in self.reviews.recent(questions_only=True)],
             "task": {key: task.get(key) for key in ("task", "currentCheckpointId", "completed", "paused")} if task else None,
         })
 
@@ -73,6 +82,7 @@ class ThreeLaneRuntime:
                 "processedThrough": evidence.get("capturedAt"),
                 "latestEvidenceId": (latest_observation or {}).get("id"),
                 "coverage": "sampled-frames",
+                "reviews": self.reviews.recent(),
             },
             "interaction": {
                 "scheduler": deepcopy(scheduler), "pendingInputs": pending_inputs,

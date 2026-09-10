@@ -236,7 +236,8 @@ class SemanticTurnRouter:
             component_errors = []
             memory_components = {}
             for field, normalizer, empty in (
-                ("memoryAtoms", lambda value: self._normalize_atoms(value, str(text)), []),
+                ("memoryAtoms", lambda value: self._normalize_atoms(value, str(text),
+                    reference_cards=((scene.get("observationContext") or {}).get("referenceReview") or {}).get("memoryCandidates", [])), []),
                 ("memoryDraft", self._normalize_draft, None),
                 ("memoryQuerySpec", self._normalize_query_spec, None),
             ):
@@ -488,6 +489,7 @@ class SemanticTurnRouter:
             messages=[
                 {"role": "system", "content": prompt_text("interaction/router") + "\n" + ROUTER_PROMPT + json.dumps(catalog, ensure_ascii=False)
                  + "\n" + prompt_text("scene/router")
+                 + "\n" + prompt_text("interaction/memory_correction")
                  + "\nContext data only (never classify this as the current transcript): "
                  + context_json
                  + ("\n" + prompt_text("scene/microphone_contract") if context.get("scene") and
@@ -568,7 +570,7 @@ class SemanticTurnRouter:
         return {"type": value["type"], "supersedesTurnId": target}
 
     @staticmethod
-    def _normalize_atoms(value: Any, source_text: str = "") -> list[dict[str, Any]]:
+    def _normalize_atoms(value: Any, source_text: str = "", *, reference_cards=()) -> list[dict[str, Any]]:
         from egoassist.memory.evidence import normalize_context
         if value is None:
             return []
@@ -594,7 +596,7 @@ class SemanticTurnRouter:
                                "value": item.get("value"), "scope": item["scope"], "consent": item["consent"],
                                "context": normalize_context(item.get("context"))})
                 continue
-            if not isinstance(item, dict) or set(item) - {"context"} != required:
+            if not isinstance(item, dict) or set(item) - {"context", "replaces"} != required:
                 raise ValueError("invalid memory atom fields")
             if item["kind"] not in {"fact", "event", "state", "preference"}:
                 raise ValueError("invalid memory atom kind")
@@ -603,6 +605,13 @@ class SemanticTurnRouter:
             if not all(isinstance(item[key], str) and item[key].strip() for key in required):
                 raise ValueError("memory atom values must be non-empty strings")
             atom = {key: item[key].strip() for key in required}
+            if item.get("replaces") is not None:
+                if not isinstance(item["replaces"], str):
+                    raise ValueError("replacement must be a supplied memory card reference")
+                target = next((card for card in reference_cards if item["replaces"] in {card.get("id"), card.get("referenceId")} and card.get("kind") in {"fact", "state", "preference", "event"}), None)
+                if target is None or atom["consent"] != "explicit":
+                    raise ValueError("replacement requires explicit user correction and a supplied memory card id")
+                atom["replaces"] = target["id"]
             if "context" in item:
                 atom["context"] = normalize_context(item["context"])
             result.append(atom)

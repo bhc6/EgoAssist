@@ -216,6 +216,7 @@ def validate_perception_result(
 
 
 def ambient_prompt(context: AmbientFrameContext | Mapping[str, Any]) -> str:
+    from copy import deepcopy
     value = (
         context
         if isinstance(context, AmbientFrameContext)
@@ -233,10 +234,18 @@ def ambient_prompt(context: AmbientFrameContext | Mapping[str, Any]) -> str:
         {"locationId": item.get("id"), "label": item.get("label")}
         for item in value.watch_locations
     ]
+    references = deepcopy(value.reference_context)
+    if references:
+        for item in references.get("userMessages", []):
+            item["sourceId"] = item.get("referenceId", item["sourceId"])
+        for item in references.get("memory", []):
+            item["id"] = item.get("referenceId", item["id"])
     return (
         (prompt_text('perception/ambient_open') if value.observation_mode == "open"
          else prompt_text('perception/ambient_prompt.1', v0=NONE_OBSERVED, v1=UNKNOWN_LOCATION))
         + prompt_text('perception/reference_context')
+        + prompt_text('perception/ambient_cross_reference')
+        + prompt_text('perception/reference_shape')
         + json.dumps(
             {
                 "schema": value.schema_version,
@@ -250,7 +259,7 @@ def ambient_prompt(context: AmbientFrameContext | Mapping[str, Any]) -> str:
                 "risk": value.risk,
                 "capturedAt": value.frame_captured_at.isoformat(),
                 "previousObservation": value.previous_observation,
-                "referenceContext": value.reference_context,
+                "referenceContext": references,
             },
             ensure_ascii=False,
             separators=(",", ":"),
@@ -305,6 +314,8 @@ def parse_ambient_hypothesis(raw: str | Mapping[str, Any], *, open_observation=F
         uncertainties=value.get("uncertainties", []),
         clarification=value.get("clarification") or None,
         salient_change=value.get("salient_change", True),
+        reference_check=value.get("reference_check"),
+        follow_up_of=value.get("follow_up_of"),
     )
 
 

@@ -78,7 +78,7 @@ class _ResponseRequest:
     @property
     def correlation(self) -> dict:
         return {key: value for key, value in (self.origin or {}).items()
-                if key in {"turnId", "generation", "sessionId", "intentId", "jobId", "resultId", "background"}}
+                if key in {"turnId", "generation", "sessionId", "intentId", "jobId", "resultId", "background", "observationReviewId"}}
 
 
 def _is_fake_ip(value: str) -> bool:
@@ -1742,7 +1742,7 @@ class OmniBrowserBridge:
         reason = str(speech.get("reason", "task-evidence"))
         priority = 90 if reason == "hazard" else 35
         self.request_response(
-            str(speech["utterance"])[:300],
+            str(speech["utterance"]),
             priority=priority,
             speech_policy="protected" if reason == "hazard" else "finish-clause",
             reason=f"task-bound-perception:{reason}",
@@ -1895,6 +1895,9 @@ class OmniBrowserBridge:
         return True
 
     def _return_result_to_inbox(self, request: _ResponseRequest, reason: str) -> None:
+        lifecycle = getattr(self, "_response_lifecycle_handler", None)
+        if lifecycle and (request.origin or {}).get("observationReviewId"):
+            lifecycle(dict(request.origin), "suspended")
         handler = getattr(self, "_result_delivery_handler", None)
         if handler is None:
             return

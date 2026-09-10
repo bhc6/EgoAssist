@@ -462,6 +462,7 @@ class TimelineMemory:
         metadata: Mapping[str, Any] | None = None,
         supersede: bool = True,
         card_id: str | None = None,
+        replaces_card_id: str | None = None,
     ) -> dict[str, Any] | None:
         text = str(text).strip()
         if not text:
@@ -499,7 +500,15 @@ class TimelineMemory:
             ).fetchone()
             if existing_id:
                 return self._row_to_card(existing_id)
-            if not explicit_card_id and kind not in {"event", "scene", "observation", "tool-effect"}:
+            if replaces_card_id:
+                previous = connection.execute("SELECT * FROM memory_cards WHERE id=?", (replaces_card_id,)).fetchone()
+                if (not previous or previous["user_id"] != user_id or previous["scope"] != scope or
+                    previous["case_id"] != case_id or previous["status"] != "active" or status != "active" or
+                    previous["kind"] not in {"fact", "state", "preference", "event"} or kind not in {"fact", "state", "preference", "event"}):
+                    raise ValueError("replacement target must be an active claim in the same user, case and scope")
+                supersedes_id = str(previous["id"])
+                connection.execute("UPDATE memory_cards SET status='superseded', updated_at=? WHERE id=?", (now, supersedes_id))
+            if not explicit_card_id and not replaces_card_id and kind not in {"event", "scene", "observation", "tool-effect"}:
                 duplicate = connection.execute(
                     """SELECT * FROM memory_cards
                        WHERE user_id=? AND scope=? AND COALESCE(case_id, '')=COALESCE(?, '')
@@ -509,7 +518,7 @@ class TimelineMemory:
                 ).fetchone()
                 if duplicate:
                     return self._row_to_card(duplicate)
-            if supersede and memory_key and status == "active" and kind not in {"event", "scene", "observation"}:
+            if not replaces_card_id and supersede and memory_key and status == "active" and kind not in {"event", "scene", "observation"}:
                 if scope == "participant":
                     previous = connection.execute(
                         """SELECT id FROM memory_cards

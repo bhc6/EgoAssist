@@ -1012,6 +1012,9 @@ header select {
 .ambient-banner > span, .ambient-banner > details { flex-basis: 100%; min-width: 0; }
 .ambient-banner input[type=number] { width: 72px; }
 .ambient-banner pre { white-space: pre-wrap; max-height: 240px; overflow: auto; }
+.observation-review { padding: 10px 0; border-top: 1px solid #cbd5d6; overflow-wrap: anywhere; }
+.ambient-banner .observation-review b { white-space: normal; }
+.ambient-banner .observation-review b:before { display: none; }
 .execution-lanes { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; padding: 12px 0; border-bottom: 1px solid #cbd5d6; }
 .execution-lanes > div { display: grid; gap: 4px; min-width: 0; overflow-wrap: anywhere; }
 .execution-lanes small { color: #526361; }

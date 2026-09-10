@@ -645,6 +645,28 @@ function renderExecutionLanes() {
 // Ambient observation must be visible for as long as it is running. ADR 005/007:
 // a camera that watches without a task the user started is only acceptable if the
 // user can see, at a glance, that it is on and what it is watching for.
+function renderObservationReviews() {
+  const reviews = (state?.runtimeLanes?.observation?.reviews || []).filter(row => row.question || row.referenceCheck).slice().reverse();
+  if (!reviews.length) return "";
+  const statuses = {recorded:"已记录比对", suppressed:"本次不提问", deferred:"暂缓提问", ready:"等待问题音频", "audio-sent":"音频已发送 · 播放待确认", played:"设备已开始播放", closed:"澄清已结束"};
+  const reasons = {"invalid-reference-schema":"比对格式不完整，保留原始观察", "unknown-reference":"引用不在本次背景中", "reference-recorded-after-frame":"引用晚于画面时间",
+    "same-frame-is-not-independent-evidence":"同一帧的重复分析不能独立佐证", "unknown-visible-evidence":"缺少对应画面证据",
+    "unknown-follow-up":"无法定位此前问题", "already-offered":"同一事项已问过", "stale-frame":"画面已过实时期限",
+    "questions-disabled":"主动澄清已关闭", "output-not-permitted":"当前不允许主动播报", "pending-clarification":"还有问题等待确认",
+    "interaction-busy":"等待当前对话结束", cooldown:"尚在提问间隔内", "no-material-change":"没有值得再问的新变化",
+    "useful-question-at-idle":"空闲时提出有用的问题", "awaiting-device-playback":"等待设备播放回执",
+    "device-playback-confirmed":"设备已确认播放", "clarification-no-longer-pending":"待确认事项已处理或过期",
+    "output-interrupted-before-audio":"问题尚未发送便被打断", "no-useful-question":"本次无需提问"};
+  const relations = {conflict:"疑似不一致", change:"状态变化", uncertain:"尚不能判定", consistent:"本次相符"};
+  return "<details data-disclosure='observation-reviews'><summary>现场与历史比对 · 主动提问记录</summary>" + reviews.map(row =>
+    "<div class='observation-review'><b>" + esc(statuses[row.status] || row.status) + "</b> · " + esc(reasons[row.reason] || row.reason) +
+    (row.question ? "<p>" + esc(row.question) + "</p>" : "") +
+    (row.referenceCheck ? "<p>" + esc(relations[row.referenceCheck.relation] || row.referenceCheck.relation) + "：" + esc(row.referenceCheck.reason) + "</p>" : "") +
+    "<small>画面时间 " + esc(new Date(row.capturedAt).toLocaleString()) + "</small>" +
+    "<details data-disclosure='review-" + esc(row.candidateId) + "'><summary>来源、校验与原始记录</summary><pre>" + esc(JSON.stringify(row, null, 2)) + "</pre></details></div>"
+  ).join("") + "</details>";
+}
+
 function renderAmbient() {
   const root = $("#ambientBanner");
   if (!root) return;
@@ -675,19 +697,22 @@ function renderAmbient() {
     (latest?.capturedAt ? "<small>画面时间：" + esc(new Date(latest.capturedAt).toLocaleString()) + "</small>" : "") +
     (latest?.uncertainties?.length ? "<span>待确认：" + esc(latest.uncertainties.join("；")) + "</span>" : "") +
     (latest?.clarification ? "<span>澄清问题：" + esc(latest.clarification) + "</span>" : "") +
+    renderObservationReviews() +
     "<details data-disclosure='ambient-evidence'><summary>观测证据</summary>" +
     (latest?.media?.assetId ? "<a target='_blank' rel='noopener' href='/api/scene/media?session=" + encodeURIComponent(selectedSessionId) +
       "&amp;asset=" + encodeURIComponent(latest.media.assetId) + "'>查看原始采样帧</a>" : "") +
     "<pre>" + esc(JSON.stringify(latest || {}, null, 2)) + "</pre></details>" +
     "<label>采样间隔 <input id='ambientInterval' type='number' min='2' max='120' step='1' value='" + esc(info.intervalSeconds) + "'> 秒</label>" +
     "<label><input id='ambientQuestions' type='checkbox' " + (info.questionsEnabled ? "checked" : "") + ">主动澄清</label>" +
+    "<label>提问最短间隔 <input id='ambientQuestionCooldown' type='number' min='1' max='3600' step='1' value='" + esc(info.questionCooldownSeconds ?? 90) + "'> 秒</label>" +
     "<button id='ambientSave' type='button'>应用</button><button id='ambientRevoke' type='button'>停止观察</button>";
   if (!root.querySelector("#ambientInterval") || !root.contains(document.activeElement)) updateDisclosureHTML(root, html, selectedSessionId);
   $("#ambientRevoke").onclick = () => setAmbientConsent(false);
   $("#ambientSave").onclick = async () => {
     try {
       const payload = await post("/api/ambient/settings", {sessionId: selectedSessionId,
-        intervalSeconds: Number($("#ambientInterval").value), questionsEnabled: $("#ambientQuestions").checked});
+        intervalSeconds: Number($("#ambientInterval").value), questionsEnabled: $("#ambientQuestions").checked,
+        questionCooldownSeconds: Number($("#ambientQuestionCooldown").value)});
       document.activeElement?.blur();
       render(payload.state);
       $("#ambientInterval").value = String(payload.state.ambient.intervalSeconds);

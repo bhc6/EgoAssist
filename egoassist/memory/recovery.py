@@ -87,6 +87,7 @@ class MemoryRecovery:
                     subject=atom.get("subject"), predicate=atom.get("predicate"), value=atom.get("value"),
                     metadata={"source": "semantic-memory-recovery", "evidenceContext": context},
                     supersede=False,
+                    replaces_card_id=atom.get("replaces"),
                     card_id=hashlib.sha256(f'{journal.session_id}:{row["turnId"]}:{index}'.encode()).hexdigest()[:24])
                 if card:
                     ids.append(card["id"])

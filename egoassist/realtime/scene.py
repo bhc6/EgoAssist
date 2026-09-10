@@ -61,6 +61,8 @@ class SharedScene:
         for row in journal.entries():
             if row.get("type") == "ambient_observation" and row.get("status") == "accepted":
                 self.ingest_observation(row)
+            if row.get("type") == "observation.review":
+                self.ingest_review(row)
             if row.get("type") == "scene.result":
                 self.last_vision = (0, row)
                 if row.get("status") == "observed":
@@ -183,6 +185,12 @@ class SharedScene:
                       if datetime.fromisoformat(row["capturedAt"]) <= boundary]
         latest = max(candidates, key=lambda row: datetime.fromisoformat(row["capturedAt"]), default=None)
         return deepcopy(latest)
+
+    def ingest_review(self, review):
+        for row in self.observations:
+            if row["sourceId"] == review.get("observationEventId"):
+                row["referenceReview"] = deepcopy({key: review.get(key) for key in
+                    ("referenceCheck", "referenceStatus", "sourceRoots", "references", "memoryCandidates", "claim")})
 
     async def resolve_speaker(self, turn_id):
         row = self.turns.get(turn_id)

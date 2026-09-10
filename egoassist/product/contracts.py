@@ -194,6 +194,13 @@ class AmbientFrameContext(ProductContract):
     frame_captured_at: datetime
 
 
+class ObservationReferenceCheck(ProductContract):
+    source_ids: list[str] = Field(min_length=1, max_length=8)
+    evidence_indices: list[int] = Field(min_length=1, max_length=8)
+    relation: Literal["conflict", "change", "uncertain", "consistent"]
+    reason: str = Field(min_length=1, max_length=400)
+
+
 class AmbientObservationHypothesis(ProductContract):
     """A passive observation. Absence is expressed positively, never as an error.
 
@@ -213,6 +220,9 @@ class AmbientObservationHypothesis(ProductContract):
     uncertainties: list[str] = Field(default_factory=list, max_length=8)
     clarification: str | None = Field(default=None, max_length=240)
     salient_change: bool = True
+    # Optional reasoning metadata is validated separately from visible evidence.
+    reference_check: Any = None
+    follow_up_of: str | None = Field(default=None, max_length=80)
 
 
 class ObservationEvidence(ProductContract):
