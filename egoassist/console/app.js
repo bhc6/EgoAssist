@@ -1201,8 +1201,9 @@ $("#textTurnForm").onsubmit = async event => {
   button.disabled = true;
   $("#textTurnError").textContent = "";
   try {
-    if (!audioContext) audioContext = new AudioContext({sampleRate: 16000});
-    await audioContext.resume();
+    // Text input is a control-plane path. Do not request an audio context or
+    // camera frame: browser autoplay/device permission must never delay a text
+    // question or make a working text demo look offline.
     await connectRealtime({media: false});
     if (!socket || socket.readyState !== WebSocket.OPEN) throw Error("实时会话尚未就绪");
     currentTurnId = crypto.randomUUID();
@@ -1217,7 +1218,6 @@ $("#textTurnForm").onsubmit = async event => {
     renderWorkCenter();
     turnOutbox().add(pending);
     if (input.value === draft) input.value = "";
-    sendVideoFrame();
     socket.send(JSON.stringify(pending));
   } catch (error) { $("#textTurnError").textContent = error.message; }
   finally { button.disabled = false; }
