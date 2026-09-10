@@ -55,6 +55,8 @@ async def verify(output):
 
                 report["textFirst"] = await question("七乘八是多少？只回答数字。")
                 assert "56" in report["textFirst"]["turn"]["answer"]["text"]
+                await page.wait_for_function("audioContext?.state === 'running' && [...playbackAudit.responses.values()].some(row => row.played > 0)", timeout=15000)
+                report["browserPlayback"] = await page.evaluate("[...playbackAudit.responses].map(([id, row]) => ({id, playedSamples: row.played, queuedSamples: row.queued}))")
                 # Exercise enabling devices after a text-only WebSocket is already ready.
                 await page.evaluate("""async image => {
                     const picture = new Image(); picture.src = 'data:image/jpeg;base64,' + image; await picture.decode();

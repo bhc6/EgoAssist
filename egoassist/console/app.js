@@ -20,6 +20,12 @@ let mediaPromise = null;
 let mediaGeneration = 0;
 let selectedEventId = null;
 let currentUser = null, selectedSessionId = null, authMode = "login";
+let sessionRevision = 0, sessionSwitchBusy = false;
+const sessionDrafts = new Map();
+function sessionScope() {
+  const revision = sessionRevision, uid = currentUser?.id, sid = selectedSessionId;
+  return () => revision === sessionRevision && uid === currentUser?.id && sid === selectedSessionId;
+}
 let sessionCatalog = [], memoryPolicySaving = false;
 // Keep a submitted text turn visible while the next state snapshot is in flight.
 // The server remains authoritative; entries are removed as soon as its ledger
@@ -29,6 +35,7 @@ let ambientState = null;
 let insightSession = null, insightBusy = false, insightTurn = null, insightLastAttempt = 0;
 let insightJobs = [], selectedInsightJob = null, insightPolling = false, displayedInsightResult = null;
 let insightLastPoll = 0;
+let insightResultRequest = 0;
 const insightPhases = {queued: "等待执行名额", collecting: "读取原始记录", preparing: "准备报告证据",
   "waiting-provider": "等待模型响应", validating: "校验输出与来源", finished: "处理结束"};
 let promptAuditSignature = "";
@@ -42,11 +49,18 @@ const AUDIO_BUFFER_HIGH_WATER = 512 * 1024;
 const VIDEO_BUFFER_HIGH_WATER = 128 * 1024;
 let droppedAudioChunks = 0;
 let droppedVideoFrames = 0;
+const responseScopes = new WeakMap();
 async function request(path, options = {}) {
+  const isCurrent = sessionScope();
   try {
-    return await fetchJSON(path, options);
+    const result = await fetchJSON(path, options);
+    if (result && typeof result === "object") {
+      responseScopes.set(result, isCurrent);
+      if (result.state && typeof result.state === "object") responseScopes.set(result.state, isCurrent);
+    }
+    return result;
   } catch (error) {
-    if (error.status === 401) showLogin();
+    if (error.status === 401 && isCurrent()) showLogin();
     throw error;
   }
 }
@@ -69,6 +83,7 @@ function setAuthMode(mode) {
 }
 
 function showLogin() {
+  sessionRevision += 1;
   disconnectRealtime();
   currentUser = null;
   selectedSessionId = null;
@@ -79,6 +94,9 @@ function showLogin() {
   insightTurn = null;
   state = null;
   localSubmittedTurns.clear();
+  sessionDrafts.clear();
+  $("#textTurnInput").value = "";
+  $("#textTurnSend").disabled = false;
   $("#proactiveSuggestions").checked = false;
   $("#insightResults").replaceChildren();
   $("#actualPromptRequests").replaceChildren();
@@ -88,12 +106,16 @@ function showLogin() {
 }
 
 async function refreshSessionList(preferredId = selectedSessionId) {
+  const isCurrent = sessionScope();
   const payload = await request("/api/sessions");
+  if (!isCurrent()) return;
   let sessions = payload.sessions || [];
   if (!sessions.length) {
     const created = await post("/api/sessions");
+    if (!isCurrent()) return;
     preferredId = created.session.id;
     sessions = (await request("/api/sessions")).sessions || [];
+    if (!isCurrent()) return;
   }
   selectedSessionId = sessions.some(item => item.id === preferredId) ? preferredId : sessions[0].id;
   sessionCatalog = sessions;
@@ -146,11 +168,13 @@ function customMemoryPolicy() {
 async function saveMemoryPolicy(policy) {
   if (!selectedSessionId || memoryPolicySaving) return;
   const before = state?.memoryPolicy || sessionCatalog.find(item => item.id === selectedSessionId)?.memoryPolicy;
+  const isCurrent = sessionScope(), sid = selectedSessionId;
   memoryPolicySaving = true;
   renderMemoryPolicy(before, state?.memoryProfiles || []);
   try {
-    const result = await post("/api/sessions/memory-policy", {sessionId: selectedSessionId, policy});
-    const session = sessionCatalog.find(item => item.id === selectedSessionId);
+    const result = await post("/api/sessions/memory-policy", {sessionId: sid, policy});
+    if (!isCurrent()) return;
+    const session = sessionCatalog.find(item => item.id === sid);
     if (session) session.memoryPolicy = result.memoryPolicy;
     if (state) state.memoryPolicy = result.memoryPolicy;
     renderMemoryPolicy(result.memoryPolicy, result.profiles || state?.memoryProfiles || []);
@@ -368,8 +392,9 @@ function showHumanHelpPreview(payload) {
 }
 
 function renderWorkCenter() {
+  if (!state) return;
   const ledger = state.workLedger || {intents: [], jobs: [], resultInbox: [], foregroundIntentId: null};
-  const turnStates = {received: "已接收，等待处理", responding: "正在回答", completed: "回答已完成",
+  const turnStates = {"pending-send": "已保留，等待服务端接收", received: "已接收，等待处理", responding: "正在回答", completed: "回答已完成",
     interrupted: "回答已打断", classifying: "正在分析问题", processing: "正在处理", ready: "等待执行",
     deferred: "排队中", failed: "处理失败", cancelled: "已取消"};
   const serverTurns = ledger.turnInbox || [];
@@ -509,6 +534,8 @@ function renderPerformance(audit = {}) {
 }
 
 function render(next) {
+  if (!currentUser || !next || next.sessionId !== selectedSessionId) return;
+  if (responseScopes.has(next) && !responseScopes.get(next)()) return;
   state = next;
   renderSharedScene(state.sharedScene);
   renderPerformance(state.performance);
@@ -729,9 +756,7 @@ function stopMedia() {
   mediaGeneration += 1;
   if (videoTimer) clearInterval(videoTimer);
   videoTimer = null;
-  if (processor) processor.disconnect();
-  if (microphoneSource) microphoneSource.disconnect();
-  processor = microphoneSource = null;
+  stopAudioCapture();
   if (stream) stream.getTracks().forEach(track => track.stop());
   stream = null;
   disconnectLiveKit();
@@ -763,19 +788,21 @@ async function activateWebSocketMediaFallback() {
   videoTimer = setInterval(sendVideoFrame, 1000 / fps);
 }
 
-async function connectLiveKitMedia(connectionSessionId) {
+async function connectLiveKitMedia(connectionSessionId, generation) {
   if (!window.LivekitClient) return false;
+  const capturedStream = stream;
+  const isCurrent = () => generation === connectionGeneration && stream === capturedStream;
   let credentials;
   try {
     credentials = await post("/api/livekit/token", {sessionId: connectionSessionId});
   } catch (_) {
     return false;
   }
-  if (!credentials.enabled) return false;
+  if (!credentials.enabled || !isCurrent()) return false;
   const {Room, RoomEvent, Track} = window.LivekitClient;
   const room = new Room({adaptiveStream: true, dynacast: true, disconnectOnPageLeave: true});
   room.on(RoomEvent.TrackSubscribed, track => {
-    if (track.kind !== Track.Kind.Audio) return;
+    if (!isCurrent() || track.kind !== Track.Kind.Audio) return;
     const element = track.attach();
     element.autoplay = true;
     element.dataset.egoassistLivekitAudio = "true";
@@ -784,9 +811,11 @@ async function connectLiveKitMedia(connectionSessionId) {
   });
   room.on(RoomEvent.TrackUnsubscribed, track => track.detach().forEach(element => element.remove()));
   room.on(RoomEvent.Reconnecting, () => {
+    if (!isCurrent()) return;
     $("#duplexState").textContent = "LiveKit 媒体正在重连，控制通道保持在线";
   });
   room.on(RoomEvent.Reconnected, () => {
+    if (!isCurrent()) return;
     interactionTransport = "livekit";
     stopAudioCapture();
     if (videoTimer) clearInterval(videoTimer);
@@ -801,11 +830,13 @@ async function connectLiveKitMedia(connectionSessionId) {
   });
   try {
     await room.connect(credentials.url, credentials.token, {autoSubscribe: true});
-    const audioTrack = stream?.getAudioTracks()[0];
-    const videoTrack = stream?.getVideoTracks()[0];
+    if (!isCurrent()) { await room.disconnect(); return false; }
+    const audioTrack = capturedStream?.getAudioTracks()[0];
+    const videoTrack = capturedStream?.getVideoTracks()[0];
     if (audioTrack) {
       await room.localParticipant.publishTrack(audioTrack, {source: Track.Source.Microphone});
     }
+    if (!isCurrent()) { await room.disconnect(); return false; }
     if (videoTrack) {
       await room.localParticipant.publishTrack(videoTrack, {source: Track.Source.Camera});
     }
@@ -813,6 +844,7 @@ async function connectLiveKitMedia(connectionSessionId) {
     await room.disconnect().catch(() => {});
     return false;
   }
+  if (!isCurrent()) { await room.disconnect().catch(() => {}); return false; }
   livekitRoom = room;
   interactionTransport = "livekit";
   return true;
@@ -834,9 +866,11 @@ function floatToPcm16Base64(floatSamples, sourceRate) {
 }
 
 async function startAudioCapture() {
-  if (processor) return;
+  if (processor || !stream) return;
+  const capturedStream = stream, generation = connectionGeneration;
   audioContext = audioContext || new AudioContext();
   await audioContext.resume();
+  if (processor || stream !== capturedStream || generation !== connectionGeneration) return;
   microphoneSource = audioContext.createMediaStreamSource(stream);
   processor = audioContext.createScriptProcessor(4096, 1, 1);
   processor.onaudioprocess = event => {
@@ -967,14 +1001,11 @@ async function connectRealtimeSession(generation, media, retryAttempt) {
   const connectionSessionId = selectedSessionId;
   if (media) await ensureMedia();
   if (generation !== connectionGeneration) return;
-    const livekitConnected = media && await connectLiveKitMedia(connectionSessionId);
-    if (media && stream) startLocalVad(stream);
+  const livekitConnected = media && await connectLiveKitMedia(connectionSessionId, generation);
+  if (generation !== connectionGeneration) return;
+  if (media && stream) startLocalVad(stream);
   if (media && !livekitConnected) await startAudioCapture();
-  if (generation !== connectionGeneration) {
-    await disconnectLiveKit();
-    stopAudioCapture();
-    return;
-  }
+  if (generation !== connectionGeneration) return;
   const scheme = location.protocol === "https:" ? "wss:" : "ws:";
   const ws = new WebSocket(scheme + "//" + location.host + "/ws/realtime?session=" + encodeURIComponent(connectionSessionId));
   if (generation !== connectionGeneration) {
@@ -982,6 +1013,7 @@ async function connectRealtimeSession(generation, media, retryAttempt) {
     return;
   }
   socket = ws;
+  stateRefreshPendingAt = 0;
   let ready = false;
   let restartAfterClose = false;
   let providerUnavailable = false;
@@ -1032,7 +1064,7 @@ async function connectRealtimeSession(generation, media, retryAttempt) {
       sendMediaConfiguration(ws);
       interactionTransport = message.interactionTransport === "livekit" && livekitRoom
         ? "livekit" : interactionTransport;
-      $("#duplexState").textContent = media ? (interactionTransport === "livekit" ? "LiveKit" : "WebSocket fallback") + " · 直接说话，可随时打断" : "文本会话在线";
+      $("#duplexState").textContent = stream ? (interactionTransport === "livekit" ? "LiveKit" : "WebSocket fallback") + " · 直接说话，可随时打断" : "文本会话在线";
       $("#realtimeButton").textContent = "结束会话";
     } else if (message.type === "provider_unavailable") {
       providerUnavailable = true;
@@ -1073,7 +1105,7 @@ async function connectRealtimeSession(generation, media, retryAttempt) {
       assistantText = "";
       captionResponseId = null;
       $("#transcript").textContent = (message.channel === "explicit_control" ? "你的文字" : "现场语音 · 说话人待核验") + "：" + message.text + (message.echoRisk === "suspected" ? " · 可能残余回声" : "");
-      $("#duplexState").textContent = media ? "正在听你说话" : "正在处理文本";
+      $("#duplexState").textContent = message.channel === "explicit_control" ? "正在处理文本" : "正在处理现场语音";
     } else if (message.type === "assistant_transcript" && ["conversation", "proactive-utterance"].includes(message.purpose)) {
       livekitAudioElements.forEach(element => { element.muted = false; });
       if (captionResponseId !== message.responseId) assistantText = "";
@@ -1095,7 +1127,7 @@ async function connectRealtimeSession(generation, media, retryAttempt) {
         stopPlayback();
         $("#duplexState").textContent = "语音已中断 · 查看问题处理状态";
       } else if (message.status === "completed" && message.responseId === captionResponseId) {
-        $("#duplexState").textContent = media ? "全双工在线 · 正在听" : "文本会话在线";
+        $("#duplexState").textContent = stream ? "全双工在线 · 正在听" : "文本会话在线";
       }
     } else if (message.type === "turn_receipt") {
       try { turnOutbox().acknowledge(message.turnId); }
@@ -1105,7 +1137,7 @@ async function connectRealtimeSession(generation, media, retryAttempt) {
     } else if (message.type === "memory_status") {
       $("#assistantCaption").innerHTML = "<span>记忆事务 · 服务端确认</span><p>" + esc(message.message) + "</p>";
       $("#duplexState").textContent = message.status === "committed"
-        ? (media ? "记忆已提交 · 正在听" : "记忆已提交 · 文本会话在线")
+        ? (stream ? "记忆已提交 · 正在听" : "记忆已提交 · 文本会话在线")
         : message.status === "needs-input" ? "等待补充要记住的内容" : "记忆未提交";
     } else if (message.type === "tool_confirmation_required") {
       const details = JSON.stringify(message.arguments || {}, null, 2);
@@ -1135,7 +1167,8 @@ async function connectRealtimeSession(generation, media, retryAttempt) {
       $("#duplexState").textContent = message.status === "connected"
         ? "LiveKit 媒体在线" : "LiveKit 媒体已断开，正在切换回退通道";
     } else if (message.type === "error") {
-      alert(message.message);
+      $("#textTurnError").textContent = message.message || "实时请求失败";
+      $("#duplexState").textContent = "实时请求出错 · 查看输入区提示与处理记录";
     }
   };
   ws.onerror = () => { if (!ready && generation === connectionGeneration) rejectReady(Error("实时 WebSocket 连接失败")); };
@@ -1147,6 +1180,7 @@ async function connectRealtimeSession(generation, media, retryAttempt) {
     $("#duplexState").textContent = "实时会话已结束";
     $("#realtimeButton").textContent = "启动全双工陪练";
     socket = null;
+    stateRefreshPendingAt = 0;
     providerReady = false;
     stopPlayback();
     const nextAttempt = ready ? 1 : retryAttempt + 1;
@@ -1155,7 +1189,7 @@ async function connectRealtimeSession(generation, media, retryAttempt) {
       $("#duplexState").textContent = "连接中断，正在恢复 · " + nextAttempt + "/3";
       setTimeout(() => {
         if (generation === connectionGeneration && connectionSessionId === selectedSessionId && currentUser) {
-          connectRealtime({media, retryAttempt: nextAttempt}).catch(error => { $("#duplexState").textContent = error.message; });
+          connectRealtime({media: Boolean(stream), retryAttempt: nextAttempt}).catch(error => { $("#duplexState").textContent = error.message; });
         }
       }, Math.min(4000, 500 * 2 ** (nextAttempt - 1)));
     }
@@ -1178,6 +1212,8 @@ function disconnectRealtime() {
   captionResponseId = null;
   assistantText = "";
   connectionGeneration += 1;
+  connectingPromise = null;
+  stateRefreshPendingAt = 0;
   providerReady = false;
   if (mediaPromise) mediaGeneration += 1;
   stopPlayback();
@@ -1197,7 +1233,8 @@ $("#textTurnForm").onsubmit = async event => {
   event.preventDefault();
   const input = $("#textTurnInput"), button = $("#textTurnSend");
   const draft = input.value, transcript = draft.trim();
-  if (!transcript || button.disabled) return;
+  if (!transcript || button.disabled || sessionSwitchBusy || !currentUser) return;
+  const isCurrent = sessionScope();
   button.disabled = true;
   $("#textTurnError").textContent = providerReady ? "正在提交…" : "正在连接助手，输入已保留…";
   try {
@@ -1206,24 +1243,28 @@ $("#textTurnForm").onsubmit = async event => {
     try {
       if (!audioContext) audioContext = new AudioContext();
       audioContext.resume().catch(() => {
-        $("#duplexState").textContent = "声音未就绪，回答文字仍会显示";
+        if (isCurrent()) $("#duplexState").textContent = "声音未就绪，回答文字仍会显示";
       });
     } catch (_) {
       $("#duplexState").textContent = "声音未就绪，回答文字仍会显示";
     }
-    await connectRealtime({media: false});
+    const connection = connectRealtime({media: false});
+    const generation = connectionGeneration;
+    await connection;
+    if (!isCurrent()) return;
+    if (generation !== connectionGeneration) throw Error("连接已取消，输入已保留，可重新发送");
     if (!socket || socket.readyState !== WebSocket.OPEN) throw Error("实时会话尚未就绪");
-    currentTurnId = crypto.randomUUID();
+    const pending = {type: "control", transcript, clientRequestId: crypto.randomUUID()};
+    turnOutbox().add(pending);
+    currentTurnId = pending.clientRequestId;
     assistantText = "";
     captionResponseId = null;
     stopPlayback();
-    const pending = {type: "control", transcript, clientRequestId: currentTurnId};
     localSubmittedTurns.set(currentTurnId, {
       turnId: currentTurnId, text: transcript, sequence: Number.MAX_SAFE_INTEGER,
-      status: "received", delivery: {status: "received"}, source: "explicit-control",
+      status: "pending-send", delivery: {status: "pending-send"}, source: "explicit-control",
     });
     renderWorkCenter();
-    turnOutbox().add(pending);
     if (input.value === draft) input.value = "";
     // Reuse enabled sensors. Send the fresh frame before the question so the
     // server associates it with this turn, just as it does for spoken input.
@@ -1231,8 +1272,8 @@ $("#textTurnForm").onsubmit = async event => {
     catch (_) { $("#cameraState").textContent = "当前帧采集失败，检查摄像头"; }
     socket.send(JSON.stringify(pending));
     $("#textTurnError").textContent = "已发送，等待助手接收…";
-  } catch (error) { $("#textTurnError").textContent = error.message; }
-  finally { button.disabled = false; }
+  } catch (error) { if (isCurrent()) $("#textTurnError").textContent = error.message; }
+  finally { if (isCurrent()) button.disabled = false; }
 };
 
 $("#textTurnInput").addEventListener("keydown", event => {
@@ -1272,14 +1313,18 @@ $("#turnHistory").onclick = async event => {
 };
 
 async function switchRuntime(button, path, payload) {
+  if (sessionSwitchBusy) return;
+  const isCurrent = sessionScope(), sid = selectedSessionId, media = Boolean(stream);
   const wasRealtime = Boolean(socket || connectingPromise);
-  const pendingConnection = connectingPromise;
   if (wasRealtime) disconnectRealtime();
-  if (pendingConnection) await pendingConnection.catch(() => {});
+  if (!isCurrent()) return;
   button.disabled = true;
   try {
-    render(await post(path, {...payload, sessionId: selectedSessionId}));
-    if (wasRealtime) await connectRealtime();
+    const result = await post(path, {...payload, sessionId: sid});
+    if (!isCurrent()) return;
+    render(result);
+    if (wasRealtime) await connectRealtime({media});
+    return isCurrent();
   } catch (error) { alert(error.message); }
   finally { button.disabled = false; }
 }
@@ -1319,15 +1364,7 @@ $("#taskForm").onsubmit = async event => {
   event.preventDefault();
   const title = $("#customTitle").value.trim();
   const steps = $("#customSteps").value.split(/\r?\n/).map(item => item.trim()).filter(Boolean);
-  try {
-    const wasRealtime = Boolean(socket || connectingPromise);
-    const pendingConnection = connectingPromise;
-    if (wasRealtime) disconnectRealtime();
-    if (pendingConnection) await pendingConnection.catch(() => {});
-    render(await post("/api/tasks/create", {title, steps, sessionId: selectedSessionId}));
-    $("#taskDialog").close();
-    if (wasRealtime) await connectRealtime();
-  } catch (error) { alert(error.message); }
+  if (await switchRuntime($("#createTask"), "/api/tasks/create", {title, steps})) $("#taskDialog").close();
 };
 $("#artifactClose").onclick = () => $("#artifactDialog").close();
 $("#artifactPrevious").onclick = async () => {
@@ -1430,35 +1467,56 @@ $("#logout").onclick = async () => {
   stopMedia();
   try { await post("/api/auth/logout"); } finally { showLogin(); }
 };
+async function changeSession(targetId, label = null) {
+  if (sessionSwitchBusy || !currentUser) return;
+  sessionSwitchBusy = true;
+  const uid = currentUser.id, revision = ++sessionRevision;
+  const isCurrent = () => currentUser?.id === uid && sessionRevision === revision;
+  sessionDrafts.set(selectedSessionId, $("#textTurnInput").value);
+  $("#sessionSelect").disabled = $("#newSession").disabled = $("#textTurnSend").disabled = true;
+  const wasRealtime = Boolean(socket || connectingPromise);
+  const media = Boolean(stream);
+  disconnectRealtime();
+  $("#textTurnError").textContent = "正在切换案例，未发送输入已保留在原案例…";
+  try {
+    if (!isCurrent()) return;
+    if (label !== null) {
+      const created = await post("/api/sessions", {label});
+      if (!isCurrent()) return;
+      targetId = created.session.id;
+    }
+    selectedSessionId = targetId;
+    state = null;
+    localSubmittedTurns.clear();
+    $("#textTurnInput").value = sessionDrafts.get(targetId) || "";
+    $("#turnHistory").replaceChildren();
+    $("#transcript").textContent = "";
+    $("#assistantCaption").replaceChildren();
+    localStorage.setItem("egoassist.session." + uid, targetId);
+    await refreshSessionList(targetId);
+    if (!isCurrent()) return;
+    render(await request(selectedStatePath()));
+    if (!isCurrent()) return;
+    $("#textTurnError").textContent = "";
+    if (wasRealtime) await connectRealtime({media});
+  } catch (error) {
+    if (isCurrent()) $("#textTurnError").textContent = "案例切换未完成 · " + error.message;
+  } finally {
+    sessionSwitchBusy = false;
+    $("#sessionSelect").disabled = $("#newSession").disabled = false;
+    if (isCurrent()) $("#textTurnSend").disabled = false;
+  }
+}
+
 $("#newSession").onclick = async () => {
   const label = prompt("实验案例名称", "新实验案例");
   if (label === null || !label.trim()) return;
-  const wasRealtime = Boolean(socket || connectingPromise);
-  const pendingConnection = connectingPromise;
-  disconnectRealtime();
-  if (pendingConnection) await pendingConnection.catch(() => {});
-  const created = await post("/api/sessions", {label: label.trim()});
-  selectedSessionId = created.session.id;
-  if (currentUser) localStorage.setItem("egoassist.session." + currentUser.id, selectedSessionId);
-  await refreshSessionList(selectedSessionId);
-  if (wasRealtime) await connectRealtime();
-  else render(await request(selectedStatePath()));
+  await changeSession(null, label.trim());
 };
-$("#sessionSelect").onchange = async event => {
-  const wasRealtime = Boolean(socket || connectingPromise);
-  const pendingConnection = connectingPromise;
-  disconnectRealtime();
-  if (pendingConnection) await pendingConnection.catch(() => {});
-  selectedSessionId = event.currentTarget.value;
-  if (currentUser) localStorage.setItem("egoassist.session." + currentUser.id, selectedSessionId);
-  const selected = sessionCatalog.find(item => item.id === selectedSessionId);
-  if (selected?.memoryPolicy) renderMemoryPolicy(selected.memoryPolicy, state?.memoryProfiles || []);
-  if (wasRealtime) await connectRealtime();
-  else render(await request(selectedStatePath()));
-};
+$("#sessionSelect").onchange = event => changeSession(event.currentTarget.value);
 function renderInsight(result) {
   const kind = {daily: "日报", weekly: "周报", monthly: "月报", suggestions: "当前建议"};
-  $("#insightResultTitle").textContent = [kind[result.kind] || "报告", result.window?.start || result.anchor || ""].filter(Boolean).join(" · ");
+  $("#insightResultTitle").textContent = [kind[result.period?.kind] || "报告", result.period?.anchor || ""].filter(Boolean).join(" · ");
   const coverage = result.coverage || {};
   $("#insightStatus").textContent = [result.status, result.cached ? "复用已生成结果" : result.latencyMs != null ? result.latencyMs + " ms" : "",
     "记录 " + (coverage.includedRecords || 0) + "/" + (coverage.totalRecords || 0),
@@ -1469,19 +1527,21 @@ function renderInsight(result) {
     return "<h3>" + (key === "summary" ? "记录摘要" : "建议") + "</h3>" + (items.length ? items.map(item =>
       "<article class='insight-item'><p>" + esc(item.text) + "</p><details><summary>来源 " + item.sourceIds.length +
       "</summary>" + item.sourceIds.map(id => { const source = sources.get(id); return "<div class='insight-source'><small>" +
-        esc(id + " · " + (source?.recordedAt || "")) + "</small><p>" + esc(source?.text || "来源不可用") + "</p></div>"; }).join("") + "</details></article>"
+        esc(id + " · " + (source?.recordedLocalAt || source?.recordedAt || "")) + "</small><p>" + esc(source?.text || "来源不可用") + "</p></div>"; }).join("") + "</details></article>"
     ).join("") : "<p>" + (key === "summary" ? "暂无摘要" : "暂无有依据的建议") + "</p>");
   }).join("") + "<details><summary>生成审计</summary><pre>" + esc(JSON.stringify(result, null, 2)) + "</pre></details>";
 }
 
 async function syncInsightSession() {
   const sid = selectedSessionId;
+  const isCurrent = sessionScope();
   if (!currentUser || !sid || insightSession === sid) return;
   insightSession = sid;
   insightTurn = null;
   insightJobs = [];
   selectedInsightJob = null;
   displayedInsightResult = null;
+  const selection = ++insightResultRequest;
   $("#insightJobs").replaceChildren();
   promptAuditSignature = "";
   $("#proactiveSuggestions").checked = false;
@@ -1493,10 +1553,15 @@ async function syncInsightSession() {
   $("#insightDate").value = local.toISOString().slice(0, 10);
   try {
     const data = await request("/api/insights?session=" + encodeURIComponent(sid));
-    if (sid !== selectedSessionId || !currentUser) return;
+    if (!isCurrent()) return;
     $("#proactiveSuggestions").checked = data.proactiveEnabled;
     renderInsightJobs(data.jobs || []);
-    if (data.results.length) renderInsight(data.results.at(-1));
+    if (data.results.length && selection === insightResultRequest) {
+      const result = data.results.at(-1);
+      displayedInsightResult = result.id;
+      selectedInsightJob = insightJobs.find(job => job.resultEventId === result.id)?.jobId || null;
+      renderInsight(result);
+    }
   } catch (error) {
     if (sid === selectedSessionId) {
       insightSession = null;
@@ -1508,6 +1573,7 @@ async function syncInsightSession() {
 async function generateInsight(automatic = false) {
   if (insightBusy || !currentUser || !selectedSessionId) return;
   const sid = selectedSessionId;
+  const isCurrent = sessionScope();
   insightBusy = true;
   insightLastAttempt = Date.now();
   $("#insightGenerate").disabled = true;
@@ -1517,13 +1583,16 @@ async function generateInsight(automatic = false) {
       kind: automatic ? "suggestions" : $("#insightKind").value,
       anchor: automatic ? null : $("#insightDate").value,
       scope: automatic ? "case" : $("#insightScope").value});
-    if (sid === selectedSessionId && currentUser) {
-      selectedInsightJob = result.job.jobId;
+    if (isCurrent()) {
+      if (!automatic || !selectedInsightJob) {
+        selectedInsightJob = result.job.jobId;
+        insightResultRequest += 1;
+      }
       $("#insightStatus").textContent = "已受理 · " + result.acceptedMs + " ms";
       renderInsightJobs([...insightJobs.filter(job => job.jobId !== result.job.jobId), result.job]);
       refreshInsightJobs();
     }
-  } catch (error) { if (sid === selectedSessionId) $("#insightStatus").textContent = error.message; }
+  } catch (error) { if (isCurrent()) $("#insightStatus").textContent = error.message; }
   finally { insightBusy = false; $("#insightGenerate").disabled = false; }
 }
 
@@ -1561,8 +1630,9 @@ function renderInsightJobs(jobs) {
 
 async function loadInsightResult(id) {
   const sid = selectedSessionId;
+  const isCurrent = sessionScope(), selection = ++insightResultRequest;
   const data = await request("/api/insights?session=" + encodeURIComponent(sid) + "&result=" + encodeURIComponent(id));
-  if (sid === selectedSessionId && currentUser && data.results.length) {
+  if (isCurrent() && selection === insightResultRequest && data.results.length) {
     displayedInsightResult = id;
     renderInsight(data.results[0]);
   }
@@ -1571,18 +1641,19 @@ async function loadInsightResult(id) {
 async function refreshInsightJobs() {
   if (insightPolling || !currentUser || !selectedSessionId) return;
   const sid = selectedSessionId;
+  const isCurrent = sessionScope(), selection = insightResultRequest;
   insightPolling = true;
   insightLastPoll = Date.now();
   try {
     const data = await request("/api/insights?session=" + encodeURIComponent(sid) + "&includeResults=false", {signal: AbortSignal.timeout(8000)});
-    if (sid !== selectedSessionId || !currentUser) return;
+    if (!isCurrent()) return;
     renderInsightJobs(data.jobs || []);
     const job = insightJobs.find(item => item.jobId === selectedInsightJob) || insightJobs.at(-1);
     if (job && ["queued", "running"].includes(job.status)) {
       $("#insightStatus").textContent = (job.status === "queued" ? "排队中" : "生成中") +
         " · " + (insightPhases[job.phase] || "处理中") + " · 状态更新于 " + new Date().toLocaleTimeString();
     }
-    if (job?.resultEventId && job.resultEventId !== displayedInsightResult) await loadInsightResult(job.resultEventId);
+    if (selection === insightResultRequest && job?.resultEventId && job.resultEventId !== displayedInsightResult) await loadInsightResult(job.resultEventId);
   } catch (error) { if (sid === selectedSessionId) $("#insightStatus").textContent = "连接中断，显示上次状态 · " + error.message; }
   finally { insightPolling = false; }
 }
@@ -1646,24 +1717,28 @@ boot().catch(error => { showLogin(); $("#authError").textContent = error.message
 setInterval(async () => {
   if (socket?.readyState === WebSocket.OPEN) {
     if (stateRefreshPendingAt) {
-      if (Date.now() - stateRefreshPendingAt > 8000) {
-        $("#textTurnError").textContent = "状态更新超过 8 秒，等待服务恢复；已受理任务仍保留。";
-      }
+      if (Date.now() - stateRefreshPendingAt <= 8000) return;
+      $("#textTurnError").textContent = "实时状态更新超过 8 秒，正在通过 HTTP 补偿查询；已受理任务仍保留。";
+    } else {
+      if (socket.bufferedAmount > VIDEO_BUFFER_HIGH_WATER) return;
+      stateRefreshPendingAt = Date.now();
+      socket.send(JSON.stringify({type: "refresh"}));
       return;
     }
-    if (socket.bufferedAmount > VIDEO_BUFFER_HIGH_WATER) return;
-    stateRefreshPendingAt = Date.now();
-    socket.send(JSON.stringify({type: "refresh"}));
-    return;
+  } else {
+    stateRefreshPendingAt = 0;
   }
-  stateRefreshPendingAt = 0;
   if (!currentUser || !selectedSessionId || detachedStatePolling || Date.now() - lastDetachedStatePoll < 3000) return;
   const sid = selectedSessionId, uid = currentUser.id;
   detachedStatePolling = true;
   lastDetachedStatePoll = Date.now();
   try {
     const latest = await request(selectedStatePath(), {signal: AbortSignal.timeout(8000)});
-    if (selectedSessionId === sid && currentUser?.id === uid) render(latest);
+    if (selectedSessionId === sid && currentUser?.id === uid) {
+      render(latest);
+      if (stateRefreshPendingAt) $("#textTurnError").textContent = "状态已通过 HTTP 更新，等待实时推送恢复";
+      stateRefreshPendingAt = 0;
+    }
   } catch (error) { if (selectedSessionId === sid) $("#textTurnError").textContent = "状态更新中断 · " + error.message; }
   finally { detachedStatePolling = false; }
 }, 1200);
