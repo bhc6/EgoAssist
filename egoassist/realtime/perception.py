@@ -86,10 +86,24 @@ def perception_prompt(context: PerceptionFrameContext | Mapping[str, Any]) -> st
     )
 
 
-def parse_perception_hypothesis(raw: str | Mapping[str, Any]) -> PerceptionHypothesis:
-    value = json.loads(raw.strip()) if isinstance(raw, str) else dict(raw)
+def _parse_json_object(raw):
+    if isinstance(raw, str):
+        text = raw.strip()
+        if text.startswith("```") and text.endswith("```"):
+            lines = text.splitlines()
+            if lines[0].strip().lower() not in {"```", "```json"}:
+                raise ValueError("unsupported perception output fence")
+            text = "\n".join(lines[1:-1])
+        value = json.loads(text)
+    else:
+        value = dict(raw)
     if not isinstance(value, dict):
         raise ValueError("perception output must be a JSON object")
+    return value
+
+
+def parse_perception_hypothesis(raw: str | Mapping[str, Any]) -> PerceptionHypothesis:
+    value = _parse_json_object(raw)
     hazards = []
     for item in value.get("hazards", []):
         if not isinstance(item, Mapping):
@@ -106,12 +120,12 @@ def parse_perception_hypothesis(raw: str | Mapping[str, Any]) -> PerceptionHypot
         raise ValueError("visible_evidence must be a list")
     return PerceptionHypothesis(
         checkpoint_id=str(value.get("checkpoint_id") or value.get("step") or "unknown"),
-        completed=bool(value.get("completed", False)),
+        completed=value.get("completed", False),
         confidence=value.get("confidence", 0),
         summary=" ".join(str(value.get("summary") or value.get("scene_summary") or "").split())[:500],
         visible_evidence=[" ".join(str(item).split())[:300] for item in visible[:8] if str(item).strip()],
         hazards=hazards,
-        unrelated=bool(value.get("unrelated", False)),
+        unrelated=value.get("unrelated", False),
     )
 
 
@@ -222,6 +236,7 @@ def ambient_prompt(context: AmbientFrameContext | Mapping[str, Any]) -> str:
     return (
         (prompt_text('perception/ambient_open') if value.observation_mode == "open"
          else prompt_text('perception/ambient_prompt.1', v0=NONE_OBSERVED, v1=UNKNOWN_LOCATION))
+        + prompt_text('perception/reference_context')
         + json.dumps(
             {
                 "schema": value.schema_version,
@@ -235,6 +250,7 @@ def ambient_prompt(context: AmbientFrameContext | Mapping[str, Any]) -> str:
                 "risk": value.risk,
                 "capturedAt": value.frame_captured_at.isoformat(),
                 "previousObservation": value.previous_observation,
+                "referenceContext": value.reference_context,
             },
             ensure_ascii=False,
             separators=(",", ":"),
@@ -255,18 +271,7 @@ def frame_prompt(
 
 
 def parse_ambient_hypothesis(raw: str | Mapping[str, Any], *, open_observation=False) -> AmbientObservationHypothesis:
-    if isinstance(raw, str):
-        text = raw.strip()
-        if text.startswith("```") and text.endswith("```"):
-            lines = text.splitlines()
-            if lines[0].strip().lower() not in {"```", "```json"}:
-                raise ValueError("unsupported ambient output fence")
-            text = "\n".join(lines[1:-1])
-        value = json.loads(text)
-    else:
-        value = dict(raw)
-    if not isinstance(value, dict):
-        raise ValueError("ambient output must be a JSON object")
+    value = _parse_json_object(raw)
     if open_observation:
         if not {"summary", "visible_evidence", "uncertainties", "salient_change"} <= value.keys():
             raise ValueError("open observation is missing evidence fields")

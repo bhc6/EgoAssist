@@ -4076,16 +4076,20 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
         }
 
     def ambient_snapshot(user_id, session_id):
+        from egoassist.realtime.observation_context import memory_work_snapshot
         owner = case_owner(user_id, session_id)
         watch = ambient_watch_session(owner)
         snapshot = {**ambient_status(user_id), **(watch.snapshot() if watch else {}), **ambient_options(owner)}
         bridge = owner.bridge
-        lane = getattr(bridge, "perception", None)
+        lane = getattr(bridge, "ambient_perception", None)
         latest = getattr(bridge, "_latest_perception_frame", None)
         snapshot["processing"] = bool(lane and lane.active)
         snapshot["connected"] = bool(bridge and getattr(bridge, "connected", False))
         snapshot["cameraAt"] = latest.get("capturedAt").isoformat() if isinstance(latest, dict) else None
         snapshot["taskActive"] = owner.runtime.task is not None
+        snapshot["lane"] = lane.snapshot() if lane else None
+        snapshot["taskLane"] = bridge.perception.snapshot() if bridge and hasattr(bridge, "perception") else None
+        snapshot["memoryWork"] = memory_work_snapshot(owner.journal)
         snapshot["elapsedMs"] = round((time.monotonic() - lane._request_started) * 1000) if lane and lane.active and lane._request_started else None
         return snapshot
 
@@ -4654,10 +4658,9 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                 frame_id=frame_id,
                 captured_at=captured_at,
             )
-            if value is not None:
-                # A live task always wins. Ambient observation only ever fills a
-                # gap; it never competes with, or preempts, task-bound perception.
-                return value.model_dump(mode="python")
+            return value.model_dump(mode="python") if value is not None else None
+
+        def session_ambient_context(frame_id: str, captured_at: datetime) -> dict[str, Any] | None:
             watch = ambient_watch_session(owner)
             if watch is None:
                 return None
@@ -4669,6 +4672,11 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                 frame_id=frame_id,
                 captured_at=captured_at,
             ).model_dump(mode="python")
+            from egoassist.realtime.observation_context import observation_references
+            context["reference_context"] = observation_references(
+                journal, timeline, user_id=user_id, session_id=session_id,
+                task=session_runtime.task.snapshot() if session_runtime.task else None,
+            )
             frame = getattr(bridge, "_latest_perception_frame", None)
             if frame and frame.get("frameId") == frame_id and owner.scene.frames:
                 # Retain the exact sample used by this observer, not a later frame.
@@ -4676,13 +4684,14 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                 data = base64.b64decode(frame["image"], validate=True)
                 media = owner.scene._save(data, ".jpg", "image/jpeg")
                 context["media"] = {**media, "frameId": frame_id, "capturedAt": captured_at.isoformat()}
-                journal.append("ambient.frame", {"frame": context["media"], "contextId": context["context_id"]})
+                journal.append("ambient.frame", {"frame": context["media"], "contextId": context["context_id"],
+                                                 "referenceContext": context["reference_context"]})
             return context
 
         async def session_ambient_result(
             captured_value: dict[str, Any], raw_value: dict[str, Any],
         ) -> dict[str, Any]:
-            """Handle one task-free ambient frame.
+            """Handle one ambient frame independently of the current task.
 
             Rejections are journalled rather than recorded on a task, because
             ambient mode has no task object to carry them.
@@ -4757,7 +4766,9 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                     "status": "accepted",
                     "freshForSpeech": fresh_for_speech,
                     "rawMediaPersisted": bool(captured.media),
+                    "referenceContext": captured.reference_context,
                 })
+                owner.scene.ingest_observation(observation_entry)
                 policy = current_memory_policy()
                 # Only a positive sighting is an episode. An absence row is
                 # coverage evidence for the habit bridge, not a memory of an
@@ -6282,16 +6293,9 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                 _do_enqueue_transcript(str(text).strip(), segment=segment)
 
         def proactive_interval_for() -> float:
-            """Seconds between perception checks.
-
-            Ambient observation samples far more slowly than task coaching: it is
-            watching for a once-a-day event, not guiding a step in progress, so a
-            task cadence would burn battery and send frames for no benefit.
-            """
+            """Task checks have their own cadence, independent of ambient sampling."""
             if session_runtime.task is not None and session_runtime.skill is not None:
                 return float(session_runtime.skill.manifest.get("proactive_check_seconds", 4))
-            if session_runtime.task is None:
-                return float(ambient_options(owner)["intervalSeconds"])
             return 4.0
 
         async def handle_media_payload(payload: dict, *, source: str) -> bool:
@@ -6308,9 +6312,11 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
             if kind == "video":
                 image_value = str(payload.get("image", ""))
                 owner.scene.append_frame(image_value, payload.get("capture"),
-                                         describe=not (session_runtime.task is None and ambient_watch_session(owner)))
+                                         describe=not bool(ambient_watch_session(owner)))
                 media_audit.record_video(len(image_value))
                 bridge.append_video(image_value)
+                if hasattr(bridge, "maybe_observe_ambient"):
+                    bridge.maybe_observe_ambient(float(ambient_options(owner)["intervalSeconds"]))
                 # The isolated task observer has its own audio ordering token;
                 # observation must also work while the wearer is silent.
                 bridge.maybe_check_proactively(proactive_interval_for())
@@ -6379,6 +6385,8 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                     session_perception_context,
                     session_perception_result,
                 )
+            if hasattr(bridge, "set_ambient_context_provider"):
+                bridge.set_ambient_context_provider(session_ambient_context)
             (owner.work_ledger or CaseWorkLedger(harness.journal)).recover_delivery_claims()
             if hasattr(bridge, "set_tools"):
                 bridge.set_tools(session_tool_declarations(), session_tool_handler)

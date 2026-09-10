@@ -9,6 +9,7 @@ def project_scene(scene):
     frames = scene.get("synchronizedFrames") or []
     return {
         "turnId": scene.get("turnId"),
+        "observationContext": scene.get("observationContext"),
         "speaker": scene.get("speaker"),
         "segment": scene.get("segment"),
         "audioAvailable": bool(scene.get("audio")),

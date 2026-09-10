@@ -7,6 +7,7 @@ from egoassist.prompts import prompt_text
 import asyncio
 import base64
 from collections import deque
+from copy import deepcopy
 import difflib
 import ipaddress
 import inspect
@@ -319,7 +320,11 @@ class _OmniPerceptionLane:
     def request(self, image_b64: str, context: dict[str, Any] | None = None) -> bool:
         if not image_b64 or self.closed:
             return False
-        self.pending_frame = (image_b64, dict(context) if context else None)
+        if self.pending_frame:
+            previous = self.pending_frame[1] or {}
+            self.trace("perception.frame.coalesced", {"frameId": previous.get("frame_id"),
+                       "contextId": previous.get("context_id"), "reason": "newer-pending-frame"})
+        self.pending_frame = (image_b64, deepcopy(context) if context else None)
         if not self.connected:
             self._schedule_reconnect("perception-demand")
             return False
@@ -443,6 +448,9 @@ class _OmniPerceptionLane:
             "pendingFrame": bool(self.pending_frame),
             "activeContextId": self.active_context.get("context_id") if self.active_context else None,
             "activeFrameId": self.active_context.get("frame_id") if self.active_context else None,
+            "schemaVersion": (self.active_context or {}).get("schema_version"),
+            "elapsedMs": round((time.monotonic() - self._request_started) * 1000) if self.active and self._request_started else None,
+            "requestTimeoutMs": self.settings["requestTimeoutSeconds"] * 1000,
             "microphoneShared": False,
             "turnDetection": "disabled-explicit-response",
         }
@@ -657,6 +665,14 @@ class OmniBrowserBridge:
             on_decision=self._handle_proactive_decision,
             trace=self._trace,
         )
+        self.ambient_perception = _OmniPerceptionLane(
+            api_key=api_key, model=model, voice=voice, loop=self.loop,
+            conversation_cls=OmniRealtimeConversation, callback_cls=OmniRealtimeCallback,
+            modalities=MultiModality, on_decision=self._handle_proactive_decision,
+            trace=lambda event, payload, **kw: self._trace(event, {**payload, "lane": "ambient"}, **kw),
+        )
+        self._ambient_context_provider = None
+        self.last_ambient_check = 0.0
 
     async def connect(self) -> None:
         try:
@@ -985,6 +1001,20 @@ class OmniBrowserBridge:
                 })
                 return
         self.perception.request(frame["image"], context)
+
+    def maybe_observe_ambient(self, interval_seconds: float) -> None:
+        """Ambient cadence is independent of task checks and dialogue output."""
+        frame = self._latest_perception_frame
+        if not frame or not self._ambient_context_provider or self.closed:
+            return
+        now = time.monotonic()
+        if now - self.last_ambient_check < interval_seconds:
+            return
+        context = self._ambient_context_provider(frame["frameId"], frame["capturedAt"])
+        if context is None:
+            return
+        self.last_ambient_check = now
+        self.ambient_perception.request(frame["image"], context)
 
     def request_response(
         self,
@@ -1550,6 +1580,9 @@ class OmniBrowserBridge:
     ) -> None:
         self._perception_context_provider = context_provider
         self._perception_result_handler = result_handler
+
+    def set_ambient_context_provider(self, provider) -> None:
+        self._ambient_context_provider = provider
 
     @staticmethod
     def _provider_tool_declarations(declarations: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -2343,6 +2376,7 @@ class OmniBrowserBridge:
                 "userVisibleOutput": True,
             },
             "perception": self.perception.snapshot(),
+            "ambient": self.ambient_perception.snapshot() if getattr(self, "ambient_perception", None) else None,
         }
 
     @staticmethod
@@ -2377,6 +2411,8 @@ class OmniBrowserBridge:
         if getattr(self, "tool_model", None):
             await self.tool_model.close()
         await self.perception.close()
+        if getattr(self, "ambient_perception", None):
+            await self.ambient_perception.close()
         if self.conversation:
             try:
                 await asyncio.to_thread(self.conversation.close)

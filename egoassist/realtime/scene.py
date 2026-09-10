@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import base64
 from collections import deque
+from copy import deepcopy
 from datetime import datetime, timezone
 import hashlib
 import io
@@ -44,6 +45,7 @@ class SharedScene:
         self.speakers = SpeakerRegistry(journal)
         self.turns = {r["turnId"]: r for r in journal.entries() if r.get("type") == "scene.turn"}
         self.last_vision = None
+        self.observations = deque(maxlen=64)
         self.vision_task = None
         self.vision_by_frame = {}
         self.tasks = set()
@@ -57,6 +59,8 @@ class SharedScene:
         self.asr = asr_settings()
         self.transcription_limit = asyncio.Semaphore(self.asr["concurrency"])
         for row in journal.entries():
+            if row.get("type") == "ambient_observation" and row.get("status") == "accepted":
+                self.ingest_observation(row)
             if row.get("type") == "scene.result":
                 self.last_vision = (0, row)
                 if row.get("status") == "observed":
@@ -156,8 +160,29 @@ class SharedScene:
                         result["frame"] = result["synchronizedFrames"][-1]
             else:
                 result["speaker"] = {"status": "unknown", "wearer": False, "reason": "audio-range-unavailable"}
+        reference_time = datetime.now(timezone.utc).isoformat() if explicit else (result.get("frame") or {}).get("receivedAt")
+        result["observationContext"] = self.observation_context(reference_time) if reference_time else None
         self.turns[turn_id] = self.journal.append("scene.turn", result)
         return self.turns[turn_id]
+
+    def ingest_observation(self, row):
+        evidence = row.get("evidence") or {}
+        if row.get("status") != "accepted" or not evidence.get("capturedAt"):
+            return
+        self.observations.append(deepcopy({
+            "sourceId": row["id"], "observationId": row.get("observation_id"),
+            "capturedAt": evidence["capturedAt"], "recordedAt": row["timestamp"],
+            "visibleEvidence": evidence.get("visibleEvidence", []),
+            "uncertainties": evidence.get("uncertainties", []), "frame": evidence.get("media"),
+            "claim": "model-observation-not-user-confirmation",
+        }))
+
+    def observation_context(self, before):
+        boundary = datetime.fromisoformat(before)
+        candidates = [row for row in self.observations
+                      if datetime.fromisoformat(row["capturedAt"]) <= boundary]
+        latest = max(candidates, key=lambda row: datetime.fromisoformat(row["capturedAt"]), default=None)
+        return deepcopy(latest)
 
     async def resolve_speaker(self, turn_id):
         row = self.turns.get(turn_id)
@@ -332,6 +357,7 @@ class SharedScene:
         row = self.turns.get(turn_id, row)
         association = self.association(row)
         return {"turnId": turn_id, "speaker": row["speaker"], "audio": row.get("audio"),
+                "observationContext": deepcopy(row.get("observationContext")),
                 "utterances": row.get("utterances", []),
                 "synchronizedFrames": row.get("synchronizedFrames", []), "avAssociation": association,
                 "visual": visual, "timeBasis": "question-time; receivedAt is server receipt, device timestamp is unverified"}

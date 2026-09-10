@@ -161,7 +161,7 @@ class PerceptionHypothesis(ProductContract):
 
 
 class AmbientFrameContext(ProductContract):
-    """Immutable binding for a passively observed frame with no active task.
+    """Immutable binding for passive observation independent of active tasks.
 
     Deliberately a separate contract rather than a mode flag on
     PerceptionFrameContext: a distinct ``schema_version`` Literal plus the
@@ -184,6 +184,7 @@ class AmbientFrameContext(ProductContract):
     watch_locations: list[dict[str, Any]] = Field(max_length=32)
     observation_mode: Literal["open", "focused"] = "focused"
     previous_observation: dict[str, Any] | None = None
+    reference_context: dict[str, Any] | None = None
     media: dict[str, Any] | None = None
     risk: Literal["low", "medium", "high"] = "low"
     # Required and non-empty: an ambient context cannot be constructed without

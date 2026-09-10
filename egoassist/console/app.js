@@ -609,6 +609,26 @@ function render(next) {
   renderTimeline(state.events || []);
   renderPerceptionEvidence(task);
   renderAmbient();
+  renderExecutionLanes();
+}
+
+function renderExecutionLanes() {
+  const root = $("#executionLanes");
+  if (!root) return;
+  const ambient = state?.ambient || {}, lane = ambient.lane || {};
+  const scheduler = state?.scheduler || {}, work = ambient.memoryWork || {};
+  const pendingTurns = (state?.workLedger?.turnInbox || []).filter(t => ["received", "queued", "processing"].includes(t.status)).length;
+  const observedAt = ambient.observation?.capturedAt;
+  const observation = !ambient.consented ? "未开启" : !ambient.connected ? "等待连接" :
+    lane.active ? "分析中 · " + (lane.elapsedMs || 0) + " ms" :
+    !ambient.cameraAt || Date.now() - Date.parse(ambient.cameraAt) > 10000 ? "等待摄像头画面" : "等待采样";
+  const interaction = scheduler.pending || scheduler.activeResponseIds?.length ? "回答生成中" : pendingTurns ? "问题处理中" : "等待输入";
+  const memory = "运行 " + (work.running || 0) + " · 等待 " + (work.queued || 0) + " · 失败 " + (work.failed || 0);
+  root.innerHTML = [["现场观察", observation, observedAt ? "已分析画面 " + new Date(observedAt).toLocaleTimeString() : "尚无已分析画面"],
+    ["用户交互", interaction, "排队回答 " + (scheduler.queued?.length || 0)],
+    ["后台记忆与报告", memory, "已完成后台任务 " + (work.completed || 0)]]
+    .map(([name, status, detail]) => "<div><b>" + esc(name) + "</b><span>" + esc(status) + "</span><small>" + esc(detail) + "</small></div>")
+    .join("");
 }
 
 // Ambient observation must be visible for as long as it is running. ADR 005/007:
@@ -634,10 +654,12 @@ function renderAmbient() {
   const latest = info.observation;
   const rejected = info.audit?.[0]?.status === "rejected" ? info.audit[0] : null;
   root.className = "ambient-banner live";
-  const status = !info.connected ? "等待连接" : info.taskActive ? "任务观察中" : info.processing ? "正在分析 · " + (info.elapsedMs || 0) + " ms" :
+  const status = !info.connected ? "等待连接" : info.processing ? "正在分析 · " + (info.elapsedMs || 0) + " ms" :
     !info.cameraAt || Date.now() - Date.parse(info.cameraAt) > 10000 ? "等待摄像头画面" : "等待下一次采样";
   const html = "<b>" + (watchlist.mode === "open" ? "开放环境观察" : esc(watchlist.title || "专项观察")) + " · " + esc(status) + "</b>" +
     "<span>" + esc(latest?.summary || "尚无观测结果") + "</span>" +
+    (info.taskActive ? "<small>任务观察：" + (!info.connected ? "等待连接" : info.taskLane?.active ? "分析中" : "等待下一帧") + "</small>" : "") +
+    (info.lane?.pendingFrame ? "<small>另有最新采样帧等待分析</small>" : "") +
     (rejected ? "<span>最近采样未完成：" + esc(rejected.reason) + "</span>" : "") +
     (latest?.capturedAt ? "<small>画面时间：" + esc(new Date(latest.capturedAt).toLocaleString()) + "</small>" : "") +
     (latest?.uncertainties?.length ? "<span>待确认：" + esc(latest.uncertainties.join("；")) + "</span>" : "") +
