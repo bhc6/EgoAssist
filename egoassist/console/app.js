@@ -1199,11 +1199,18 @@ $("#textTurnForm").onsubmit = async event => {
   const draft = input.value, transcript = draft.trim();
   if (!transcript || button.disabled) return;
   button.disabled = true;
-  $("#textTurnError").textContent = "";
+  $("#textTurnError").textContent = providerReady ? "正在提交…" : "正在连接助手，输入已保留…";
   try {
-    // Text input is a control-plane path. Do not request an audio context or
-    // camera frame: browser autoplay/device permission must never delay a text
-    // question or make a working text demo look offline.
+    // Unlock the same speaker output during the user gesture. Resume in
+    // parallel with connection setup; output-device failure must not lose input.
+    try {
+      if (!audioContext) audioContext = new AudioContext();
+      audioContext.resume().catch(() => {
+        $("#duplexState").textContent = "声音未就绪，回答文字仍会显示";
+      });
+    } catch (_) {
+      $("#duplexState").textContent = "声音未就绪，回答文字仍会显示";
+    }
     await connectRealtime({media: false});
     if (!socket || socket.readyState !== WebSocket.OPEN) throw Error("实时会话尚未就绪");
     currentTurnId = crypto.randomUUID();
@@ -1218,7 +1225,12 @@ $("#textTurnForm").onsubmit = async event => {
     renderWorkCenter();
     turnOutbox().add(pending);
     if (input.value === draft) input.value = "";
+    // Reuse enabled sensors. Send the fresh frame before the question so the
+    // server associates it with this turn, just as it does for spoken input.
+    try { sendVideoFrame(); }
+    catch (_) { $("#cameraState").textContent = "当前帧采集失败，检查摄像头"; }
     socket.send(JSON.stringify(pending));
+    $("#textTurnError").textContent = "已发送，等待助手接收…";
   } catch (error) { $("#textTurnError").textContent = error.message; }
   finally { button.disabled = false; }
 };
