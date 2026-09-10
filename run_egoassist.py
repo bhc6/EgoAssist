@@ -341,6 +341,7 @@ class CaseRuntimeOwner:
     job_scheduler_task: asyncio.Task | None = None
     bridge: Any = None
     tool_confirmation_tasks: dict[str, asyncio.Task] = field(default_factory=dict)
+    ambient_options: dict | None = None
     intent_runtimes: dict[str, SkillRuntime] = field(default_factory=dict)
     memory_bus: Any = None  # MemoryEventBus — Phase 1 observability
     background_tasks: dict[str, "TaskSlot"] = field(default_factory=dict)  # Phase 2A: fanout slots
@@ -457,13 +458,13 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
         "enabled": _env_flag("EGOASSIST_AMBIENT_MODE", True),
         "watchlist_path": os.getenv("EGOASSIST_AMBIENT_WATCHLIST", "").strip(),
         "interval_seconds": max(
-            5.0, float(os.getenv("EGOASSIST_AMBIENT_INTERVAL_SECONDS", "20") or 20)
+            2.0, float(os.getenv("EGOASSIST_AMBIENT_INTERVAL_SECONDS", "5") or 5)
         ),
         "watchlist": None,
         "reason": "EGOASSIST_AMBIENT_MODE is off.",
     }
     if ambient_settings["enabled"]:
-        candidate = ambient_settings["watchlist_path"] or str(PACKAGE_ROOT / "watchlists" / "medication.json")
+        candidate = ambient_settings["watchlist_path"] or str(PACKAGE_ROOT / "watchlists" / "open.json")
         try:
             ambient_settings["watchlist"] = AmbientWatchList.load(candidate)
             ambient_settings["reason"] = f"Watching {Path(candidate).name}."
@@ -480,6 +481,13 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
     def ambient_consent(user_id: str) -> dict[str, Any] | None:
         """The active ambient grant for one account, or None."""
         return product_database.active_consent(user_id, purpose=AMBIENT_CONSENT_PURPOSE)
+
+    def ambient_options(owner):
+        if owner.ambient_options is None:
+            saved = next((e["settings"] for e in reversed(owner.journal.entries()) if e.get("type") == "ambient.settings"), {})
+            owner.ambient_options = {"intervalSeconds": ambient_settings["interval_seconds"],
+                                     "questionsEnabled": True, **saved}
+        return owner.ambient_options
 
     def ambient_watch_session(owner: "CaseRuntimeOwner") -> Any:
         """Lazily create the watch session, but only while consent is live.
@@ -499,6 +507,9 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
         owner.ambient = AmbientWatchSession(
             ambient_settings["watchlist"], consent_id=grant["consent_id"],
         )
+        previous = next((e for e in reversed(owner.journal.entries()) if e.get("type") == "ambient_observation" and e.get("status") == "accepted"), None)
+        if previous:
+            owner.ambient.ingest(previous.get("evidence", {}))
         return owner.ambient
 
     def runtime_tool_declarations(package) -> list[dict]:
@@ -1453,6 +1464,7 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                 "toolAudit": list(reversed(active_tools.audit[-8:])),
                 "toolActivity": harness_override.journal.tool_activity() if harness_override else [],
                 "toolApproval": "automatic",
+                "ambient": ambient_snapshot(user_scope, visible_session_id) if harness_override else None,
                 "events": visible_events,
                 "performance": performance_snapshot(visible_events),
                 "sessionId": visible_session_id,
@@ -1570,6 +1582,7 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
             "toolAudit": list(reversed(active_tools.audit[-8:])),
             "toolActivity": harness_override.journal.tool_activity() if harness_override else [],
             "toolApproval": "automatic",
+            "ambient": ambient_snapshot(user_scope, visible_session_id) if harness_override else None,
             "events": visible_events,
             "performance": performance_snapshot(visible_events),
             "sessionId": visible_session_id,
@@ -4095,6 +4108,20 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
             "watchlist": watchlist.public_summary() if watchlist is not None else None,
         }
 
+    def ambient_snapshot(user_id, session_id):
+        owner = case_owner(user_id, session_id)
+        watch = ambient_watch_session(owner)
+        snapshot = {**ambient_status(user_id), **(watch.snapshot() if watch else {}), **ambient_options(owner)}
+        bridge = owner.bridge
+        lane = getattr(bridge, "perception", None)
+        latest = getattr(bridge, "_latest_perception_frame", None)
+        snapshot["processing"] = bool(lane and lane.active)
+        snapshot["connected"] = bool(bridge and getattr(bridge, "connected", False))
+        snapshot["cameraAt"] = latest.get("capturedAt").isoformat() if isinstance(latest, dict) else None
+        snapshot["taskActive"] = owner.runtime.task is not None
+        snapshot["elapsedMs"] = round((time.monotonic() - lane._request_started) * 1000) if lane and lane.active and lane._request_started else None
+        return snapshot
+
     async def post_ambient_consent(request):
         """Grant or revoke consent for ambient observation.
 
@@ -4132,6 +4159,22 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
         else:
             raise ValueError("granted must be true or false")
         return web.json_response({"ambient": ambient_status(user_id)})
+
+    async def post_ambient_settings(request):
+        payload = await request.json()
+        user_id = request[user_key]["id"]
+        session_id = str(payload.get("sessionId", ""))
+        identity.get_context_session(user_id, session_id)
+        owner = case_owner(user_id, session_id)
+        interval = payload.get("intervalSeconds")
+        questions = payload.get("questionsEnabled")
+        if type(interval) not in {int, float} or not 2 <= interval <= 120 or not isinstance(questions, bool):
+            raise ValueError("intervalSeconds must be 2-120 and questionsEnabled must be boolean")
+        async with owner.mutation_lock:
+            settings = {"intervalSeconds": float(interval), "questionsEnabled": questions}
+            owner.journal.append("ambient.settings", {"settings": settings})
+            owner.ambient_options = settings
+        return web.json_response({"state": scoped_state_for_user(user_id, session_id)})
 
     async def get_privacy_export(request):
         user_id = request[user_key]["id"]
@@ -4652,12 +4695,21 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                 return None
             if not watch.should_submit(frame_id):
                 return None
-            return watch.frame_context(
+            context = watch.frame_context(
                 user_id=user_id,
                 session_id=session_id,
                 frame_id=frame_id,
                 captured_at=captured_at,
             ).model_dump(mode="python")
+            frame = getattr(bridge, "_latest_perception_frame", None)
+            if frame and frame.get("frameId") == frame_id and owner.scene.frames:
+                # Retain the exact sample used by this observer, not a later frame.
+                import base64
+                data = base64.b64decode(frame["image"], validate=True)
+                media = owner.scene._save(data, ".jpg", "image/jpeg")
+                context["media"] = {**media, "frameId": frame_id, "capturedAt": captured_at.isoformat()}
+                journal.append("ambient.frame", {"frame": context["media"], "contextId": context["context_id"]})
+            return context
 
         async def session_ambient_result(
             captured_value: dict[str, Any], raw_value: dict[str, Any],
@@ -4676,6 +4728,9 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                 return {"accepted": False, "reason": "invalid-captured-context"}
 
             def reject(reason: str, **detail: Any) -> dict[str, Any]:
+                if owner.ambient:
+                    owner.ambient.record_rejection(reason, frame_id=captured.frame_id,
+                                                  context_id=captured.context_id, detail=detail)
                 session_trace("ambient.observation.rejected", "ambient-policy", {
                     "reason": reason,
                     "frameId": captured.frame_id,
@@ -4689,7 +4744,7 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                     "frameId": captured.frame_id,
                     "contextId": captured.context_id,
                     "watchlistId": captured.watchlist_id,
-                    "rawMediaPersisted": False,
+                    "rawMediaPersisted": bool(captured.media), "media": captured.media,
                 })
                 return {"accepted": False, "reason": reason}
 
@@ -4722,39 +4777,57 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                 except ValueError as exc:
                     return reject("invalid-provider-schema", error=str(exc)[:240])
                 if not validation.accepted or validation.observation is None:
-                    watch.record_rejection(
-                        validation.reason,
-                        frame_id=captured.frame_id,
-                        context_id=captured.context_id,
-                    )
                     return reject(validation.reason)
                 evidence = validation.observation
                 # ingest reads the flattened observation fields, which live under
                 # `evidence` on the ObservationEvidence contract.
                 watch.ingest(dict(evidence.evidence))
                 product_database.record_observation(evidence)
-                journal.append("ambient_observation", {
+                observation_entry = journal.append("ambient_observation", {
                     **evidence.model_dump(mode="json"),
                     "status": "accepted",
-                    "rawMediaPersisted": False,
+                    "rawMediaPersisted": bool(captured.media),
                 })
                 policy = current_memory_policy()
                 # Only a positive sighting is an episode. An absence row is
                 # coverage evidence for the habit bridge, not a memory of an
                 # event that happened.
                 if (
-                    hypothesis.observed
+                    (hypothesis.observed if captured.observation_mode == "focused" else bool(hypothesis.visible_evidence))
+                    and (captured.previous_observation or {}).get("visibleEvidence") != hypothesis.visible_evidence
                     and policy["components"]["timeline"]["episodic_enabled"]
                 ):
-                    current_episodic_memory(policy).remember(
-                        str(evidence.evidence.get("summary", "")),
+                    card = current_episodic_memory(policy).remember(
+                        "；".join(hypothesis.visible_evidence),
                         kind="observation",
                         source=evidence.source,
                         skill=None,
                         task=evidence.task_id,
                         session_id=session_id,
                         user_scope=user_id,
+                        evidence_event_id=observation_entry["id"],
+                        happened_at=captured.frame_captured_at.isoformat(),
+                        recorded_at=evidence.received_at.isoformat(),
+                        timezone_name=clock_for_session(user_id, session_id).timezone_name,
+                        utc_offset_minutes=clock_for_session(user_id, session_id).utc_offset_minutes,
+                        evidence_context={"frame": captured.media, "observationId": evidence.observation_id,
+                                          "uncertainties": hypothesis.uncertainties, "claim": "visual-observation"},
                     )
+                    if card:
+                        session_trace("timeline.memory.written", "ambient-observer", {
+                            "cardId": card["id"], "observationId": evidence.observation_id,
+                            "frameId": captured.frame_id, "happenedAt": captured.frame_captured_at.isoformat(),
+                        })
+                speech = None
+                pending = timeline.pending_draft(user_id=user_id, case_id=session_id)
+                if hypothesis.clarification and hypothesis.salient_change and ambient_options(owner)["questionsEnabled"] and not pending:
+                    timeline.begin_draft(user_id=user_id, case_id=session_id, predicate="memory.value",
+                                         missing_fields=[hypothesis.clarification], language="zh",
+                                         source_ids=[observation_entry["id"]])
+                    journal.append("ambient.clarification", {"question": hypothesis.clarification,
+                                   "observationId": evidence.observation_id, "capturedAt": captured.frame_captured_at.isoformat()})
+                    speech = {"utterance": prompt_text("perception/ambient_question", question=hypothesis.clarification),
+                              "reason": "clarification"}
                 snapshot = watch.snapshot()
             state_payload = scoped_state_for_user(user_id, session_id)
             if not ws.closed:
@@ -4763,10 +4836,9 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
             return {
                 "accepted": True,
                 "reason": validation.reason,
-                # Ambient observation never speaks on its own. Reminding is the
-                # habit bridge's decision, delivered through the reminder
-                # workflow so it stays auditable and cancellable.
-                "speech": None,
+                # Questions use the existing output arbiter; observations do not
+                # directly advance a task or assert an inferred action occurred.
+                "speech": speech,
                 "origin": {
                     "watchlistId": captured.watchlist_id,
                     "watchlistVersion": captured.watchlist_version,
@@ -6240,10 +6312,10 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
             watching for a once-a-day event, not guiding a step in progress, so a
             task cadence would burn battery and send frames for no benefit.
             """
-            if session_runtime.skill is not None:
+            if session_runtime.task is not None and session_runtime.skill is not None:
                 return float(session_runtime.skill.manifest.get("proactive_check_seconds", 4))
-            if session_runtime.task is None and owner.ambient is not None:
-                return float(ambient_settings["interval_seconds"])
+            if session_runtime.task is None:
+                return float(ambient_options(owner)["intervalSeconds"])
             return 4.0
 
         async def handle_media_payload(payload: dict, *, source: str) -> bool:
@@ -6259,7 +6331,8 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
                 return True
             if kind == "video":
                 image_value = str(payload.get("image", ""))
-                owner.scene.append_frame(image_value, payload.get("capture"))
+                owner.scene.append_frame(image_value, payload.get("capture"),
+                                         describe=not (session_runtime.task is None and ambient_watch_session(owner)))
                 media_audit.record_video(len(image_value))
                 bridge.append_video(image_value)
                 # The isolated task observer has its own audio ordering token;
@@ -6765,6 +6838,7 @@ def create_app(skills_path: str, active_skill: str | None, memory_path: str, mod
         web.post("/api/privacy/retention", post_privacy_retention),
         web.post("/api/privacy/delete", post_privacy_delete),
         web.post("/api/ambient/consent", post_ambient_consent),
+        web.post("/api/ambient/settings", post_ambient_settings),
         web.post("/api/sessions", post_session),
         web.post("/api/sessions/memory-policy", post_memory_policy),
         web.get("/api/state", get_state),

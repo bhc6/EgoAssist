@@ -213,7 +213,7 @@ async function enterConsole(user) {
 function renderPrivacy(payload) {
   if (!payload) return;
   if (payload.ambient) {
-    ambientState = {...(ambientState || {}), ...payload.ambient};
+    ambientState = {...(ambientState || {}), ...payload.ambient, ...(state?.ambient || {})};
     renderAmbient();
   }
   $("#privacyStatus").textContent = payload.transport?.transportStatus || "已加载";
@@ -539,6 +539,7 @@ function render(next) {
   if (!currentUser || !next || next.sessionId !== selectedSessionId) return;
   if (responseScopes.has(next) && !responseScopes.get(next)()) return;
   state = next;
+  if (state.ambient) ambientState = state.ambient;
   toolActivityView.snapshot(selectedSessionId, state.toolActivity);
   renderSharedScene(state.sharedScene);
   renderPerformance(state.performance);
@@ -622,26 +623,41 @@ function renderAmbient() {
     return;
   }
   const watchlist = info.watchlist || {};
-  const activities = (watchlist.activities || []).map(item => item.label || item.id).join("、");
-  const places = (watchlist.locations || []).map(item => item.label || item.id).join("、");
   const latest = info.observation;
+  const rejected = info.audit?.[0]?.status === "rejected" ? info.audit[0] : null;
   root.className = "ambient-banner live";
-  root.innerHTML = "<b>被动观测已授权</b>" +
-    "<span>观察：" + esc(activities || "-") + " · 地点识别候选：" + esc(places || "-") +
-    " · 每 " + esc(String(info.intervalSeconds || "?")) + " 秒一帧</span>" +
-    "<span>" + (latest
-      ? esc((latest.observed ? "已看到 " + (latest.activityId || "") : "本帧未看到该行为") +
-          " · " + (latest.locationId || "unknown"))
-      : "尚无观测结果") + "</span>" +
-    "<span class='ambient-note'>不判断是否吞下、不判断药物种类；不确定时会先提一个澄清问题，确认后才保存；原始画面不留存。</span>" +
-    "<button id='ambientRevoke'>撤回授权</button>";
+  const status = !info.connected ? "等待连接" : info.taskActive ? "任务观察中" : info.processing ? "正在分析 · " + (info.elapsedMs || 0) + " ms" :
+    !info.cameraAt || Date.now() - Date.parse(info.cameraAt) > 10000 ? "等待摄像头画面" : "等待下一次采样";
+  const html = "<b>" + (watchlist.mode === "open" ? "开放环境观察" : esc(watchlist.title || "专项观察")) + " · " + esc(status) + "</b>" +
+    "<span>" + esc(latest?.summary || "尚无观测结果") + "</span>" +
+    (rejected ? "<span>最近采样未完成：" + esc(rejected.reason) + "</span>" : "") +
+    (latest?.capturedAt ? "<small>画面时间：" + esc(new Date(latest.capturedAt).toLocaleString()) + "</small>" : "") +
+    (latest?.uncertainties?.length ? "<span>待确认：" + esc(latest.uncertainties.join("；")) + "</span>" : "") +
+    (latest?.clarification ? "<span>澄清问题：" + esc(latest.clarification) + "</span>" : "") +
+    "<details data-disclosure='ambient-evidence'><summary>观测证据</summary>" +
+    (latest?.media?.assetId ? "<a target='_blank' rel='noopener' href='/api/scene/media?session=" + encodeURIComponent(selectedSessionId) +
+      "&amp;asset=" + encodeURIComponent(latest.media.assetId) + "'>查看原始采样帧</a>" : "") +
+    "<pre>" + esc(JSON.stringify(latest || {}, null, 2)) + "</pre></details>" +
+    "<label>采样间隔 <input id='ambientInterval' type='number' min='2' max='120' step='1' value='" + esc(info.intervalSeconds) + "'> 秒</label>" +
+    "<label><input id='ambientQuestions' type='checkbox' " + (info.questionsEnabled ? "checked" : "") + ">主动澄清</label>" +
+    "<button id='ambientSave' type='button'>应用</button><button id='ambientRevoke' type='button'>停止观察</button>";
+  if (!root.querySelector("#ambientInterval") || !root.contains(document.activeElement)) updateDisclosureHTML(root, html, selectedSessionId);
   $("#ambientRevoke").onclick = () => setAmbientConsent(false);
+  $("#ambientSave").onclick = async () => {
+    try {
+      const payload = await post("/api/ambient/settings", {sessionId: selectedSessionId,
+        intervalSeconds: Number($("#ambientInterval").value), questionsEnabled: $("#ambientQuestions").checked});
+      document.activeElement?.blur();
+      render(payload.state);
+      $("#ambientInterval").value = String(payload.state.ambient.intervalSeconds);
+    } catch (error) { $("#duplexState").textContent = error.message; }
+  };
 }
 
 async function setAmbientConsent(granted) {
   try {
     const payload = await post("/api/ambient/consent", {granted});
-    ambientState = {...(ambientState || {}), ...payload.ambient};
+    ambientState = {...(ambientState || {}), ...payload.ambient, intervalSeconds: state?.ambient?.intervalSeconds ?? payload.ambient.intervalSeconds};
     renderAmbient();
   } catch (error) {
     alert(error.message);

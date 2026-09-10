@@ -1,13 +1,4 @@
-"""Ambient (task-free) observation watchlists and per-case watch sessions.
-
-Task-mode perception binds every frame to an active checkpoint (ADR 005).
-Ambient mode observes a small, pre-authorized set of activities when no task is
-running, so that a behaviour can be recorded as *not* having happened -- the
-evidence an observation-gated reminder needs. See docs/ADR_007.
-
-This module is deliberately domain-free: activity and location labels come from
-a reviewed JSON watchlist outside the package, never from code here.
-"""
+"""Open ambient observations and optional focused watchlists, bound to frames."""
 
 from __future__ import annotations
 
@@ -77,6 +68,7 @@ class AmbientWatchList:
     risk: str
     activities: tuple[AmbientWatchItem, ...]
     locations: tuple[AmbientWatchLocation, ...]
+    mode: str = "focused"
 
     @classmethod
     def load(cls, path: str | Path) -> "AmbientWatchList":
@@ -100,7 +92,7 @@ class AmbientWatchList:
         required = {"id", "title", "version", "activities", "locations"}
         if not isinstance(payload, dict) or not required.issubset(payload):
             raise ValueError("invalid ambient watchlist specification")
-        unknown = set(payload) - {*required, "provenance", "risk"}
+        unknown = set(payload) - {*required, "provenance", "risk", "mode"}
         if unknown:
             raise ValueError(f"unknown ambient watchlist field(s): {', '.join(sorted(unknown))}")
 
@@ -111,8 +103,12 @@ class AmbientWatchList:
         if risk not in {"low", "medium", "high"}:
             raise ValueError(f"invalid risk level: {risk}")
 
+        mode = payload.get("mode", "focused")
+        if mode not in {"open", "focused"}:
+            raise ValueError("ambient mode must be open or focused")
+        minimum = 0 if mode == "open" else 1
         raw_activities = payload["activities"]
-        if not isinstance(raw_activities, list) or not 1 <= len(raw_activities) <= _MAX_ACTIVITIES:
+        if not isinstance(raw_activities, list) or not minimum <= len(raw_activities) <= _MAX_ACTIVITIES:
             raise ValueError(f"watchlist requires 1-{_MAX_ACTIVITIES} activities")
         activities: list[AmbientWatchItem] = []
         seen_activities: set[str] = set()
@@ -146,7 +142,7 @@ class AmbientWatchList:
             seen_activities.add(item_id)
 
         raw_locations = payload["locations"]
-        if not isinstance(raw_locations, list) or not 1 <= len(raw_locations) <= _MAX_LOCATIONS:
+        if not isinstance(raw_locations, list) or not minimum <= len(raw_locations) <= _MAX_LOCATIONS:
             raise ValueError(f"watchlist requires 1-{_MAX_LOCATIONS} locations")
         locations: list[AmbientWatchLocation] = []
         seen_locations: set[str] = set()
@@ -184,6 +180,7 @@ class AmbientWatchList:
             risk=risk,
             activities=tuple(activities),
             locations=tuple(locations),
+            mode=mode,
         )
 
     @property
@@ -224,6 +221,7 @@ class AmbientWatchList:
             "provenance": self.provenance,
             "checksum": self.checksum,
             "risk": self.risk,
+            "mode": self.mode,
             "activities": [{"id": item.id, "label": item.label} for item in self.activities],
             "locations": self.location_payload(),
         }
@@ -307,6 +305,8 @@ class AmbientWatchSession:
             watch_epoch=self.watch_epoch,
             watch_activities=self.watchlist.activity_payload(),
             watch_locations=self.watchlist.location_payload(),
+            observation_mode=self.watchlist.mode,
+            previous_observation=self.observation,
             risk=self.watchlist.risk,
             consent_id=self.consent_id,
             frame_captured_at=captured_at,
@@ -341,6 +341,12 @@ class AmbientWatchSession:
             "frameId": evidence.get("frameId"),
             "contextId": evidence.get("contextId"),
             "summary": evidence.get("summary"),
+            "capturedAt": evidence.get("capturedAt"),
+            "visibleEvidence": evidence.get("visibleEvidence", []),
+            "uncertainties": evidence.get("uncertainties", []),
+            "clarification": evidence.get("clarification"),
+            "salientChange": evidence.get("salientChange", True),
+            "media": evidence.get("media"),
         }
         self.observation = value
         self.n_accepted += 1

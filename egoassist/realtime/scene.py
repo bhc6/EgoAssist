@@ -90,7 +90,7 @@ class SharedScene:
             raise ValueError("media evidence checksum mismatch")
         return data
 
-    def append_frame(self, image, metadata=None):
+    def append_frame(self, image, metadata=None, *, describe=True):
         data = base64.b64decode(image, validate=True)
         if len(data) > 2_000_000:
             raise ValueError("scene frame too large")
@@ -103,7 +103,7 @@ class SharedScene:
         self.frames.append({"frameId": digest[:24], "receivedAt": now, "monotonic": time.monotonic(),
                             "device": metadata or {}, "data": data})
         interval = float(os.getenv("EGOASSIST_SCENE_INTERVAL", "4"))
-        if self.api_key and (not self.vision_task or self.vision_task.done()) and (
+        if describe and self.api_key and (not self.vision_task or self.vision_task.done()) and (
                 not self.last_vision or time.monotonic() - self.last_vision[0] >= interval):
             ref = self._frame_ref(self.frames[-1])
             self.vision_task = asyncio.create_task(self.describe(ref), name="shared-scene-vision")

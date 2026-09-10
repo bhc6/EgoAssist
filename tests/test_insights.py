@@ -55,6 +55,18 @@ def test_report_rejects_fabricated_citations_and_confidence():
         validate_insights('{"summary":[],"suggestions":[],"confidence":0.99}', [])
 
 
+def test_ambient_report_uses_sample_time_and_keeps_uncertainty(tmp_path):
+    journal = SessionJournal(tmp_path / "ambient.jsonl", session_id="ambient")
+    journal.append("ambient_observation", {"status": "accepted", "evidence": {
+        "capturedAt": "2026-09-09T15:59:59+00:00", "visibleEvidence": ["a hand holds a cup"],
+        "uncertainties": ["contents unknown"], "media": {"sha256": "frame-hash"}}})
+    clock = ClockContext.current("Asia/Shanghai")
+    records = collect_sources([journal.path], calendar_period("daily", "2026-09-09", clock))["records"]
+    assert len(records) == 1 and records[0]["sourceKind"] == "visual-observation"
+    assert "contents unknown" in records[0]["text"] and "frame-hash" in records[0]["text"]
+    assert not collect_sources([journal.path], calendar_period("daily", "2026-09-10", clock))["records"]
+
+
 def test_report_sources_keep_utc_and_local_midnight_anchor(tmp_path):
     path = tmp_path / "midnight.jsonl"
     row = {"type": "message", "id": "source", "status": "completed",

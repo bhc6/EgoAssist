@@ -180,8 +180,11 @@ class AmbientFrameContext(ProductContract):
     watchlist_provenance: str = Field(min_length=1)
     watchlist_checksum: str = Field(min_length=1)
     watch_epoch: int = Field(ge=0)
-    watch_activities: list[dict[str, Any]] = Field(min_length=1, max_length=16)
-    watch_locations: list[dict[str, Any]] = Field(min_length=1, max_length=32)
+    watch_activities: list[dict[str, Any]] = Field(max_length=16)
+    watch_locations: list[dict[str, Any]] = Field(max_length=32)
+    observation_mode: Literal["open", "focused"] = "focused"
+    previous_observation: dict[str, Any] | None = None
+    media: dict[str, Any] | None = None
     risk: Literal["low", "medium", "high"] = "low"
     # Required and non-empty: an ambient context cannot be constructed without
     # a recorded consent grant. Opt-in is enforced by the type, not by a
@@ -199,13 +202,16 @@ class AmbientObservationHypothesis(ProductContract):
     nothing to complete.
     """
 
-    activity_id: str = Field(min_length=1)
+    activity_id: str = Field(min_length=1, max_length=160)
     observed: bool = False
-    location_id: str = Field(min_length=1, default="unknown")
-    confidence: float = Field(ge=0, le=1)
+    location_id: str = Field(min_length=1, max_length=160, default="unknown")
+    confidence: float = Field(ge=0, le=1, default=0)
     summary: str = Field(max_length=500)
     visible_evidence: list[str] = Field(default_factory=list, max_length=8)
     hazards: list[PerceptionHazard] = Field(default_factory=list, max_length=3)
+    uncertainties: list[str] = Field(default_factory=list, max_length=8)
+    clarification: str | None = Field(default=None, max_length=240)
+    salient_change: bool = True
 
 
 class ObservationEvidence(ProductContract):

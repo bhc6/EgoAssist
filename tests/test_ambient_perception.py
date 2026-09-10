@@ -39,6 +39,15 @@ def test_string_false_is_not_a_positive_observation():
     assert result.observed is False
 
 
+def test_open_json_fences_and_wrong_gate_schema():
+    from egoassist.realtime.perception import parse_ambient_hypothesis
+    raw = '```json\n{"summary":"Reading a book", "visible_evidence":["open book"], "uncertainties":[], "salient_change":true}\n```'
+    result = parse_ambient_hypothesis(raw, open_observation=True)
+    assert result.observed and result.summary == "Reading a book"
+    with pytest.raises(ValueError, match="missing"):
+        parse_ambient_hypothesis('{"scene_summary":"book", "speak":false}', open_observation=True)
+
+
 CAPTURED = datetime(2026, 7, 30, 8, 0, tzinfo=timezone.utc)
 WATCHLIST = Path(__file__).resolve().parents[1] / "watchlists" / "medication.json"
 
@@ -252,6 +261,27 @@ def test_watchlist_checksum_pins_the_file_contents():
         minimal_spec(activities=[{"id": "other", "label": "x", "visible_evidence": "y"}]),
     )
     assert altered.checksum != first.checksum
+
+
+def test_open_observation_accepts_unlisted_actions_and_retains_time_and_uncertainty():
+    from egoassist import PACKAGE_ROOT
+    from egoassist.realtime.perception import parse_ambient_hypothesis
+    watch = AmbientWatchSession(AmbientWatchList.load(PACKAGE_ROOT / "watchlists/open.json"), consent_id="grant")
+    captured = context(watch)
+    output = parse_ambient_hypothesis({"activity_id": "repairing a bicycle and reading a label", "observed": True,
+        "location_id": "workshop", "summary": "A person holds a wrench next to a bicycle.",
+        "visible_evidence": ["wrench beside rear wheel"], "uncertainties": ["repair completion unknown"],
+        "clarification": None, "salient_change": True})
+    accepted = validate(captured, captured, output)
+    assert accepted.accepted
+    evidence = accepted.observation.evidence
+    assert evidence["capturedAt"] == CAPTURED.isoformat()
+    assert evidence["uncertainties"] == output.uncertainties
+    assert output.confidence == 0
+    assert "no activity or location whitelist" in ambient_prompt(captured)
+    wrong_mode = captured.model_copy(update={"observation_mode": "focused"})
+    assert not validate(captured, wrong_mode, output).accepted
+    assert not validate(captured, captured, output.model_copy(update={"visible_evidence": []})).accepted
 
 
 def test_a_watchlist_may_not_shadow_the_reserved_ids():

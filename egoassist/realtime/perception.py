@@ -220,7 +220,8 @@ def ambient_prompt(context: AmbientFrameContext | Mapping[str, Any]) -> str:
         for item in value.watch_locations
     ]
     return (
-        prompt_text('perception/ambient_prompt.1', v0=NONE_OBSERVED, v1=UNKNOWN_LOCATION)
+        (prompt_text('perception/ambient_open') if value.observation_mode == "open"
+         else prompt_text('perception/ambient_prompt.1', v0=NONE_OBSERVED, v1=UNKNOWN_LOCATION))
         + json.dumps(
             {
                 "schema": value.schema_version,
@@ -228,11 +229,12 @@ def ambient_prompt(context: AmbientFrameContext | Mapping[str, Any]) -> str:
                 "watchlistVersion": value.watchlist_version,
                 "watchlistProvenance": value.watchlist_provenance,
                 "watchEpoch": value.watch_epoch,
-                "activityCandidates": activities,
+                **({"activityCandidates": activities, "locationCandidates": locations} if value.observation_mode == "focused" else {}),
                 "noneObservedId": NONE_OBSERVED,
-                "locationCandidates": locations,
                 "unknownLocationId": UNKNOWN_LOCATION,
                 "risk": value.risk,
+                "capturedAt": value.frame_captured_at.isoformat(),
+                "previousObservation": value.previous_observation,
             },
             ensure_ascii=False,
             separators=(",", ":"),
@@ -252,10 +254,27 @@ def frame_prompt(
     return ambient_prompt(context) if version == AMBIENT_SCHEMA_VERSION else perception_prompt(context)
 
 
-def parse_ambient_hypothesis(raw: str | Mapping[str, Any]) -> AmbientObservationHypothesis:
-    value = json.loads(raw.strip()) if isinstance(raw, str) else dict(raw)
+def parse_ambient_hypothesis(raw: str | Mapping[str, Any], *, open_observation=False) -> AmbientObservationHypothesis:
+    if isinstance(raw, str):
+        text = raw.strip()
+        if text.startswith("```") and text.endswith("```"):
+            lines = text.splitlines()
+            if lines[0].strip().lower() not in {"```", "```json"}:
+                raise ValueError("unsupported ambient output fence")
+            text = "\n".join(lines[1:-1])
+        value = json.loads(text)
+    else:
+        value = dict(raw)
     if not isinstance(value, dict):
         raise ValueError("ambient output must be a JSON object")
+    if open_observation:
+        if not {"summary", "visible_evidence", "uncertainties", "salient_change"} <= value.keys():
+            raise ValueError("open observation is missing evidence fields")
+        value = {**value, "observed": bool(value["visible_evidence"]),
+                 "activity_id": str(value["summary"])[:160] if value["visible_evidence"] else NONE_OBSERVED}
+    elif not ({"activity_id", "observed", "summary"} <= value.keys() or
+            {"activityId", "observed", "summary"} <= value.keys()):
+        raise ValueError("ambient output is missing required observation fields")
     hazards = []
     for item in value.get("hazards", []):
         if not isinstance(item, Mapping):
@@ -278,6 +297,9 @@ def parse_ambient_hypothesis(raw: str | Mapping[str, Any]) -> AmbientObservation
         summary=" ".join(str(value.get("summary") or value.get("scene_summary") or "").split())[:500],
         visible_evidence=[" ".join(str(item).split())[:300] for item in visible[:8] if str(item).strip()],
         hazards=hazards,
+        uncertainties=value.get("uncertainties", []),
+        clarification=value.get("clarification") or None,
+        salient_change=value.get("salient_change", True),
     )
 
 
@@ -329,6 +351,7 @@ def validate_ambient_result(
         "watchlist_version",
         "watchlist_checksum",
         "watch_epoch",
+        "observation_mode",
         # Consent is part of the binding, so revoking it invalidates every
         # frame already in flight rather than only future ones.
         "consent_id",
@@ -342,17 +365,19 @@ def validate_ambient_result(
     allowed_activities = {
         str(item.get("id")) for item in captured.watch_activities
     } | {NONE_OBSERVED}
-    if output.activity_id not in allowed_activities:
+    if captured.observation_mode == "focused" and output.activity_id not in allowed_activities:
         return PerceptionValidation(False, "activity-outside-watchlist")
     allowed_locations = {
         str(item.get("id")) for item in captured.watch_locations
     } | {UNKNOWN_LOCATION}
-    if output.location_id not in allowed_locations:
+    if captured.observation_mode == "focused" and output.location_id not in allowed_locations:
         return PerceptionValidation(False, "location-outside-watchlist")
     if output.observed and output.activity_id == NONE_OBSERVED:
         return PerceptionValidation(False, "contradictory-absence-claim")
     if not output.observed and output.activity_id != NONE_OBSERVED:
         return PerceptionValidation(False, "contradictory-absence-claim")
+    if output.observed and not output.visible_evidence:
+        return PerceptionValidation(False, "positive-observation-without-evidence")
     observation = ObservationEvidence(
         observation_id=f"observation-{uuid4().hex}",
         user_id=captured.user_id,
@@ -383,6 +408,12 @@ def validate_ambient_result(
             "locationId": output.location_id,
             "summary": output.summary,
             "visibleEvidence": output.visible_evidence,
+            "capturedAt": captured.frame_captured_at.isoformat(),
+            "media": captured.media,
+            "observationMode": captured.observation_mode,
+            "uncertainties": output.uncertainties,
+            "clarification": output.clarification,
+            "salientChange": output.salient_change,
         },
     )
     return PerceptionValidation(True, "accepted-ambient-evidence", observation)

@@ -1,0 +1,10 @@
+{
+  "id": "open-observation",
+  "title": "开放环境观察",
+  "version": "1",
+  "mode": "open",
+  "provenance": "EgoAssist open observation policy",
+  "risk": "low",
+  "activities": [],
+  "locations": []
+}

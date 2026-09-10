@@ -65,7 +65,7 @@ def test_consent_is_required_and_revocable(tmp_path, monkeypatch):
             assert "ambient-observation-model" not in {
                 item["provider"] for item in before["providers"]
             }
-            assert before["ambient"]["watchlist"]["id"] == "medication-adherence"
+            assert before["ambient"]["watchlist"]["id"] == "open-observation"
 
             granted = await (await client.post("/api/ambient/consent", json={
                 "granted": True,
@@ -94,21 +94,16 @@ def test_consent_is_required_and_revocable(tmp_path, monkeypatch):
     asyncio.new_event_loop().run_until_complete(scenario())
 
 
-def test_watchlist_authorizes_no_bedroom(tmp_path, monkeypatch):
-    """Aria community guidelines forbid bedroom recording, so the shipped
-    watchlist must not offer one as a place to watch."""
+def test_default_observation_has_no_activity_or_location_whitelist(tmp_path, monkeypatch):
     async def scenario():
         app = ambient_app(tmp_path, monkeypatch)
         async with TestClient(TestServer(app)) as client:
             await register_client(client, "watchlist-user")
             privacy = await (await client.get("/api/privacy")).json()
             watchlist = privacy["ambient"]["watchlist"]
-            ids = {item["id"] for item in watchlist["locations"]}
-            assert "bedroom" not in ids
-            assert ids == {"kitchen", "dining-table", "living-room"}
-            serialized = json.dumps(watchlist, ensure_ascii=False)
-            assert "卧室" not in serialized
-            assert "bathroom" not in serialized
+            assert watchlist["mode"] == "open"
+            assert watchlist["locations"] == []
+            assert watchlist["activities"] == []
 
     import asyncio
     asyncio.new_event_loop().run_until_complete(scenario())

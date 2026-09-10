@@ -126,6 +126,9 @@ def test_realtime_lane_keeps_immutable_context_with_inflight_frame():
         def append_audio(self, _value):
             return None
 
+        def update_session(self, **kwargs):
+            responses.append({"sessionInstructions": kwargs["instructions"]})
+
         def append_video(self, _value):
             return None
 
@@ -146,7 +149,8 @@ def test_realtime_lane_keeps_immutable_context_with_inflight_frame():
     lane.connected = True
     lane.conversation = Conversation()
     assert lane.request("base64-frame", bound)
-    assert '"currentCheckpoint":"prepare"' in responses[0]["instructions"]
+    assert responses[0]["sessionInstructions"] == responses[1]["instructions"]
+    assert '"currentCheckpoint":"prepare"' in responses[1]["instructions"]
 
     lane._finish(
         '{"checkpoint_id":"prepare","completed":false,"confidence":0.8,'

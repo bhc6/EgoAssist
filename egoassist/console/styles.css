@@ -1008,3 +1008,7 @@ header select {
 .tool-call header { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; justify-content: space-between; }
 .tool-call p { margin: 6px 0; }
 .tool-call pre { white-space: pre-wrap; overflow-wrap: anywhere; }
+.ambient-banner { flex-wrap: wrap; overflow-wrap: anywhere; }
+.ambient-banner > span, .ambient-banner > details { flex-basis: 100%; min-width: 0; }
+.ambient-banner input[type=number] { width: 72px; }
+.ambient-banner pre { white-space: pre-wrap; max-height: 240px; overflow: auto; }

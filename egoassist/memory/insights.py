@@ -50,24 +50,36 @@ def collect_sources(paths: list[Path], period: dict, *, limit: int = 300, char_b
                 entry = json.loads(line)
                 if not isinstance(entry, dict):
                     raise ValueError("journal entry must be an object")
-                if entry.get("type") != "message" or entry.get("status") != "completed":
-                    continue
-                message = entry.get("message") or {}
-                if message.get("role") != "user":
-                    continue
-                stamp = datetime.fromisoformat(entry["timestamp"])
+                observation = entry.get("type") == "ambient_observation" and entry.get("status") == "accepted"
+                evidence = entry.get("evidence", {}) if observation else {}
+                if observation:
+                    if not evidence.get("visibleEvidence"):
+                        continue
+                    content = json.dumps({"kind": "sampled-visual-observation", "visibleEvidence": evidence["visibleEvidence"],
+                                          "uncertainties": evidence.get("uncertainties", []), "frame": evidence.get("media")}, ensure_ascii=False)
+                    observed_at = evidence.get("capturedAt") or entry.get("frame_captured_at")
+                else:
+                    if entry.get("type") != "message" or entry.get("status") != "completed":
+                        continue
+                    message = entry.get("message") or {}
+                    if message.get("role") != "user":
+                        continue
+                    content = message["content"]
+                    observed_at = entry["timestamp"]
+                stamp = datetime.fromisoformat(observed_at)
                 if stamp.tzinfo is None:
                     raise ValueError("missing record timezone")
                 if lower <= stamp < upper:
                     local_clock = ClockContext.current(
                         period.get("timezone", "UTC"),
-                        int(lower.utcoffset().total_seconds() // 60), now_utc=stamp,
+                        int(lower.utcoffset().total_seconds() // 60), now_utc=datetime.fromisoformat(entry["timestamp"]),
                     )
                     records.append({"sourceId": path.stem + ":" + entry["id"], "sessionId": path.stem,
                                     "eventId": entry["id"], "recordedAt": entry["timestamp"],
                                     "recordedLocalAt": local_clock.local_now.isoformat(),
                                     "recordTimezone": local_clock.timezone_name,
-                                    "text": message["content"]})
+                                    "observedAt": observed_at, "sourceKind": "visual-observation" if observation else "user-message",
+                                    "text": content})
             except (ValueError, TypeError, KeyError) as exc:
                 errors.append({"sessionId": path.stem, "line": number, "error": type(exc).__name__})
     records.sort(key=lambda item: (datetime.fromisoformat(item["recordedAt"]), item["sourceId"]))
@@ -124,6 +136,7 @@ class InsightGenerator:
             progress("preparing", includedRecords=sources["includedRecords"],
                      totalRecords=sources["totalRecords"], model=self.model, providerTimeoutSeconds=self.timeout)
         policy = prompt_text("insights/generate")
+        policy += "\n" + prompt_text("insights/observations")
         data = {"period": period, "coverage": {k: v for k, v in sources.items() if k != "records"},
                 "sources": sources["records"]}
         fingerprint = hashlib.sha256(json.dumps([self.model, policy, data], ensure_ascii=False, sort_keys=True).encode()).hexdigest()

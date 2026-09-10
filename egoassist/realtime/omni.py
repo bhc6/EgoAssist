@@ -334,12 +334,14 @@ class _OmniPerceptionLane:
         self._buffer = ""
         self._request_started = time.monotonic()
         try:
+            instructions = frame_prompt(context) if context else self._GATE_INSTRUCTIONS
+            self.conversation.update_session(output_modalities=[self.modalities.TEXT], voice=self.voice,
+                instructions=instructions, enable_input_audio_transcription=False, enable_turn_detection=False)
             # Qwen Omni requires audio to precede an image. This lane uses a
             # deterministic silent ordering token, never user microphone data.
             self.conversation.append_audio(self._SILENT_PCM16)
             self.conversation.append_video(frame)
             self.conversation.commit()
-            instructions = frame_prompt(context) if context else self._GATE_INSTRUCTIONS
             self.conversation.create_response(
                 instructions=instructions,
                 output_modalities=[self.modalities.TEXT],
@@ -354,6 +356,10 @@ class _OmniPerceptionLane:
                 "checkpointId": context.get("checkpoint_id") if context else None,
                 "watchlistId": context.get("watchlist_id") if context else None,
             })
+            started = self._request_started
+            def install_deadline():
+                self.loop.call_later(8, self._expire_request, started)
+            self.loop.call_soon_threadsafe(install_deadline)
             return True
         except Exception as exc:
             self.active = False
@@ -363,6 +369,16 @@ class _OmniPerceptionLane:
             self._schedule_reconnect("dispatch-failed")
             return False
 
+    def _expire_request(self, started):
+        if self.closed or not self.active or started != self._request_started:
+            return
+        self.trace("perception.response.timeout", {"frameId": (self.active_context or {}).get("frame_id"), "timeoutSeconds": 8})
+        self._generation += 1
+        self.connected = False
+        self._finish("")
+        if self.pending_frame:
+            self._schedule_reconnect("perception-timeout")
+
     def _finish(self, raw_text: str) -> None:
         if not self.active:
             return
@@ -371,8 +387,9 @@ class _OmniPerceptionLane:
         context = self.active_context
         self.active_context = None
         if context:
+            self.trace("perception.raw_output", {"frameId": context.get("frame_id"), "rawOutput": raw_text})
             decision = (
-                OmniBrowserBridge.parse_ambient_output(raw_text)
+                OmniBrowserBridge.parse_ambient_output(raw_text, open_observation=context.get("observation_mode") == "open")
                 if context.get("schema_version") == AMBIENT_SCHEMA_VERSION
                 else OmniBrowserBridge.parse_perception_output(raw_text)
             )
@@ -1719,7 +1736,7 @@ class OmniBrowserBridge:
             }
 
     @staticmethod
-    def parse_ambient_output(raw_text: str) -> dict[str, Any]:
+    def parse_ambient_output(raw_text: str, *, open_observation=False) -> dict[str, Any]:
         """Parse an ambient observation; malformed output fails closed.
 
         The fallback is NOT a usable negative observation: callers must reject
@@ -1730,7 +1747,7 @@ class OmniBrowserBridge:
         try:
             return {
                 "valid": True,
-                **parse_ambient_hypothesis(raw_text).model_dump(mode="json"),
+                **parse_ambient_hypothesis(raw_text, open_observation=open_observation).model_dump(mode="json"),
             }
         except (TypeError, ValueError, json.JSONDecodeError) as exc:
             return {

@@ -332,6 +332,9 @@ def test_perception_lane_uses_silence_before_frame_and_never_microphone_audio():
         def append_audio(self, value):
             events.append(("audio", value))
 
+        def update_session(self, **kwargs):
+            pass
+
         def append_video(self, value):
             events.append(("video", value))
 
@@ -387,6 +390,9 @@ def test_perception_text_done_does_not_release_next_frame_before_terminal_event(
                 pass
 
             def create_response(self, **kwargs):
+                pass
+
+            def update_session(self, **kwargs):
                 pass
 
         lane = _OmniPerceptionLane(api_key="test", model="test", voice="Ethan", loop=asyncio.get_running_loop(),
