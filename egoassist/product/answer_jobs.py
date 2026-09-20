@@ -8,18 +8,21 @@ import json
 import os
 import time
 
-import aiohttp
-
 from egoassist.prompts import prompt_text
 from egoassist.realtime.work_ledger import CaseWorkLedger
+from egoassist.core.events import latest
 
 
 def answer_jobs(journal):
-    latest = {}
-    for entry in journal.entries():
-        if entry.get("type") == "answer.job":
-            latest[entry["turnId"]] = entry
-    return latest
+    return latest(journal, "answer.job", "turnId")
+
+
+def answer_job_summaries(journal):
+    """Router targets need identity and status, not copied media/instructions."""
+    def reduce(rows, entry):
+        if entry.get('type') == 'answer.job' and entry.get('turnId'):
+            rows[entry['turnId']] = {key: entry.get(key) for key in ('turnId', 'question', 'status')}
+    return journal.project('answer-routing-summaries', dict, reduce)
 
 
 class AnswerJobs:
@@ -32,16 +35,19 @@ class AnswerJobs:
         if not 1 <= self.timeout <= 300 or not 1 <= self.concurrency <= 8 or not 1 <= self.foreground_timeout <= 300:
             raise ValueError("invalid background answer limits")
         self.generate = generate or self._generate
+        from egoassist.product.answer_service import AnswerService
+        self.answer_service = AnswerService(api_key, model=self.model, timeout=self.timeout)
         self.journals = {}
         self.tasks = {}
         self.closing = False
-        from egoassist.realtime.settings import number
+        from egoassist.core.settings import number
         self.correction_grace = number("EGOASSIST_ANSWER_CORRECTION_GRACE", 2, maximum=30)
 
     @staticmethod
     def transition(journal, row, **changes):
         value = {k: v for k, v in row.items() if k not in {"id", "type", "timestamp", "parentId"}}
-        return journal.append("answer.job", {**value, **changes}, parent_id=row.get("id"))
+        return journal.append("answer.job", {**value, **changes}, parent_id=row.get("id"),
+                              required_event_ids=(row['id'],))
 
     def register(self, user_id, journal, *, turn_id, question, instructions, context=None, dialogue_job=None, deferred=False):
         self.journals[str(journal.path)] = (user_id, journal)
@@ -58,10 +64,11 @@ class AnswerJobs:
         if row and row["status"] == "foreground":
             self.transition(journal, row, status="queued", reason="speech-interrupted")
 
-    def foreground_finished(self, journal, turn_id, response_id):
+    def foreground_finished(self, journal, turn_id, response_id, *, audio_available=None):
         row = answer_jobs(journal).get(turn_id)
         if row and row["status"] == "foreground":
-            self.transition(journal, row, status="completed", channel="generated-audio", responseId=response_id)
+            self.transition(journal, row, status="completed",
+                            channel="generated-text" if audio_available is False else "generated-audio", responseId=response_id)
 
     def pause(self, journal, turn_id):
         row = answer_jobs(journal).get(turn_id)
@@ -155,10 +162,12 @@ class AnswerJobs:
     async def _execute(self, journal, row):
         started = time.perf_counter()
         prepared = row.get("preparedResult")
-        row = self.transition(journal, row, status="running", attempt=row["attempt"] + (0 if prepared else 1),
-                              startedAt=datetime.now(timezone.utc).isoformat(), timeoutSeconds=self.timeout)
         try:
+            self._check_snapshot(journal, row)
+            row = self.transition(journal, row, status="running", attempt=row["attempt"] + (0 if prepared else 1),
+                                  startedAt=datetime.now(timezone.utc).isoformat(), timeoutSeconds=self.timeout)
             result = prepared or await asyncio.wait_for(self.generate(journal, row), self.timeout)
+            self._check_snapshot(journal, row)
             duration_ms = row.get("generationMs", 0) if prepared else round((time.perf_counter() - started) * 1000, 3)
             current = answer_jobs(journal)[row["turnId"]]
             turn = CaseWorkLedger(journal).turns().get(row["turnId"], {})
@@ -172,14 +181,14 @@ class AnswerJobs:
                                     durationMs=duration_ms, generationMs=duration_ms)
                     self._finish_dialogue(journal, current)
         except asyncio.CancelledError:
-            current = answer_jobs(journal)[row["turnId"]]
-            if current["status"] == "running":
+            current = answer_jobs(journal).get(row["turnId"], {}) if journal.path.exists() else {}
+            if current.get("status") == "running":
                 self.transition(journal, current, status="queued" if self.closing else "cancelled",
                                 reason="server-shutdown" if self.closing else "cancelled")
             raise
         except Exception as exc:
-            current = answer_jobs(journal)[row["turnId"]]
-            if current["status"] == "running":
+            current = answer_jobs(journal).get(row["turnId"], {}) if journal.path.exists() else {}
+            if current.get("status") in {"running", "queued"}:
                 self.transition(journal, current, status="failed", error=type(exc).__name__ + ": " + str(exc)[:200],
                                 durationMs=round((time.perf_counter() - started) * 1000, 3))
 
@@ -198,50 +207,69 @@ class AnswerJobs:
                    for j in ledger.jobs().values()):
             ledger.set_intent_status(intent["intentId"], "completed", detail={"answerTurnId": row["turnId"]})
 
+    @staticmethod
+    def _check_snapshot(journal, row):
+        packet = (row.get('context') or {}).get('evidencePackage')
+        if packet:
+            from egoassist.memory.source_index import SourceIndex
+            SourceIndex(journal.path.parent.parent).snapshot(packet['snapshotId'], journal.session_id, packet['question'])
+
     async def _generate(self, journal, row):
         if not self.api_key:
             raise ValueError("QWEN_API_KEY is not configured")
-        import dashscope
         context = {"groundedContextAtQuestion": row["instructions"],
                    "evidenceAtQuestion": row.get("context", {}),
                    "answeringAt": datetime.now(timezone.utc).isoformat()}
+        scene = (row.get("context") or {}).get("sharedScene") or {}
+        if scene:
+            from egoassist.realtime.interaction_window import answer_scene_context
+            context['evidenceAtQuestion'] = {**context['evidenceAtQuestion'], 'sharedScene': answer_scene_context(scene)}
+        packet = (row.get('context') or {}).get('evidencePackage')
+        if packet:
+            from egoassist.product.answer_service import answer_context
+            from egoassist.memory.source_index import SourceIndex
+            SourceIndex(journal.path.parent.parent).snapshot(packet['snapshotId'], journal.session_id, packet['question'])
+            context['evidenceAtQuestion'] = {**context['evidenceAtQuestion'], 'evidencePackage': answer_context(packet)}
         messages = [{"role": "system", "content": prompt_text("answer_completion/generate")
                      + "\n" + json.dumps(context, ensure_ascii=False)},
                     {"role": "user", "content": row["question"]}]
-        scene = (row.get("context") or {}).get("sharedScene") or {}
         frame = (scene.get("visual") or {}).get("frame")
+        frames = (scene.get('interactionWindow') or {}).get('frames') or ([frame] if frame else [])
         model = self.model
         endpoint = "/services/aigc/text-generation/generation"
         audit_messages = messages
-        if frame:
-            import base64
+        if frames:
             from egoassist.realtime.scene import SharedScene
-            data = SharedScene(journal, self.api_key).media(frame)
-            model = os.getenv("EGOASSIST_SCENE_MODEL", "qwen3-vl-flash")
+            from egoassist.realtime.interaction_window import interaction_vision_model, visual_sequence_content
+            media = SharedScene(journal, self.api_key)
+            content, labels, sheets = visual_sequence_content(media, frames)
+            content.append({'text': json.dumps({'imageSourceIds': labels})})
+            content.append({'text': row['question']})
+            model = (interaction_vision_model(len(frames)) if len(frames) > 1
+                     else os.getenv("EGOASSIST_SCENE_MODEL", "qwen3-vl-flash"))
             endpoint = "/services/aigc/multimodal-generation/generation"
-            audit_messages = messages + [{"role": "user", "content": [{"mediaEvidence": frame}]}]
+            audit_messages = messages + [{"role": "user", "content": [{"mediaEvidence": ref} for ref in frames]}]
+            audit_messages.append({'role': 'user', 'content': {'imageSourceIds': labels, 'sheets': sheets}})
             messages = [{"role": "system", "content": [{"text": messages[0]["content"]}]},
-                        {"role": "user", "content": [{"image": "data:image/jpeg;base64," + base64.b64encode(data).decode()},
-                                                        {"text": row["question"]}]}]
-        request = journal.append("answer.request", {"turnId": row["turnId"], "model": model, "messages": audit_messages})
-        url = dashscope.base_http_api_url.rstrip("/") + endpoint
-        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=self.timeout), trust_env=True) as session:
-            async with session.post(url, headers={"Authorization": "Bearer " + self.api_key}, json={
-                "model": model, "input": {"messages": messages},
-                "parameters": {"result_format": "message", "temperature": 0, "enable_thinking": False, "max_tokens": 1600},
-            }) as response:
-                if response.status != 200:
-                    raise RuntimeError(f"answer provider HTTP {response.status}")
-                payload = await response.json()
+                        {"role": "user", "content": content}]
+        request = journal.append("answer.request", {"turnId": row["turnId"], "model": model,
+            "answerJobEventId": row['id'], "evidencePackage": packet, "messages": audit_messages},
+            required_event_ids=(row['id'],))
+        payload = await self.answer_service.complete(messages, model=model, endpoint=endpoint,
+            timeout=self.timeout, parameters={"result_format": "message", "temperature": 0,
+                "enable_thinking": False, "max_tokens": 1600})
         choice = payload["output"]["choices"][0]
+        if packet:
+            SourceIndex(journal.path.parent.parent).snapshot(packet['snapshotId'], journal.session_id, packet['question'])
         text = choice["message"]["content"]
         if isinstance(text, list):
             text = "".join(item.get("text", "") for item in text)
         if choice.get("finish_reason") not in {None, "stop"} or not isinstance(text, str) or not text.strip():
             raise ValueError("answer is empty or incomplete")
         result = {"turnId": row["turnId"], "text": text, "providerRequestId": payload.get("request_id"),
-                  "model": model, "usage": payload.get("usage", {}), "frameEvidence": frame}
-        entry = journal.append("answer.result", result, parent_id=request["id"])
+                  "model": model, "usage": payload.get("usage", {}), "frameEvidence": frame, "frameSequenceEvidence": frames}
+        entry = journal.append("answer.result", {**result, 'requestEventId': request['id']}, parent_id=request["id"],
+                               required_event_ids=(row['id'], request['id']))
         return {**result, "resultEventId": entry["id"]}
 
     async def delete_user(self, user_id):
@@ -260,3 +288,4 @@ class AnswerJobs:
             task.cancel()
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
+        await self.answer_service.close()

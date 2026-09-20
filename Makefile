@@ -22,4 +22,4 @@ build:
 	$(BIN)/python -m build
 
 clean:
-	rm -rf build dist .pytest_cache .egoassist **/__pycache__ *.egg-info
+	rm -rf build dist .pytest_cache **/__pycache__ *.egg-info

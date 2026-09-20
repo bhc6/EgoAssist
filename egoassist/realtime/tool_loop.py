@@ -73,7 +73,7 @@ class ToolCallRunner:
                 return
             bridge._schedule({"type": "tool_status", "callId": selection_id,
                               "tool": bridge.tool_model.model, "status": "selecting", "origin": origin})
-            from .settings import tool_settings
+            from egoassist.core.settings import tool_settings
             budget = tool_settings()
             history, receipts = [], {}
             calls_used = 0

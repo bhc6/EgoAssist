@@ -2,6 +2,7 @@ const $ = selector => document.querySelector(selector);
 const $$ = selector => [...document.querySelectorAll(selector)];
 const esc = value => String(value ?? "").replace(/[&<>"']/g, character => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"}[character]));
 let state, stream, socket, audioContext, microphoneSource, processor, videoTimer;
+let mediaCaptureClockId = null;
 let livekitRoom = null, livekitAudioElements = [];
 let interactionTransport = "websocket-fallback";
 let playbackTime = 0, assistantText = "";
@@ -47,6 +48,7 @@ let stateRefreshPendingAt = 0;
 let pdfjs = null, artifactDocument = null, artifactPageNumber = 1, artifactScale = 1;
 let artifactRenderGeneration = 0, artifactRenderTask = null, pendingHumanHelpPreview = null;
 let mirrorCamera = localStorage.getItem("egoassist.camera.mirror") !== "false";
+let microphoneEnabled = localStorage.getItem("egoassist.microphone.enabled") !== "false";
 const playbackSources = new Set();
 const AUDIO_BUFFER_HIGH_WATER = 512 * 1024;
 const VIDEO_BUFFER_HIGH_WATER = 128 * 1024;
@@ -87,6 +89,7 @@ function setAuthMode(mode) {
 }
 
 function showLogin() {
+  window.resetConversationHistory?.();
   sessionRevision += 1;
   disconnectRealtime();
   currentUser = null;
@@ -411,7 +414,7 @@ function renderWorkCenter() {
   serverTurns.forEach(turn => localSubmittedTurns.delete(turn.turnId));
   const turns = [...serverTurns, ...[...localSubmittedTurns.values()].filter(turn => !serverTurns.some(item => item.turnId === turn.turnId))]
     .sort((a, b) => (a.sequence || 0) - (b.sequence || 0));
-  const history = $("#turnHistory");
+  const history = $("#turnWorkHistory");
   const historySessionChanged = history.dataset.session !== selectedSessionId;
   const followLatest = historySessionChanged || history.scrollHeight - history.scrollTop - history.clientHeight < 48;
   const historyScroll = history.scrollTop;
@@ -820,10 +823,12 @@ async function ensureMedia() {
       throw Error("设备访问已取消");
     }
     stream = acquired;
+    mediaCaptureClockId = crypto.randomUUID();
+    stream.getAudioTracks().forEach(track => { track.enabled = microphoneEnabled; });
     $("#video").srcObject = stream;
     applyCameraOrientation();
     $("#cameraEmpty").hidden = true;
-    $("#cameraState").textContent = "摄像头与麦克风在线";
+    $("#cameraState").textContent = microphoneEnabled ? "摄像头与麦克风在线" : "摄像头在线 · 麦克风已关闭";
     $("#cameraButton").textContent = "关闭设备";
     if (socket?.readyState === WebSocket.OPEN) {
       await activateWebSocketMediaFallback();
@@ -972,7 +977,11 @@ async function startAudioCapture() {
       droppedAudioChunks = 0;
     }
     const audio = floatToPcm16Base64(event.inputBuffer.getChannelData(0), audioContext.sampleRate);
-    socket.send(JSON.stringify({type: "audio", audio}));
+    const endMonotonicMs = performance.now();
+    socket.send(JSON.stringify({type: "audio", audio, capture: {
+      clockId: mediaCaptureClockId, startMonotonicMs: endMonotonicMs - event.inputBuffer.duration * 1000,
+      endMonotonicMs, basis: "audio-callback-estimate", capturedAt: new Date().toISOString()
+    }}));
   };
   microphoneSource.connect(processor);
   processor.connect(audioContext.destination);
@@ -993,6 +1002,7 @@ function sendVideoFrame() {
     droppedVideoFrames = 0;
   }
   const video = $("#video"), canvas = $("#canvas"), scale = Math.min(1, 768 / video.videoWidth);
+  const capturedAt = new Date().toISOString(), monotonicMs = performance.now();
   canvas.width = Math.floor(video.videoWidth * scale);
   canvas.height = Math.floor(video.videoHeight * scale);
   const context = canvas.getContext("2d");
@@ -1004,8 +1014,9 @@ function sendVideoFrame() {
   context.drawImage(video, 0, 0, canvas.width, canvas.height);
   context.restore();
   const image = canvas.toDataURL("image/jpeg", 0.72).split(",", 2)[1];
-  socket.send(JSON.stringify({type: "video", image, capture: {capturedAt: new Date().toISOString(),
-    monotonicMs: performance.now(), mirrored: mirrorCamera, width: canvas.width, height: canvas.height}}));
+  socket.send(JSON.stringify({type: "video", image, capture: {capturedAt, monotonicMs,
+    clockId: mediaCaptureClockId, basis: "camera-sampling-estimate",
+    mirrored: mirrorCamera, width: canvas.width, height: canvas.height}}));
 }
 
 function applyCameraOrientation() {
@@ -1102,17 +1113,19 @@ async function connectRealtimeSession(generation, media, retryAttempt) {
   let ready = false;
   let restartAfterClose = false;
   let providerUnavailable = false;
+  let connectionStage = "本地服务";
   let resolveReady, rejectReady;
   const readyPromise = new Promise((resolve, reject) => { resolveReady = resolve; rejectReady = reject; });
   const connectTimer = setTimeout(() => {
     if (!ready && generation === connectionGeneration) {
-      rejectReady(Error("实时连接超时"));
+      rejectReady(Error("实时连接超时：" + connectionStage + "未能在 60 秒内就绪，请重试"));
       ws.close(4000, "ready-timeout");
     }
-  }, 15000);
+  }, 60000);
   readyPromise.then(() => clearTimeout(connectTimer), () => clearTimeout(connectTimer));
   ws.onopen = () => {
     if (socket !== ws || generation !== connectionGeneration) { ws.close(); return; }
+    connectionStage = "实时模型连接或历史恢复";
     $("#duplexState").textContent = "正在连接实时模型…";
     if (stream && interactionTransport !== "livekit") {
       startAudioCapture().catch(() => {});
@@ -1129,7 +1142,11 @@ async function connectRealtimeSession(generation, media, retryAttempt) {
     if (["audio", "assistant_transcript", "response_status"].includes(message.type) &&
         message.origin?.turnId && currentTurnId && message.origin.turnId !== currentTurnId && !message.origin.background) return;
     if (["memory_status", "speech_control"].includes(message.type) && message.turnId && currentTurnId && message.turnId !== currentTurnId) return;
-    if (message.type === "ready") {
+    if (message.type === "connection_progress") {
+      connectionStage = message.stage === "context-restore" ? "历史上下文恢复" : "云端实时模型连接";
+      $("#duplexState").textContent = message.stage === "context-restore"
+        ? "正在恢复历史会话…" : "正在连接实时模型…";
+    } else if (message.type === "ready") {
       if (message.lanes?.dialogue?.connected === false || providerUnavailable) {
         rejectReady(Error("实时模型尚未连接"));
         ws.close(4000, "provider-not-ready");
@@ -1194,6 +1211,7 @@ async function connectRealtimeSession(generation, media, retryAttempt) {
     } else if (message.type === "barge_in_policy") {
       $("#duplexState").textContent = "已停播 · 正在处理语音交接";
     } else if (message.type === "user_transcript") {
+      window.conversationHistoryEvent?.(message);
       if (message.channel === "explicit_control" && currentTurnId && message.turnId !== currentTurnId) return;
       currentTurnId = message.turnId || null;
       assistantText = "";
@@ -1201,6 +1219,7 @@ async function connectRealtimeSession(generation, media, retryAttempt) {
       $("#transcript").textContent = (message.channel === "explicit_control" ? "你的文字" : "现场语音 · 说话人待核验") + "：" + message.text + (message.echoRisk === "suspected" ? " · 可能残余回声" : "");
       $("#duplexState").textContent = message.channel === "explicit_control" ? "正在处理文本" : "正在处理现场语音";
     } else if (message.type === "assistant_transcript" && ["conversation", "proactive-utterance"].includes(message.purpose)) {
+      window.conversationHistoryEvent?.(message);
       livekitAudioElements.forEach(element => { element.muted = false; });
       if (captionResponseId !== message.responseId) assistantText = "";
       captionResponseId = message.responseId;
@@ -1209,6 +1228,7 @@ async function connectRealtimeSession(generation, media, retryAttempt) {
       $("#duplexState").textContent = message.done ? "字幕已收齐，等待模型结束响应" : "助手正在说 · 你可以随时打断";
       if (message.done) assistantText = "";
     } else if (message.type === "response_status") {
+      window.conversationHistoryEvent?.(message);
       if (audioContext) playbackAudit.report(audioContext.currentTime, "generation-" + message.status, message.responseId);
       const turn = state?.workLedger?.turnInbox?.find(item => item.turnId === message.origin?.turnId);
       if (turn) {
@@ -1258,7 +1278,13 @@ async function connectRealtimeSession(generation, media, retryAttempt) {
     } else if (message.type === "transport_status") {
       $("#duplexState").textContent = message.status === "connected"
         ? "LiveKit 媒体在线" : "LiveKit 媒体已断开，正在切换回退通道";
+    } else if (message.type === "audio_unavailable") {
+      $("#textTurnError").textContent = message.message;
     } else if (message.type === "error") {
+      if (!ready) {
+        rejectReady(Error(message.message || "实时模型启动失败"));
+        ws.close(4000, "startup-error");
+      }
       $("#textTurnError").textContent = message.message || "实时请求失败";
       $("#duplexState").textContent = "实时请求出错 · 查看输入区提示与处理记录";
     }
@@ -1347,7 +1373,6 @@ $("#textTurnForm").onsubmit = async event => {
     if (generation !== connectionGeneration) throw Error("连接已取消，输入已保留，可重新发送");
     if (!socket || socket.readyState !== WebSocket.OPEN) throw Error("实时会话尚未就绪");
     const pending = {type: "control", transcript, clientRequestId: crypto.randomUUID()};
-    turnOutbox().add(pending);
     currentTurnId = pending.clientRequestId;
     assistantText = "";
     captionResponseId = null;
@@ -1362,6 +1387,8 @@ $("#textTurnForm").onsubmit = async event => {
     // server associates it with this turn, just as it does for spoken input.
     try { sendVideoFrame(); }
     catch (_) { $("#cameraState").textContent = "当前帧采集失败，检查摄像头"; }
+    pending.capture = {clockId: mediaCaptureClockId, monotonicMs: performance.now()};
+    turnOutbox().add(pending);
     socket.send(JSON.stringify(pending));
     $("#textTurnError").textContent = "已发送，等待助手接收…";
   } catch (error) { if (isCurrent()) $("#textTurnError").textContent = error.message; }
@@ -1374,7 +1401,7 @@ $("#textTurnInput").addEventListener("keydown", event => {
   if (!event.repeat && !$("#textTurnSend").disabled) $("#textTurnForm").requestSubmit();
 });
 
-$("#turnHistory").onclick = async event => {
+$("#turnWorkHistory").onclick = $("#turnHistory").onclick = async event => {
   const inspectButton = event.target.closest("[data-inspect-turn]");
   if (inspectButton) {
     inspectedTurnId = inspectButton.dataset.inspectTurn;
@@ -1425,6 +1452,13 @@ $("#realtimeButton").onclick = async () => { try { socket || connectingPromise ?
 $("#cameraButton").onclick = async () => { try { stream || mediaPromise ? stopMedia() : await ensureMedia(); } catch (error) { alert("设备访问失败：" + error.message); } };
 $("#videoFps").onchange = () => { if (!socket) return; clearInterval(videoTimer); videoTimer = setInterval(sendVideoFrame, 1000 / Number($("#videoFps").value)); };
 $("#mirrorCamera").checked = mirrorCamera;
+$("#microphoneEnabled").checked = microphoneEnabled;
+$("#microphoneEnabled").onchange = event => {
+  microphoneEnabled = event.currentTarget.checked;
+  localStorage.setItem("egoassist.microphone.enabled", String(microphoneEnabled));
+  stream?.getAudioTracks().forEach(track => { track.enabled = microphoneEnabled; });
+  if (stream) $("#cameraState").textContent = microphoneEnabled ? "摄像头与麦克风在线" : "摄像头在线 · 麦克风已关闭";
+};
 applyCameraOrientation();
 $("#mirrorCamera").onchange = event => {
   mirrorCamera = event.currentTarget.checked;
@@ -1578,6 +1612,7 @@ async function changeSession(targetId, label = null) {
       targetId = created.session.id;
     }
     selectedSessionId = targetId;
+    window.resetConversationHistory?.();
     toolActivityView.reset(targetId);
     state = null;
     localSubmittedTurns.clear();

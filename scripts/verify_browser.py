@@ -47,6 +47,22 @@ async def verify(output, real_turn=False):
                 await page.locator('#newSession').click()
                 await page.wait_for_function("document.querySelector('#sessionSelect').selectedOptions[0]?.textContent.includes('browser-real-session')")
                 report['sessionCreated'] = True
+                assert await page.locator('.workspace-nav a').nth(1).get_attribute('href') == 'diary.html'
+                assert await page.locator('#insightKind').input_value() == 'suggestions'
+                async with page.expect_popup() as diary_popup:
+                    await page.locator('.workspace-nav a[href="diary.html"]').click()
+                diary = await diary_popup.value
+                diary.on('pageerror', lambda error: report['pageErrors'].append(str(error)))
+                await diary.locator('#app').wait_for(state='visible')
+                assert await diary.locator('#login').is_hidden()
+                assert await diary.locator('#kind').input_value() == 'daily'
+                report['diarySharesLogin'] = True
+                for width in (1440, 390):
+                    await diary.set_viewport_size({'width': width, 'height': 1000})
+                    assert await diary.evaluate('document.documentElement.scrollWidth <= innerWidth')
+                    await diary.screenshot(path=str(output / f'diary-{width}.png'), full_page=True)
+                await diary.close()
+                report['recommendedNavigationDefaults'] = True
                 await page.locator('a[href="#/tasks"]').click()
                 await page.locator('#skillSelect').select_option('packing-coach')
                 await page.wait_for_function("document.querySelector('#skillName').textContent.includes('packing-coach')")

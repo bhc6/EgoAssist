@@ -47,7 +47,7 @@ function renderTurnWorkflow() {
   const html = (inspectedTurnId ? "<button id='workflowFollowLatest' type='button'>返回最新对话</button>" : "") +
     "<blockquote>" + esc(turn.text) + "</blockquote>" +
     row("当前进度", (!answer && pendingVision && turn.status !== "completed" ? "等待画面描述 · " + pendingVision.model + " · " + pendingVision.elapsedMs + " ms" : !answer && turn.status === "completed" && semantic?.interaction?.action === "listen" ? "现场对话已记录，无需助手回答" : workStatusLabel(answer?.status || turn.delivery?.status || turn.status)) + elapsed) +
-    row("说话人", speaker?.status === "account-input" ? "账号提交的文字" : speaker?.status === "pending" ? "本地模型正在分析声音" : speaker?.name || speaker?.speakerId || "现场声音，身份未确认") +
+    row("说话人", speaker?.status === "account-input" ? "账号提交的文字" : speakerDisplayName(speaker)) +
     row("声画证据", (scene?.audio ? "原始语音已保留" : "无对应语音片段") + " · " +
       (scene?.frame ? "已绑定提问时画面 " + scene.frame.receivedAt : "无可对齐画面") +
       (scene?.synchronizedFrames?.length ? " · " + scene.synchronizedFrames.length + " 帧按接收时间对齐" : "")) +

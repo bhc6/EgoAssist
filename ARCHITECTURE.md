@@ -4,11 +4,13 @@
 
 ## 三条链路
 
+三链路共享原始证据底座：历史导入直接保存逐轮 `source.event`，原文 FTS 与版本化证据包不依赖记忆抽取成功。实时表达、原生文字与后台恢复共享事实上下文，记忆卡片和日记是派生层。当前实现范围、原生/旧协议差异和未完成阶段见[原始证据底座验收](docs/SOURCE_EVIDENCE_ARCHITECTURE_2026-09-17.md)。
+
 | 链路 | 输入与职责 | 产出 | 当前主要实现 |
 | --- | --- | --- | --- |
 | 观察 Observation | 持续接收声画，进行现场分析、任务证据检查与说话人归属分析 | 带采集时间的媒体、观察、疑点与事件候选 | `realtime/scene.py`、`ambient.py`、`perception.py`、`speakers.py`；`omni.py` 的独立视觉通道 |
 | 交互 Interaction | 同等处理文字与语音，理解意图、调用工具、执行 Skill、决定回应或主动介入 | 对应原问题的答案、工具回执、任务状态与用户确认 | `realtime/semantic.py`、`work_ledger.py`、`routed_tools.py`、`interaction.py`、`product/answer_jobs.py` |
-| 记忆 Memory | 保存与检索证据，处理纠正与时间，恢复未完成写入，异步整理和生成报告 | 可引用记忆、修订记录、日报/周报/月报与建议候选 | `memory/timeline.py`、`recovery.py`、`insights.py`、`product/insight_jobs.py` |
+| 记忆 Memory | 保存与检索证据，处理纠正与时间，恢复未完成写入，异步整理和生成报告 | 原文证据包、结构化卡片、修订记录、日记与建议候选 | `memory/evidence_service.py`、`source_index.py`、`timeline.py`、`commit.py`、`recovery.py`、`diary/` |
 
 记忆链路既有低成本同步检索/提交，也有异步加工；不为了“全部异步”给简单 SQLite 查询增加模型调用。报告的建议候选属于记忆加工，是否现在提醒用户由交互链路决定。观察中的任务检查只产生证据，不能绕过交互直接推进任务。
 
@@ -30,13 +32,15 @@ flowchart LR
 
 ## 代码边界
 
-`egoassist/runtime.py::ThreeLaneRuntime` 是案例的顶层组合接口，由 `CaseRuntimeOwner` 持有。它负责观察所用跨链路背景，以及 `runtimeLanes` 三条平级状态的投影。它不拥有独立数据库，也不复制既有执行器的调度逻辑。
+`egoassist/runtime.py::ThreeLaneRuntime` 是案例的顶层状态接口，由 `CaseRuntimeOwner` 持有。观察背景和三链路状态使用共享日志上的增量投影。执行逻辑由 `ObservationService`、`TurnCoordinator`、`InteractionService`、`MemoryCommitService` 及持久作业服务分别拥有，依赖通过构造参数显式传入。
 
-`run_egoassist.py` 仍是 HTTP、WebSocket、身份与执行器的装配入口；前端渲染 `runtimeLanes`，不再从环境观察对象推导后台记忆状态。模型连接数和链路数量不同：观察可有开放环境与任务检查两个连接，交互可有路由、工具与回答多个模型，记忆可有恢复与报告多个作业。
+`run_egoassist.py` 只处理命令行启动。`application/composition.py` 组装服务与生命周期，HTTP 适配按身份、任务、记忆和证据分组；`RealtimeConnection` 管理连接及媒体收发，`TurnCoordinator` 管理分类、排队和执行。前端渲染 `runtimeLanes`。模型连接数和链路数量不同：观察可有开放环境与任务检查两个连接，交互可有路由、工具与回答多个模型，记忆可有恢复与报告多个作业。
 
-共享底座是 `SessionJournal`、媒体证据仓库、Timeline 索引、任务账本和采集时钟。Skill 是交互链路可加载的能力包，携带观察要求与记忆需求；不成为第四条主链路。浏览器和未来眼镜是采集/输出适配器，不承担核心任务状态。
+共享底座的事件契约、`SessionJournal`、投影和配置放在 `core/`，该包不能依赖 `application/`、`realtime/`、`memory/` 或 `product/`；测试检查这条规则。原有导入路径保留兼容导出。Timeline 索引由记忆模块拥有，产品数据库是派生投影；删除必须先作用于来源并让缓存失效，不能只删除投影。Skill 是交互链路可加载的能力包，携带观察要求与记忆需求；不成为第四条主链路。浏览器和未来眼镜是采集/输出适配器，不承担核心任务状态。
 
 ## 运行原则
+
+实时模型传输可通过 `--realtime-backend omni|modular` 切换。默认保留 Omni；模块化方案在 `realtime/modular.py` 中组合 VAD 分段 ASR、VL、文本生成和流式 TTS，复用现有桥接层的权限、调度、工具、上下文重放与播放控制。模型拆分不改变三链路职责，语义路由和记忆服务继续独立运行。模型配置、真实对照及已知限制见[模块化实时后端](docs/MODULAR_REALTIME_2026-09-14.md)。
 
 1. 回答生成、暂停播报和取消某个问题，不自动关闭观察。
 2. 模型推理与后台加工不得持有跨链路共享锁；短状态提交可使用事务或锁。
@@ -55,6 +59,6 @@ flowchart LR
 
 已实现独立视觉调度、案例级主框架接口、问题证据快照、带来源的历史背景、持久后台记忆/报告/补答，以及前端平级状态。
 
-当前装配文件仍较大，交互与记忆提交逻辑尚有内嵌函数。后续按三链路逐块迁移执行逻辑，保留原有测试与真实证据；不能只搬目录就宣布模块边界已全部完成。尚无统一跨供应商资源优先级调度，也未实现持续视频事件分割、全量录像和观察请求持久重放。第一视角身份归属与传感器时间同步仍需硬件验证。
+观察结果处理、交互提交、记忆写入及轮次执行已迁入独立服务，启动文件不再包含业务实现。组合模块仍负责案例恢复与跨服务装配，整体仍为单机模块化单体。增量投影减少重复历史扫描，有界候选检索控制逐条评分成本；完整日志恢复和账户导出仍与历史规模有关。尚无统一跨供应商资源优先级调度，也未实现持续视频事件分割、全量录像和观察请求持久重放。第一视角身份归属与传感器时间同步仍需硬件验证。整改验证见 [2026-09-11 记录](docs/ARCHITECTURE_REMEDIATION_2026-09-11.md)。
 
-验收与延迟见[三链路真实运行](docs/OBSERVATION_LANES_2026-09-10.md)，记忆细节见[记忆机制](MEMORY_ARCHITECTURE.md)，视频方法见[事件分割调研](docs/STREAMING_VIDEO_EVENTS_RESEARCH_2026-09-10.md)。
+验收与延迟见[三链路真实运行](docs/OBSERVATION_LANES_2026-09-10.md)，记忆全链路、存储位置、默认参数与删除边界见[记忆机制](MEMORY_ARCHITECTURE.md)（2026-09-20 源码核对），视频方法见[事件分割调研](docs/STREAMING_VIDEO_EVENTS_RESEARCH_2026-09-10.md)。

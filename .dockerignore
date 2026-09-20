@@ -1,4 +1,8 @@
 venv/
+.venv/
+.cache/
+.ruff_cache/
+.mypy_cache/
 __pycache__/
 *.pyc
 .pytest_cache/
@@ -9,6 +13,7 @@ dist/
 release_dist/
 *.egg-info/
 outputs/
+artifacts/
 .git/
 node_modules/
 *.mp4
@@ -22,4 +27,8 @@ data_real/
 research_references/
 tmp/
 .egoassist/
+.egoassist*/
 .env
+.env.*
+*.key
+*.log

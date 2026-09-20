@@ -6,7 +6,6 @@ import io
 import json
 from pathlib import Path
 import sys
-import time
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -14,7 +13,6 @@ import av
 from egoassist._env import load_env
 from egoassist.realtime.context_harness import SessionJournal
 from egoassist.realtime.scene import SharedScene
-from egoassist.realtime.speakers import MODELS
 from egoassist.product.answer_jobs import AnswerJobs
 import os
 

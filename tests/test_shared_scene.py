@@ -1,6 +1,7 @@
 import asyncio
 import base64
 import io
+from egoassist.realtime.interaction_window import select_frames
 
 import pytest
 from PIL import Image
@@ -38,6 +39,57 @@ def test_question_frame_is_immutable_and_context_does_not_wait_for_vision(tmp_pa
         scene.media(saved)
 
 
+def test_interaction_window_keeps_before_and_after_samples_and_excludes_future(tmp_path):
+    scene = make_scene(tmp_path)
+    now = 100.0
+    # Use small in-memory frame placeholders; selection only needs timing.
+    frames = [{"frameId": str(i), "monotonic": now + i, "device": {}, "data": b"x"}
+              for i in range(-12, 3)]
+    selected, window = select_frames(frames, end=now, start=now - 2, received_before=now)
+    assert selected and all(at <= now for at, _ in selected)
+    assert window["anchor"] == "speech-end"
+    assert window["availableFrames"] == 13
+    assert window["coverageMs"] == 12000
+    assert not window["gaps"]
+
+
+def test_audio_capture_clock_excludes_frames_received_during_delayed_asr(tmp_path, monkeypatch):
+    from unittest.mock import patch
+    scene = make_scene(tmp_path)
+    with patch('egoassist.realtime.scene.time.monotonic', return_value=100):
+        frame(scene, 'red')
+    scene.frames[-1]['device'] = {'clockId': 'camera', 'monotonicMs': 9000}
+    with patch('egoassist.realtime.scene.time.monotonic', return_value=102):
+        frame(scene, 'blue')
+    scene.frames[-1]['device'] = {'clockId': 'camera', 'monotonicMs': 10500}
+    scene.append_audio(base64.b64encode(bytes(32000)).decode(), 1,
+                       metadata={'clockId': 'camera', 'startMonotonicMs': 9000, 'endMonotonicMs': 10000})
+    row = scene.capture('delayed', segment={'audioStartMs': 0, 'audioEndMs': 1000, 'generation': 1})
+    window = row['interactionWindow']
+    assert window['syncBasis'] == 'client-monotonic-estimate'
+    assert window['frames'] and all(f['device']['monotonicMs'] <= 10000 for f in window['frames'])
+    assert row['frame']['device']['monotonicMs'] == 9000
+    # Original question stays frozen when a later frame arrives and after restart.
+    frame(scene, 'green')
+    assert scene.capture('delayed')['interactionWindow'] == window
+    assert make_scene(tmp_path).turns['delayed']['interactionWindow'] == window
+
+
+def test_dense_window_keeps_previous_second_and_has_bounded_samples():
+    frames = [{'monotonic': i / 4, 'device': {}} for i in range(60)]
+    selected, window = select_frames(frames, end=12, received_before=15)
+    assert len(selected) <= 16 and window['sampled']
+    assert selected[-1][0] == 12
+    assert {11, 11.25, 11.5, 11.75, 12}.issubset({at for at, _ in selected})
+
+
+def test_capture_window_cannot_join_device_clock_generations():
+    frames = [{'monotonic': 20, 'device': {'clockId': c, 'monotonicMs': t}}
+              for c, t in [('old', 1000), ('new', 1000), ('new', 3000)]]
+    selected, _ = select_frames(frames, end=2, clock_id='new', received_before=30)
+    assert len(selected) == 1 and selected[0][1]['device']['clockId'] == 'new'
+
+
 def test_wrong_audio_epoch_cannot_borrow_newer_frame(tmp_path):
     scene = make_scene(tmp_path)
     frame(scene, "red")
@@ -45,6 +97,21 @@ def test_wrong_audio_epoch_cannot_borrow_newer_frame(tmp_path):
     row = scene.capture("old", segment={"audioStartMs": 0, "audioEndMs": 900, "generation": 1})
     assert row["audio"] is None and row["frame"] is None
     assert not row["speaker"]["wearer"]
+
+
+def test_snapshot_preserves_audio_frame_evidence_after_restore(tmp_path):
+    scene = make_scene(tmp_path)
+    frame(scene, "red")
+    # The frame must precede the 900 ms endpoint, not arrive with the 1000 ms chunk.
+    scene.frames[-1]['monotonic'] -= .2
+    scene.append_audio(base64.b64encode(bytes(32000)).decode(), 1)
+    captured = scene.capture("speech", segment={"audioStartMs": 0, "audioEndMs": 900, "generation": 1})
+    assert captured["audio"] and captured["synchronizedFrames"]
+    for projection in (scene.snapshot(), make_scene(tmp_path).snapshot()):
+        turn = projection["utterances"][0]
+        assert turn["audio"] == captured["audio"]
+        assert turn["synchronizedFrames"] == captured["synchronizedFrames"]
+        assert turn["avAssociation"]["status"] == "unlinked"
 
 
 def test_replayed_prefix_offsets_provider_audio_clock(tmp_path):
@@ -75,6 +142,40 @@ def test_out_of_order_asr_uses_provider_item_id():
     bridge._input_segment_started({"item_id": "stale", "audio_start_ms": 3000})
     bridge._drop_open_input_segments("reconnect")
     assert not bridge._input_segment_contexts
+
+
+def test_vad_stop_rebinds_provisional_id_without_leaving_speech_pending():
+    import threading
+    from collections import deque
+    from egoassist.realtime.omni import OmniBrowserBridge
+    bridge = OmniBrowserBridge.__new__(OmniBrowserBridge)
+    bridge._media_lock = threading.Lock()
+    bridge._dialogue_generation = 1
+    bridge._pending_input_segments = deque()
+    bridge._trace = lambda *args, **kwargs: None
+    bridge._input_segment_started({'item_id': 'provisional', 'audio_start_ms': 100})
+    bridge._input_segment_stopped({'item_id': 'committed', 'audio_end_ms': 1800})
+    segment = bridge._input_segment_transcribed('hello', 'committed')
+    assert segment['audioStartMs'] == 100 and segment['audioEndMs'] == 1800
+    assert segment['startProviderItemId'] == 'provisional'
+    assert not bridge.has_unresolved_user_input()
+
+
+def test_late_stop_for_older_item_does_not_close_new_speech():
+    import threading
+    from collections import deque
+    from egoassist.realtime.omni import OmniBrowserBridge
+    bridge = OmniBrowserBridge.__new__(OmniBrowserBridge)
+    bridge._media_lock = threading.Lock()
+    bridge._dialogue_generation = 1
+    bridge._pending_input_segments = deque()
+    bridge._trace = lambda *args, **kwargs: None
+    first = bridge._input_segment_started({'item_id': 'first', 'audio_start_ms': 0})
+    second = bridge._input_segment_started({'item_id': 'second', 'audio_start_ms': 1200})
+    bridge._input_segment_stopped({'item_id': 'first', 'audio_end_ms': 1000})
+    assert bridge._active_input_segment_id == second
+    assert bridge._input_segment_contexts[first]['audioEndMs'] == 1000
+    assert 'audioEndMs' not in bridge._input_segment_contexts[second]
 
 
 def test_different_clusters_and_omitted_speech_never_become_whole_wearer(tmp_path):

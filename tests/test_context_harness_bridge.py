@@ -258,6 +258,27 @@ def test_provider_projection_replays_durable_context(tmp_path):
     assert bridge.conversation.items[0]["content"][0]["type"] == "input_text"
 
 
+def test_startup_tool_recovery_never_copies_unbounded_unrelated_events(tmp_path, monkeypatch):
+    harness = harness_at(tmp_path / "bounded-recovery.jsonl")
+    harness.record_tool_call("pending", "action", {})
+    harness.journal.append("tool_confirmation", {
+        "callId": "pending", "name": "action", "arguments": {}, "status": "pending",
+    })
+    for _ in range(520):
+        harness.journal.append("runtime_event", {"payload": {"unrelated": "observation"}})
+    entries = harness.journal.entries
+
+    def bounded_entries(*, types=None, tail=None):
+        assert types is not None or tail is not None
+        return entries(types=types, tail=tail)
+
+    monkeypatch.setattr(harness.journal, "entries", bounded_entries)
+    bridge = make_bridge(harness)
+    bridge.set_context_harness(harness)
+    assert bridge._pending_tool_calls["pending"]["name"] == "action"
+    assert "pending" not in getattr(bridge, "_tool_call_signatures", {})
+
+
 def test_assistant_completion_is_committed_once_by_response_id(tmp_path):
     harness = harness_at(tmp_path / "assistant.jsonl")
     bridge = make_bridge(harness)

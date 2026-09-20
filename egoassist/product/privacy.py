@@ -7,20 +7,19 @@ privacy operations call those owners and emit only bounded deletion evidence.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, asdict
-from datetime import datetime, timezone
 import hashlib
 import json
 import os
-from pathlib import Path
 import re
-from typing import Any, Iterable, Mapping
+from dataclasses import asdict, dataclass
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Mapping
 from uuid import uuid4
 
 from cryptography.fernet import Fernet, InvalidToken
 
-from .contracts import ProviderDisclosure
-
+from egoassist.core.contracts import ProviderDisclosure
 
 _EMAIL = re.compile(r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b", re.I)
 _PHONE = re.compile(r"(?<!\d)(?:\+?86[- ]?)?1[3-9]\d{9}(?!\d)")
@@ -104,7 +103,7 @@ def provider_disclosures(*, ambient: bool = False) -> list[dict[str, Any]]:
                     "watchlist activity and location labels",
                 ],
                 purposes=["passive habit observation", "observation-gated reminding"],
-                retention="frame transport only; only the derived label, time, and place are stored",
+                retention="sampled images, captured reference context and derived observations are retained as account evidence until the observation retention policy or account deletion removes them",
                 user_controls=[
                     "turn off ambient mode",
                     "revoke ambient consent",
@@ -314,14 +313,89 @@ class PrivacyGovernance:
         return evidence
 
     def retention(self, *, user_id: str | None = None, now: datetime | None = None) -> dict[str, Any]:
+        from datetime import timedelta
+
+        from egoassist.core.events import references
+        from egoassist.core.journal import SessionJournal
+        from egoassist.core.retention import erase_expired
+
         now = now or datetime.now(timezone.utc)
+        policies = self.product_database.retention_policies(user_id)
+        by_user = {}
+        for policy in policies:
+            by_user.setdefault(policy["user_id"], {})[policy["category"]] = now - timedelta(days=policy["retention_days"])
+        erased_count = 0
+        media_count = 0
+        memory_counts = {"memoryCards": 0, "memoryDrafts": 0}
+        for owner_id, cutoffs in by_user.items():
+            root = self.user_memory_root / owner_id / "sessions"
+            erased_sources = set()
+            if "memory" in cutoffs:
+                cutoff = cutoffs["memory"]
+                for card in self.timeline.export_user(owner_id)["cards"]:
+                    timestamp = datetime.fromisoformat(card.get("effectiveAt") or card["happenedAt"])
+                    if timestamp < cutoff:
+                        erased_sources.add(card["id"])
+            journals = []
+            for path in sorted(root.glob("*.jsonl")):
+                # Ancillary diagnostic streams have no session header.
+                with path.open(encoding="utf-8") as handle:
+                    header = json.loads(handle.readline())
+                if header.get("type") != "session":
+                    continue
+                journals.append(SessionJournal(path))
+            previous_size = -1
+            while previous_size != len(erased_sources):
+                previous_size = len(erased_sources)
+                for journal in journals:
+                    erased = erase_expired(journal, cutoffs, source_ids=erased_sources)
+                    erased_sources.update(erased["sourceIds"])
+                    self.product_database.forget_turns(owner_id, erased["turnIds"])
+                removed, counts = self.timeline.forget_sources(owner_id, erased_sources)
+                erased_sources.update(removed)
+                for name, count in counts.items():
+                    memory_counts[name] += count
+            erased_count += len(erased_sources)
+            for journal in journals:
+                rows = journal.entries()
+                retained = references([row for row in rows if row.get("type") != "retention.deleted"])
+                expired_media = {name for row in rows if row.get("type") == "retention.deleted" for name in row.get("mediaIds", [])}
+                media_root = root / "media" / journal.session_id
+                for media in media_root.glob("*"):
+                    if media.is_file() and media.name in expired_media and media.stem not in retained and media.name not in retained:
+                        media.unlink()
+                        media_count += 1
+            trace = root / "memory_trace.jsonl"
+            if trace.exists():
+                raw_rows = trace.read_text(encoding="utf-8").splitlines(keepends=True)
+                retained = []
+                cutoff = cutoffs.get("operational")
+                for raw_row in raw_rows:
+                    try:
+                        row = json.loads(raw_row)
+                    except json.JSONDecodeError:
+                        retained.append(raw_row)
+                        continue
+                    source_ids = {str(row[key]) for key in ("card_id", "source_id", "turn_id") if row.get(key)}
+                    expired = cutoff is not None and isinstance(row.get("ts"), (int, float)) and row["ts"] < cutoff.timestamp()
+                    if not expired and not source_ids & erased_sources:
+                        retained.append(raw_row)
+                if retained != raw_rows:
+                    temporary = trace.with_name(trace.name + "." + uuid4().hex + ".tmp")
+                    try:
+                        temporary.write_text("".join(retained), encoding="utf-8")
+                        os.replace(temporary, trace)
+                    finally:
+                        temporary.unlink(missing_ok=True)
         result = self.product_database.apply_retention(user_id=user_id, now=now)
-        if user_id:
-            for policy in self.product_database.retention_policies(user_id):
-                if policy.get("category") == "memory":
-                    cutoff = now.timestamp() - int(policy["retention_days"]) * 86400
-                    cutoff_time = datetime.fromtimestamp(cutoff, tz=timezone.utc)
-                    result["deleted"]["memory"] = self.apply_memory_retention(user_id, cutoff_time)
+        result["deleted"].update(journalSources=erased_count, mediaFiles=media_count)
+        for owner_id, cutoffs in by_user.items():
+            if "memory" in cutoffs:
+                counts = self.apply_memory_retention(owner_id, cutoffs["memory"])
+                for name, count in counts.items():
+                    memory_counts[name] += count
+        if any(memory_counts.values()) or any("memory" in cutoffs for cutoffs in by_user.values()):
+            result["deleted"]["memory"] = memory_counts
         return result
 
     def apply_memory_retention(self, user_id: str, cutoff: datetime) -> dict[str, int]:

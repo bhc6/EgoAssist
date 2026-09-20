@@ -1,7 +1,7 @@
 {
   "id": "commute-check",
   "title": "通勤出门核对",
-  "aliases": ["通勤物品检查", "commute checklist"],
+  "aliases": ["通勤物品检查", "出门检查", "出门核对", "commute checklist"],
   "version": "1.0",
   "role": "出门物品核对助手",
   "provenance": "egoassist-original/user-confirmed-checklist",

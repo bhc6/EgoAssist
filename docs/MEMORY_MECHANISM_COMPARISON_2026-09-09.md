@@ -1,3 +1,5 @@
+> VALIDITY CORRECTION (2026-09-12): This historical experiment included target frames in queries, indexed records and answer context. It has target leakage and previously exposed samples. It cannot establish source-isolated retrieval or independent test performance. Original numbers are retained for audit; the entry point now removes target metadata.
+
 # Memory mechanism comparison
 
 The reproducible run is in `outputs/memory-comparison-20260909-2` (ignored runtime artifact). It uses 22 source annotations and 12 questions from the downloaded `A1_JAKE_DAY1` EgoLife subset. Qwen `text-embedding-v3` and `qwen-flash` were called through the real provider; no video inference was performed.

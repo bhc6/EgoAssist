@@ -6,7 +6,7 @@ import hashlib
 from pathlib import Path
 from typing import Any, Mapping
 
-from .contracts import ArtifactDescriptor
+from egoassist.core.contracts import ArtifactDescriptor
 
 
 class LocalArtifactAdapter:

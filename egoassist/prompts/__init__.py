@@ -38,8 +38,13 @@ def prompt_catalog() -> list[dict]:
 def compact_audit_payload(kind: str, payload: dict) -> dict:
     """Keep polling light; full requests remain in the owner-scoped journal API."""
     value = dict(payload)
-    if kind == "control_decision" and isinstance(value.get("decision"), dict):
+    decision_kinds = {"control_decision", "memory.recovery.result", "memory.recovery.job", "interaction.classification_retry"}
+    if kind in decision_kinds and isinstance(value.get("decision"), dict):
         decision = dict(value["decision"])
+        if "sourceScene" in decision:
+            decision.pop("sourceScene")
+            decision["sourceSceneAvailable"] = True
+            value["decision"] = decision
         metrics = dict(decision.get("requestMetrics") or {})
         if "messages" in metrics:
             metrics.pop("messages")
@@ -53,6 +58,13 @@ def compact_audit_payload(kind: str, payload: dict) -> dict:
             metrics["cancellationCheck"] = check
             decision["requestMetrics"] = metrics
             value["decision"] = decision
+        if isinstance(metrics.get("taskControlCheck"), dict):
+            check = dict(metrics["taskControlCheck"])
+            check.pop("messages", None)
+            check["messagesAvailable"] = True
+            metrics["taskControlCheck"] = check
+            decision["requestMetrics"] = metrics
+            value["decision"] = decision
     fields = {
         "model.prompt": ("instructions", "tools"),
         "response.dispatched": ("instructions",),
@@ -60,11 +72,12 @@ def compact_audit_payload(kind: str, payload: dict) -> dict:
         "insight.result": ("sources", "rawOutput"),
         "answer.job": ("instructions", "context"),
         "answer.request": ("messages",),
+        "memory.recovery.job": ("scene",),
     }.get(kind, ())
     for field in fields:
         if field in value:
             content = value.pop(field)
             value[field + "Length"] = len(content) if isinstance(content, (str, list, dict)) else None
-    if fields or kind == "control_decision":
+    if fields or kind in decision_kinds:
         value["fullAuditEndpoint"] = "/api/prompts?session=<current-session>"
     return value

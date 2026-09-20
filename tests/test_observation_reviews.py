@@ -134,7 +134,7 @@ def test_same_case_participant_memory_reaches_observer_without_other_users(tmp_p
 def test_explicit_memory_replacement_is_source_bound_and_atomic(tmp_path, previous_kind):
     from egoassist.realtime.semantic import SemanticTurnRouter
     timeline = TimelineMemory(tmp_path / "timeline.sqlite3")
-    old = timeline.remember("blue cloth", user_id="u", case_id="case", scope="participant", kind=previous_kind, subject="this table", predicate="color")
+    old = timeline.remember("blue cloth", user_id="u", case_id="case", scope="participant", kind=previous_kind, subject="table", predicate="color")
     atom = {"kind": "fact", "text": "red cloth", "subject": "table", "predicate": "cloth", "value": "red",
             "scope": "participant", "consent": "explicit", "replaces": old["id"]}
     with pytest.raises(ValueError, match="replacement"):

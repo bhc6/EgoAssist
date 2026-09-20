@@ -17,6 +17,7 @@ from uuid import uuid4
 
 from .temporal import ClockContext, query_time_range, resolve_time_semantics
 from .evidence import evidence_network, ground_context, time_matches
+from .grounding import evidence_contract, project_card
 
 
 class _ClosingConnection:
@@ -381,15 +382,18 @@ class TimelineMemory:
                 conn.execute(
                     """UPDATE memory_cards
                        SET recorded_at=COALESCE(recorded_at, created_at),
-                           effective_at=COALESCE(effective_at, happened_at),
                            timezone_name=COALESCE(timezone_name, 'UTC'),
                            utc_offset_minutes=COALESCE(utc_offset_minutes, 0),
                            recurrence=COALESCE(recurrence, 'null')"""
                 )
+                if "effective_at" not in columns:
+                    conn.execute("UPDATE memory_cards SET effective_at=happened_at WHERE effective_at IS NULL")
                 conn.execute(
                     "INSERT OR REPLACE INTO timeline_meta(key, value) VALUES('schema_version', ?)",
                     (str(TIMELINE_SCHEMA_VERSION),),
                 )
+                conn.execute("CREATE INDEX IF NOT EXISTS memory_cards_duplicate_text ON memory_cards(user_id, scope, normalized_text)")
+                conn.execute("CREATE INDEX IF NOT EXISTS memory_cards_duplicate_claim ON memory_cards(user_id, scope, subject, predicate, value)")
                 # Step 3: FTS5 virtual table + triggers — created after migration so the
                 # schema is stable and all existing rows have the required columns.
                 # Content-table FTS5 requires delete-then-reinsert for updates/deletes;
@@ -477,29 +481,80 @@ class TimelineMemory:
         case_id = str(case_id).strip() if case_id else None
         if not user_id:
             raise ValueError("memory user_id is required")
-        now = _iso(recorded_at)
+        now = _iso(recorded_at or happened_at)
         effective = _iso(effective_at) if effective_at is not None else (
             _iso(happened_at) if happened_at is not None else None
         )
         effective_stop = _iso(effective_end) if effective_end is not None else None
+        metadata = dict(metadata or {})
+        contract = evidence_contract({"text": text, "kind": kind, "recordedAt": now,
+            "effectiveAt": effective, "effectiveEnd": effective_stop, "timezone": timezone_name,
+            "utcOffsetMinutes": utc_offset_minutes, "recurrence": recurrence,
+            "subject": subject, "value": value, "metadata": metadata})
+        effective, effective_stop = contract["effectiveAt"], contract["effectiveEnd"]
+        recurrence = contract["recurrence"]
+        metadata["grounding"] = contract
         happened = effective or now
         normalized_subject = normalize_identity(subject)
         normalized_predicate = normalize_identity(predicate)
         generated_key = memory_key_for(normalized_subject, normalized_predicate)
         if generated_key:
             memory_key = generated_key
+        if contract["referenceStatus"] == "needs-clarification":
+            memory_key = None
+            supersede = False
+            if kind in {"fact", "state", "preference"} and status == "active":
+                status = "pending"
         recurrence_json = json.dumps(recurrence, ensure_ascii=False, sort_keys=True) if recurrence else "null"
         normalized = normalize_text(text)
         source_values = list(dict.fromkeys(str(source_id) for source_id in source_ids if source_id))
-        explicit_card_id = card_id is not None
         card_id = str(card_id or uuid4().hex[:16])
         supersedes_id = None
         with self._lock, self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
             existing_id = connection.execute(
                 "SELECT * FROM memory_cards WHERE id=?", (card_id,),
             ).fetchone()
             if existing_id:
+                if (existing_id["user_id"] != user_id or existing_id["scope"] != scope or
+                        existing_id["case_id"] != case_id or existing_id["normalized_text"] != normalized):
+                    raise ValueError("memory card id conflicts with another source or owner")
                 return self._row_to_card(existing_id)
+            # Source retries are idempotent across foreground/recovery writers.
+            # Content equality alone cannot merge two distinct occurrences.
+            # UNION lets each lookup use its index; OR can scan the owner's history.
+            duplicates = connection.execute(
+                """SELECT * FROM memory_cards WHERE user_id=? AND scope=?
+                   AND COALESCE(case_id, '')=COALESCE(?, '') AND normalized_text=?
+                   UNION
+                   SELECT * FROM memory_cards WHERE user_id=? AND scope=?
+                   AND COALESCE(case_id, '')=COALESCE(?, '') AND subject=? AND predicate=? AND value=?
+                   ORDER BY happened_at DESC""",
+                (user_id, scope, case_id, normalized,
+                 user_id, scope, case_id, normalized_subject, normalized_predicate, value),
+            ).fetchall()
+            for duplicate in duplicates:
+                prior = self._row_to_card(duplicate)
+                if any(prior.get(field) != incoming for field, incoming in (
+                    ("subject", normalized_subject), ("predicate", normalized_predicate), ("value", value)
+                )):
+                    continue
+                same_source = bool(set(source_values) & set(prior["sourceIds"]))
+                same_time = (prior["effectiveAt"], prior["effectiveEnd"], prior["grounding"]["temporalStatus"]) == (
+                    effective, effective_stop, contract["temporalStatus"])
+                stable_duplicate = (kind not in {"event", "scene", "observation", "tool-effect"}
+                    and kind == prior["kind"] and same_time and prior["status"] == status
+                    and contract["temporalStatus"] not in {"needs-clarification", "recurring"})
+                if replaces_card_id and prior.get("supersedes") != replaces_card_id:
+                    continue
+                if not (same_source and same_time) and not stable_duplicate:
+                    continue
+                # Keep every supporting source; a repeated write is not a new observation.
+                merged_sources = list(dict.fromkeys(prior["sourceIds"] + source_values))
+                connection.execute("UPDATE memory_cards SET source_ids=?, updated_at=? WHERE id=?",
+                    (json.dumps(merged_sources, ensure_ascii=False), now, prior["id"]))
+                prior["sourceIds"] = merged_sources
+                return prior
             if replaces_card_id:
                 previous = connection.execute("SELECT * FROM memory_cards WHERE id=?", (replaces_card_id,)).fetchone()
                 if (not previous or previous["user_id"] != user_id or previous["scope"] != scope or
@@ -508,34 +563,43 @@ class TimelineMemory:
                     raise ValueError("replacement target must be an active claim in the same user, case and scope")
                 supersedes_id = str(previous["id"])
                 connection.execute("UPDATE memory_cards SET status='superseded', updated_at=? WHERE id=?", (now, supersedes_id))
-            if not explicit_card_id and not replaces_card_id and kind not in {"event", "scene", "observation", "tool-effect"}:
-                duplicate = connection.execute(
-                    """SELECT * FROM memory_cards
-                       WHERE user_id=? AND scope=? AND COALESCE(case_id, '')=COALESCE(?, '')
-                         AND tier=? AND kind=? AND normalized_text=? AND status=?
-                       ORDER BY happened_at DESC LIMIT 1""",
-                    (user_id, scope, case_id, tier, kind, normalized, status),
-                ).fetchone()
-                if duplicate:
-                    return self._row_to_card(duplicate)
-            if not replaces_card_id and supersede and memory_key and status == "active" and kind not in {"event", "scene", "observation"}:
+                # The same source may also have an unstructured event projection.
+                # Supersede that exact projection so it cannot reintroduce a corrected claim.
+                old_card = self._row_to_card(previous)
+                old_source_text = (old_card["metadata"].get("evidenceContext") or {}).get("sourceText")
+                siblings = connection.execute(
+                    """SELECT * FROM memory_cards WHERE user_id=? AND scope=?
+                       AND COALESCE(case_id, '')=COALESCE(?, '') AND status='active'
+                       AND (normalized_text=? OR text=?)""",
+                    (user_id, scope, case_id, previous["normalized_text"], old_source_text),
+                ).fetchall()
+                for sibling in siblings:
+                    if set(json.loads(sibling["source_ids"])) & set(old_card["sourceIds"]):
+                        connection.execute("UPDATE memory_cards SET status='superseded', updated_at=? WHERE id=?", (now, sibling["id"]))
+            if (not replaces_card_id and supersede and memory_key and status == "active"
+                    and kind not in {"event", "scene", "observation"} and effective_stop is None
+                    and (effective is None or effective <= now)
+                    and contract["temporalStatus"] not in {"needs-clarification", "recurring"}):
                 if scope == "participant":
                     previous = connection.execute(
-                        """SELECT id FROM memory_cards
+                        """SELECT id, happened_at FROM memory_cards
                            WHERE user_id=? AND scope='participant' AND memory_key=?
-                             AND status='active'
+                             AND status='active' AND effective_end IS NULL
                            ORDER BY happened_at DESC LIMIT 1""",
                         (user_id, memory_key),
                     ).fetchone()
                 else:
                     previous = connection.execute(
-                        """SELECT id FROM memory_cards
+                        """SELECT id, happened_at FROM memory_cards
                            WHERE user_id=? AND scope='case' AND case_id=? AND memory_key=?
-                             AND status='active'
+                             AND status='active' AND effective_end IS NULL
                            ORDER BY happened_at DESC LIMIT 1""",
                         (user_id, case_id, memory_key),
                     ).fetchone()
-                if previous:
+                if previous and previous["happened_at"] > happened:
+                    # Late ingestion must not reactivate an older mutable state.
+                    status = "superseded"
+                elif previous:
                     supersedes_id = str(previous["id"])
                     connection.execute(
                         "UPDATE memory_cards SET status='superseded', updated_at=? WHERE id=?",
@@ -833,6 +897,34 @@ class TimelineMemory:
             drafts = connection.execute("DELETE FROM memory_drafts WHERE user_id=? AND updated_at<?", (str(user_id), cutoff_value)).rowcount
         return {"memoryCards": int(cards or 0), "memoryDrafts": int(drafts or 0)}
 
+    def forget_sources(self, user_id, source_ids):
+        """Erase derived cards and drafts transitively when their evidence expires."""
+        from egoassist.core.events import references
+        removed = set(source_ids)
+        counts = {"memoryCards": 0, "memoryDrafts": 0}
+        with self._lock, self._connect() as connection:
+            cards = connection.execute("SELECT * FROM memory_cards WHERE user_id=?", (user_id,)).fetchall()
+            pending = list(cards)
+            while pending:
+                kept = []
+                changed = False
+                for row in pending:
+                    card = self._row_to_card(row)
+                    if references(card) & removed:
+                        removed.add(card["id"])
+                        counts["memoryCards"] += connection.execute("DELETE FROM memory_cards WHERE id=? AND user_id=?", (card["id"], user_id)).rowcount
+                        changed = True
+                    else:
+                        kept.append(row)
+                if not changed:
+                    break
+                pending = kept
+            drafts = connection.execute("SELECT * FROM memory_drafts WHERE user_id=?", (user_id,)).fetchall()
+            for row in drafts:
+                if references(self._row_to_draft(row)) & removed:
+                    counts["memoryDrafts"] += connection.execute("DELETE FROM memory_drafts WHERE id=? AND user_id=?", (row["id"], user_id)).rowcount
+        return removed, counts
+
     def cards(
         self,
         *,
@@ -882,6 +974,10 @@ class TimelineMemory:
         clock: ClockContext | None = None,
         query_spec: Mapping[str, Any] | None = None,
         min_score: float | None = None,
+        include_hard_candidates: bool = False,
+        include_candidate_audit: bool = False,
+        candidate_card_ids: Iterable[str] | None = None,
+        ranking_query: str | None = None,
     ) -> dict[str, Any]:
         if scope not in MEMORY_SCOPES:
             raise ValueError("invalid memory scope")
@@ -892,28 +988,18 @@ class TimelineMemory:
         query_subject = normalize_identity(query_spec.get("subject"))
         query_predicate = normalize_identity(query_spec.get("predicate"))
         query_context = ground_context(query_spec.get("context"), query, clock)
-        # LLMs occasionally attach a nested phrase ("昨天讨论的前天约定") to
-        # the preceding time reference. Keep that interpretation auditable, but
-        # also evaluate the independent civil-day reading. This prevents a
-        # parser choice from hiding an otherwise matching dated memory.
-        independent_context = query_context
-        raw_context = query_spec.get("context") if isinstance(query_spec.get("context"), Mapping) else None
-        if raw_context and any(str(item.get("anchor")) not in {"turn", "ambiguous"}
-                               for item in raw_context.get("times", []) if isinstance(item, Mapping)):
-            independent_raw = dict(raw_context)
-            independent_raw["times"] = [dict(item, anchor="turn") for item in raw_context.get("times", [])]
-            independent_context = ground_context(independent_raw, query, clock)
         query_entities = [normalize_identity(item) for item in query_context["entities"]]
         query_times = [item for item in query_context["times"] if item["status"] == "resolved"]
-        independent_times = [item for item in independent_context["times"] if item["status"] == "resolved"]
-        time_variants = [query_times] + ([independent_times] if independent_times != query_times else [])
-        temporal_status = "resolved" if query_times else "not-requested"
+        time_variants = [query_times]
+        query_temporal = resolve_time_semantics(query, clock, kind=None)
+        broad_history = bool(re.search(r"刚才|之前|以前|\b(?:earlier|recently|just now)\b", query, re.I)) and not query_context["times"] and not query_temporal["dateExplicit"]
+        temporal_status = "resolved" if query_times or query_temporal["effectiveAt"] else "not-requested"
         if any(item["status"] != "resolved" for item in query_context["times"]) or (
-            not query_context["times"] and resolve_time_semantics(query, clock, kind=None)["ambiguous"]
+            not query_context["times"] and not broad_history and query_temporal["status"] == "needs-clarification"
         ):
             temporal_status = "needs-clarification"
         query_normalized = normalize_text(query)
-        query_terms = self._tokenize(query)
+        query_terms = self._tokenize(query if ranking_query is None else ranking_query)
         requested_kinds = set(DEFAULT_RETRIEVABLE_KINDS if kinds is None else kinds)
         requested_kinds.discard("capture")
         clauses = ["user_id=?", "scope=?", "status='active'"]
@@ -925,10 +1011,51 @@ class TimelineMemory:
         # raw captures). Apply the same scope to ranking and canonical pinning.
         clauses.append("kind IN (" + ",".join("?" for _ in requested_kinds) + ")" if requested_kinds else "0")
         values.extend(sorted(requested_kinds))
+        from egoassist.core.settings import integer
+        candidate_limit = integer("EGOASSIST_MEMORY_CANDIDATE_LIMIT", 256, minimum=32, maximum=4096)
+        # External retrievers nominate IDs, never eligibility. All existing
+        # scope filters and per-card grounding checks still apply below.
+        if candidate_card_ids is not None:
+            nominated = list(dict.fromkeys(str(sid) for sid in candidate_card_ids))
+            if len(nominated) > candidate_limit:
+                raise ValueError("external candidate IDs exceed the configured candidate limit")
+            clauses.append("id IN (" + ",".join("?" for _ in nominated) + ")" if nominated else "0")
+            values.extend(nominated)
+        where = " AND ".join(clauses)
         with self._lock, self._connect() as connection:
-            rows = connection.execute(
-                "SELECT * FROM memory_cards WHERE " + " AND ".join(clauses), values,
-            ).fetchall()
+            total_candidates = connection.execute("SELECT COUNT(*) FROM memory_cards WHERE " + where, values).fetchone()[0]
+            if total_candidates <= candidate_limit:
+                rows = connection.execute("SELECT * FROM memory_cards WHERE " + where, values).fetchall()
+            else:
+                candidates_by_id = {}
+                fast_key = memory_key_for(query_subject, query_predicate) if query_subject and query_predicate else None
+                if fast_key:
+                    for row in connection.execute("SELECT * FROM memory_cards WHERE " + where +
+                            " AND memory_key=? ORDER BY happened_at DESC LIMIT 1", [*values, fast_key]):
+                        candidates_by_id[row["id"]] = row
+                if query_terms:
+                    try:
+                        match = " OR ".join('"' + term.replace('"', '""') + '"' for term in query_terms)
+                        scoped = " AND ".join("mc." + clause if clause != "0" else clause for clause in clauses)
+                        for row in connection.execute("SELECT mc.* FROM memory_fts CROSS JOIN memory_cards mc ON mc.rowid=memory_fts.rowid "
+                                "WHERE memory_fts MATCH ? AND " + scoped + " ORDER BY bm25(memory_fts) LIMIT ?",
+                                [match, *values, candidate_limit * 3 // 4]):
+                            candidates_by_id[row["id"]] = row
+                    except sqlite3.OperationalError:
+                        pass
+                start, end = query_time_range(query, clock)
+                if start is not None:
+                    for row in connection.execute("SELECT * FROM memory_cards WHERE " + where +
+                            " AND happened_at>=? AND happened_at<? ORDER BY happened_at DESC LIMIT ?",
+                            [*values, start.isoformat(), (end or start + timedelta(days=1)).isoformat(), candidate_limit // 4]):
+                        if len(candidates_by_id) < candidate_limit:
+                            candidates_by_id[row["id"]] = row
+                for row in connection.execute("SELECT * FROM memory_cards WHERE " + where +
+                        " ORDER BY happened_at DESC LIMIT ?", [*values, candidate_limit]):
+                    if len(candidates_by_id) >= candidate_limit:
+                        break
+                    candidates_by_id[row["id"]] = row
+                rows = list(candidates_by_id.values())
 
         # Canonical-key pinning uses the already scoped candidates. It is a
         # ranking rule, not a second query that can bypass the kind allowlist.
@@ -963,8 +1090,9 @@ class TimelineMemory:
                             FROM memory_fts
                             CROSS JOIN memory_cards mc ON mc.rowid = memory_fts.rowid
                             WHERE memory_fts MATCH ?
-                              AND {" AND ".join(scoped_clauses)}""",
-                        [fts_query_str] + values,
+                              AND {" AND ".join(scoped_clauses)}
+                            ORDER BY bm25(memory_fts) LIMIT ?""",
+                        [fts_query_str] + values + [candidate_limit],
                     ).fetchall()
                     for fts_row in fts_rows:
                         # bm25() returns negative scores; more negative = better
@@ -981,16 +1109,16 @@ class TimelineMemory:
             # card surfaces as "current"; otherwise it falls back to its persisted
             # `tier` (short/long). The two persisted axes are `tier` (this card's
             # consolidation level) and `kind` (its semantic type).
-            layer = "current" if age_seconds <= self.current_window_seconds else card["tier"]
+            layer = "current" if happened <= now and age_seconds <= self.current_window_seconds else card["tier"]
             if (wants_today or range_start is not None) and card["dayKey"] != today_key and range_start is None:
-                time_eligible = card["kind"] in {"preference", "fact", "state", "task-preference"}
+                time_eligible = False
             else:
                 time_eligible = True
             if range_start is not None:
-                card_start = _parse_time(card["effectiveAt"] or card["happenedAt"])
+                card_start = _parse_time(card["effectiveAt"]) if card.get("effectiveAt") else None
                 card_end = _parse_time(card["effectiveEnd"]) if card.get("effectiveEnd") else None
                 upper = range_end or (range_start + timedelta(days=1))
-                time_eligible = (
+                time_eligible = card_start is not None and (
                     card_start < upper and card_end > range_start
                     if card_end is not None
                     else range_start <= card_start < upper
@@ -1000,12 +1128,12 @@ class TimelineMemory:
             temporal_support = "not-requested"
             if any(variant for variant in time_variants):
                 temporal_support = "unresolved"
+                time_eligible = False
                 if card_times:
                     def matches(variant):
-                        return all(any(time_matches(requested, item) for item in (
-                            [item for item in card_times if normalize_identity(item.get("relation")) ==
-                             normalize_identity(requested["relation"])] or card_times
-                        )) for requested in variant)
+                        return all(any(time_matches(requested, item) for item in card_times
+                            if normalize_identity(item.get("relation")) == normalize_identity(requested["relation"]))
+                            for requested in variant)
                     time_eligible = any(matches(variant) for variant in time_variants if variant)
                     temporal_support = "matching-references" if time_eligible else "conflicting-references"
                 elif card.get("effectiveAt"):
@@ -1013,6 +1141,11 @@ class TimelineMemory:
                         "start": card["effectiveAt"], "end": card.get("effectiveEnd"),
                     }) for variant in time_variants if variant)
                     temporal_support = "legacy-event-time" if time_eligible else "conflicting-event-time"
+            if temporal_status == "needs-clarification":
+                time_eligible = False
+            if (range_start is not None or query_times) and card["grounding"]["recurrence"]:
+                time_eligible = False
+            reference_eligible = card["grounding"]["referenceStatus"] != "needs-clarification"
             card_entities = {normalize_identity(item) for item in evidence.get("entities", [])}
             entity_eligible = all(item in card_entities or item in normalize_identity(card["text"])
                                   for item in query_entities)
@@ -1062,7 +1195,7 @@ class TimelineMemory:
             # eligibility filters below (query constraints, not score priors).
             score = max(0.0, lexical)
             structured_match = bool(query_subject or query_predicate) and subject_eligible and predicate_eligible
-            eligible = time_eligible and subject_eligible and predicate_eligible and entity_eligible and scene_eligible and (
+            eligible = reference_eligible and time_eligible and subject_eligible and predicate_eligible and entity_eligible and scene_eligible and (
                 structured_match or overlap > 0
             )
             # Pinned fast-path cards (direct key lookup) qualify on the strength of
@@ -1071,7 +1204,7 @@ class TimelineMemory:
             # A canonical fact recorded outside the asked-about range is not an
             # answer to a time-scoped question (e.g. "did I take my meds at 3pm?"
             # must not surface the 4pm dose just because it shares the same key).
-            if card["id"] in pinned_card_ids and time_eligible and subject_eligible and predicate_eligible and entity_eligible and scene_eligible:
+            if card["id"] in pinned_card_ids and reference_eligible and time_eligible and subject_eligible and predicate_eligible and entity_eligible and scene_eligible:
                 score = 1.0
                 eligible = True
             reasons = []
@@ -1085,6 +1218,8 @@ class TimelineMemory:
                 reasons.append("today-filter" if time_eligible else "outside-today")
             candidates.append({
                 "cardId": card["id"],
+                "hardEligible": bool(reference_eligible and time_eligible and subject_eligible
+                                     and predicate_eligible and entity_eligible and scene_eligible),
                 "score": round(score if eligible else 0.0, 4),
                 "selected": False,
                 "layer": layer,
@@ -1092,6 +1227,7 @@ class TimelineMemory:
                 "temporalSupport": temporal_support,
                 "reasons": reasons,
                 "rejectionReasons": [] if eligible else [
+                    "unresolved-reference" if not reference_eligible else
                     "time-mismatch" if not time_eligible else
                     "subject-mismatch" if not subject_eligible else
                     "predicate-mismatch" if not predicate_eligible else
@@ -1106,9 +1242,22 @@ class TimelineMemory:
             reverse=True,
         )
         _min_score = min_score if min_score is not None else self._weights.min_score
-        selected = [
-            item for item in candidates if not item["rejectionReasons"] and item["score"] >= _min_score
-        ][:max(1, int(limit))]
+        selected = []
+        seen_evidence = set()
+        for item in candidates:
+            if item["rejectionReasons"] or item["score"] < _min_score:
+                continue
+            card = item["card"]
+            # Legacy duplicate rows stay auditable, but cannot fill the evidence budget.
+            identity = (card["normalizedText"], card.get("subject"), card.get("predicate"),
+                card.get("value"), card["effectiveAt"], card["effectiveEnd"],
+                tuple(sorted(card["sourceIds"])) if card["sourceIds"] else card["id"])
+            if identity in seen_evidence:
+                item["rejectionReasons"].append("duplicate-evidence")
+                continue
+            seen_evidence.add(identity)
+            if len(selected) < max(1, int(limit)):
+                selected.append(item)
         selected_ids = {item["cardId"] for item in selected}
         for item in candidates:
             item["selected"] = item["cardId"] in selected_ids
@@ -1117,6 +1266,7 @@ class TimelineMemory:
         return {
             "method": "timeline-structured-temporal-retrieval-v2",
             "query": str(query),
+            "rankingQuery": query if ranking_query is None else ranking_query,
             "scope": {"user": str(user_id), "case": case_id, "memoryScope": scope},
             "routing": {
                 "today": wants_today,
@@ -1128,8 +1278,12 @@ class TimelineMemory:
             },
             "minimumScore": _min_score,
             "timing": {"retrievalMs": round((time.perf_counter() - started) * 1000, 3),
-                       "scannedCards": len(rows)},
+                       "scannedCards": len(rows), "totalCandidates": total_candidates,
+                       "candidateLimit": candidate_limit, "candidatesTruncated": total_candidates > len(rows)},
             "candidates": candidates[:20],
+            **({"hardCandidates": [item for item in candidates if item["hardEligible"]]}
+               if include_hard_candidates else {}),
+            **({"candidateAudit": candidates} if include_candidate_audit else {}),
             "selected": selected,
             "injection": {"status": "not-injected", "cardIds": []},
             "scoreMeaning": "lexical-ranking-or-exact-key-priority",
@@ -1140,9 +1294,8 @@ class TimelineMemory:
     def promote_to_long(self, *, user_id: str, case_id: str | None, scope: str) -> dict[str, Any]:
         """Losslessly promote the oldest 'short' cards to the 'long' tier.
 
-        Distinct from ``HierarchicalMemory.consolidate`` (P1), which does a lossy
-        merge-clustering of episodes; this P2 path re-``remember``s each source card
-        unchanged at ``tier='long'`` and marks the original ``consolidated``.
+        Change the tier atomically in place. IDs, dates and sources remain stable;
+        a retry cannot create another occurrence or invalidate its own source.
         """
         active_short = self.cards(
             user_id=user_id, case_id=case_id if scope == "case" else None,
@@ -1153,41 +1306,15 @@ class TimelineMemory:
             return {"status": "not-needed", "shortCount": len(active_short), "created": []}
         oldest = list(reversed(active_short))[:max(1, len(active_short) - self.short_term_capacity // 2)]
         created = []
-        with self._lock:
+        with self._lock, self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
             for source in oldest:
-                promotion_id = "promoted-" + hashlib.sha256(
-                    f"{user_id}|{scope}|{case_id or ''}|{source['id']}".encode("utf-8")
-                ).hexdigest()[:16]
-                promoted = self.remember(
-                    source["text"],
-                    user_id=user_id,
-                    case_id=case_id,
-                    scope=scope,
-                    kind=source["kind"],
-                    tier="long",
-                    memory_key=source.get("memoryKey"),
-                    happened_at=source["happenedAt"],
-                    recorded_at=source.get("recordedAt"),
-                    effective_at=source.get("effectiveAt"),
-                    effective_end=source.get("effectiveEnd"),
-                    timezone_name=source.get("timezone") or "UTC",
-                    utc_offset_minutes=int(source.get("utcOffsetMinutes") or 0),
-                    recurrence=source.get("recurrence"),
-                    subject=source.get("subject"),
-                    predicate=source.get("predicate"),
-                    value=source.get("value"),
-                    source_ids=[source["id"], *source.get("sourceIds", [])],
-                    importance=source["importance"],
-                    metadata={
-                        **dict(source.get("metadata") or {}),
-                        "consolidation": "deterministic-lossless-promotion-v2",
-                    },
-                    supersede=False,
-                    card_id=promotion_id,
+                updated = connection.execute(
+                    "UPDATE memory_cards SET tier='long', updated_at=? WHERE id=? AND status='active' AND tier='short'",
+                    (_iso(None), source["id"]),
                 )
-                if promoted:
-                    created.append(promoted["id"])
-                    self.update_status(source["id"], "consolidated")
+                if updated.rowcount:
+                    created.append(source["id"])
         result = {"status": "consolidated", "shortCount": len(active_short), "created": created}
         self._emit("timeline.memory.consolidated", result)
         return result
@@ -1200,14 +1327,18 @@ class TimelineMemory:
             scope=scope, statuses=("active", "pending"), limit=200,
         )
         now = utc_now()
-        counts = {"current": 0, "short": 0, "long": 0}
-        for card in cards:
-            if (now - _parse_time(card["happenedAt"])).total_seconds() <= self.current_window_seconds:
-                counts["current"] += 1
-            counts[card["tier"]] += 1
+        clauses = ["user_id=?", "scope=?", "status IN ('active', 'pending')"]
+        values = [user_id, scope]
+        if scope == "case":
+            clauses.append("case_id=?")
+            values.append(case_id or "")
+        with self._lock, self._connect() as connection:
+            aggregate = connection.execute("SELECT COUNT(*), SUM(tier='short'), SUM(tier='long'), SUM(happened_at>=?) FROM memory_cards WHERE " + " AND ".join(clauses),
+                [(now - timedelta(seconds=self.current_window_seconds)).isoformat(), *values]).fetchone()
+        counts = {"short": aggregate[1] or 0, "long": aggregate[2] or 0, "current": aggregate[3] or 0}
         return {
             "path": str(self.path),
-            "count": len(cards),
+            "count": aggregate[0],
             "layers": counts,
             "recent": cards[:12],
             "evidenceNetwork": {**evidence_network([card for card in cards if card["status"] == "active"]),
@@ -1312,7 +1443,7 @@ class TimelineMemory:
             "createdAt": str(row["created_at"]),
             "updatedAt": str(row["updated_at"]),
         }
-        return card
+        return project_card(card)
 
     @staticmethod
     def _row_to_draft(row: sqlite3.Row) -> dict[str, Any]:

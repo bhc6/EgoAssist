@@ -41,7 +41,7 @@ with workflow.unsafe.imports_passed_through():
     from egoassist.realtime.context_harness import SessionJournal
     from egoassist.realtime.work_ledger import CaseWorkLedger
 
-    from .contracts import NotificationRequest
+    from egoassist.core.contracts import NotificationRequest
     from .ports import NotificationPort
 
 

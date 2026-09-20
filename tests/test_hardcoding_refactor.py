@@ -10,7 +10,7 @@ from egoassist.realtime.prompt_audit import audit_page
 from egoassist.realtime.router_protocol import expand_decision
 from egoassist.realtime.semantic import SemanticTurnRouter
 from egoassist.realtime.intent_decomposition import normalize_intent_candidates
-from egoassist.realtime.settings import asr_settings
+from egoassist.core.settings import asr_settings
 
 
 def test_compound_memory_and_intents_are_not_silently_truncated():

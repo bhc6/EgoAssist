@@ -189,7 +189,7 @@ def test_consolidation_moves_old_short_cards_to_long_with_sources(tmp_path):
 
     assert result["status"] == "consolidated"
     assert len(long_cards) == 4
-    assert all(len(item["sourceIds"]) >= 1 for item in long_cards)
+    assert all(item["sourceIds"] == [] for item in long_cards)  # promotion cannot invent source evidence
     assert all(item["subject"] == "用户" for item in long_cards)
     assert all(item["predicate"] == "practice.rest" for item in long_cards)
     assert all(item["timezone"] == "Asia/Shanghai" for item in long_cards)

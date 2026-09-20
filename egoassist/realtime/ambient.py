@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any, Callable
 from uuid import uuid4
 
-from egoassist.product.contracts import AmbientFrameContext
+from egoassist.core.contracts import AmbientFrameContext
 from egoassist.realtime.task import bounded_text
 
 

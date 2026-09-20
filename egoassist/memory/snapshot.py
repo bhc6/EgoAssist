@@ -26,7 +26,6 @@ def save_memory(
 
 
 def _save_memory(memory, directory, *, provenance=None) -> Path:
-    from PIL import Image
 
     root = Path(directory)
     frames_root = root / "frames"

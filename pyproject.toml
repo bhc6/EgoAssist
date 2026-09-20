@@ -25,13 +25,11 @@ dependencies = [
     "pydantic>=2.13,<3",
     "SQLAlchemy>=2.0,<3",
     "alembic>=1.18,<2",
-    # LiveKit Agents 1.6.x currently resolves against the 1.39 OTel line.
     "opentelemetry-api>=1.39,<1.40",
     "opentelemetry-sdk>=1.39,<1.40",
     "temporalio>=1.31,<2",
     "livekit==1.1.13",
     "livekit-api==1.2.0",
-    "livekit-agents==1.6.7",
     "protobuf>=6.33,<7",
 ]
 
@@ -45,6 +43,8 @@ gpu = [
     "opencv-python>=4.9", "faiss-cpu>=1.8", "sentencepiece",
 ]
 dev = ["pytest>=8"]
+modular = ["webrtcvad-wheels>=2.0.14,<3"]
+egolife = ["srt>=3.5,<4"]
 perception = ["sherpa-onnx==1.13.7", "av>=14"]
 
 [project.scripts]

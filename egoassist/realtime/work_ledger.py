@@ -8,7 +8,8 @@ from dataclasses import dataclass
 from uuid import uuid4
 from datetime import datetime, timezone
 
-from .context_harness import SessionJournal
+from egoassist.core.journal import SessionJournal
+from egoassist.core.events import latest
 
 
 TURN_OPEN_STATUSES = {"received", "deferred", "classifying", "ready", "processing"}
@@ -53,17 +54,17 @@ class ExecutionEnvelope:
 
 
 def _latest_by_id(
-    entries: list[dict[str, Any]],
+    journal: SessionJournal,
     create_type: str,
     state_type: str,
     id_key: str,
+    limit=None,
 ) -> dict[str, dict[str, Any]]:
-    values: dict[str, dict[str, Any]] = {}
-    for entry in entries:
+    def reduce(values, entry):
         entry_type = entry.get("type")
         identifier = str(entry.get(id_key, ""))
         if not identifier:
-            continue
+            return
         if entry_type == create_type:
             values.setdefault(identifier, dict(entry))
         elif entry_type == state_type and identifier in values:
@@ -73,7 +74,10 @@ def _latest_by_id(
                 "stateEntryId": entry.get("id"),
                 "detail": dict(entry.get("detail") or {}),
             })
-    return values
+    def select(values):
+        from itertools import islice
+        return {key: values[key] for key in reversed(list(islice(reversed(values), limit)))} if limit is not None else values
+    return journal.project(("ledger", create_type, state_type, id_key), dict, reduce, select=select)
 
 
 class CaseWorkLedger:
@@ -120,19 +124,24 @@ class CaseWorkLedger:
         return entry
 
     def ensure_turn_message(self, turn_id: str, text: str, *, source: str) -> dict[str, Any]:
+        def collect(state, row):
+            if row.get("type") == "turn_inbox":
+                state[str(row["turnId"])] = row["timestamp"]
+        source_times = self.journal.project("turn-source-times-v1", dict, collect)
         return self.journal.append_message(
             "user",
             str(text).strip(),
             source=str(source),
             idempotency_key=f"user:{turn_id}",
-            metadata={"trust": "untrusted-user-data", "turnId": str(turn_id)},
+            metadata={"trust": "untrusted-user-data", "turnId": str(turn_id),
+                      "sourceRecordedAt": source_times.get(str(turn_id))},
         )
 
     def turn_message(self, turn_id: str) -> dict[str, Any] | None:
         """Return the durable user message associated with a captured turn."""
         target = str(turn_id)
         return next((
-            dict(entry) for entry in reversed(self.journal.entries())
+            dict(entry) for entry in reversed(self.journal.entries(types={"message"}))
             if entry.get("type") == "message"
             and (entry.get("message") or {}).get("role") == "user"
             and str(
@@ -158,11 +167,11 @@ class CaseWorkLedger:
             "turnId": str(turn_id), "status": status, "detail": dict(detail or {}),
         })
 
-    def turns(self) -> dict[str, dict[str, Any]]:
+    def turns(self, *, limit=None) -> dict[str, dict[str, Any]]:
         values = _latest_by_id(
-            self.journal.entries(), "turn_inbox", "turn_inbox_state", "turnId",
+            self.journal, "turn_inbox", "turn_inbox_state", "turnId", limit=limit,
         )
-        for entry in self.journal.entries():
+        for entry in latest(self.journal, "turn_revision", "supersedesTurnId").values():
             if entry.get("type") != "turn_revision":
                 continue
             old_id = str(entry.get("supersedesTurnId", ""))
@@ -274,13 +283,13 @@ class CaseWorkLedger:
 
     def intents(self) -> dict[str, dict[str, Any]]:
         values = _latest_by_id(
-            self.journal.entries(), "intent_envelope", "intent_state", "intentId",
+            self.journal, "intent_envelope", "intent_state", "intentId",
         )
         for item in values.values():
             initial_turn = str(item.get("turnId", ""))
             if initial_turn:
                 item["turnIds"] = [initial_turn]
-        for entry in self.journal.entries():
+        for entry in self.journal.entries(types={"intent_turn_link"}):
             if entry.get("type") != "intent_turn_link":
                 continue
             intent_id = str(entry.get("intentId", ""))
@@ -371,12 +380,12 @@ class CaseWorkLedger:
     def foreground_intent_id(self) -> str | None:
         return next((
             str(entry["intentId"]) if entry.get("intentId") is not None else None
-            for entry in reversed(self.journal.entries())
+            for entry in reversed(self.journal.entries(types={"foreground_focus"}, tail=1))
             if entry.get("type") == "foreground_focus"
         ), None)
 
     def intent_runtime_snapshot(self, intent_id: str) -> dict[str, Any] | None:
-        for entry in reversed(self.journal.entries()):
+        for entry in reversed(self.journal.entries(types={"intent_state"})):
             if entry.get("type") != "intent_state" or str(entry.get("intentId", "")) != str(intent_id):
                 continue
             snapshot = (entry.get("detail") or {}).get("runtimeCheckpoint")
@@ -436,7 +445,7 @@ class CaseWorkLedger:
         })
 
     def jobs(self) -> dict[str, dict[str, Any]]:
-        return _latest_by_id(self.journal.entries(), "job_ledger", "job_state", "jobId")
+        return _latest_by_id(self.journal, "job_ledger", "job_state", "jobId")
 
     def cancel_job(self, job_id: str, *, reason: str = "explicit-user-cancel") -> dict[str, Any]:
         job = self.jobs().get(str(job_id))
@@ -544,7 +553,7 @@ class CaseWorkLedger:
 
     def results(self) -> dict[str, dict[str, Any]]:
         return _latest_by_id(
-            self.journal.entries(), "result_inbox", "result_delivery", "resultId",
+            self.journal, "result_inbox", "result_delivery", "resultId",
         )
 
     def pending_results(self) -> list[dict[str, Any]]:
@@ -588,15 +597,13 @@ class CaseWorkLedger:
                 recovered += 1
         return recovered
 
-    def snapshot(self) -> dict[str, Any]:
-        answers = {}
-        deliveries = {}
-        completed_text = {}
-        decisions = {}
-        responses = {}
-        response_turns = {}
-        turns = self.turns()
-        for entry in self.journal.entries():
+    def snapshot(self, *, limit=None) -> dict[str, Any]:
+        turns = self.turns(limit=limit)
+        def initial():
+            return {name: {} for name in ("answers", "deliveries", "completed_text", "decisions", "responses", "response_turns")}
+        def reduce(state, entry):
+            answers, deliveries, completed_text, decisions, responses, response_turns = (state[name] for name in
+                ("answers", "deliveries", "completed_text", "decisions", "responses", "response_turns"))
             if entry.get("eventType") in {"response.created", "response.finished", "response.first_audio", "response.first_transcript", "response.first_text"} and entry.get("responseId"):
                 responses.setdefault(entry["responseId"], {}).update({entry["eventType"]: entry})
                 origin = entry.get("payload", {}).get("origin", {})
@@ -611,6 +618,22 @@ class CaseWorkLedger:
                 deliveries[entry["turnId"]] = entry
             elif entry.get("type") == "answer.job":
                 answers[entry["turnId"]] = {k: v for k, v in entry.items() if k not in {"instructions", "question", "context", "preparedResult"}}
+        def select(state):
+            if limit is None:
+                return state
+            result = {name: {key: value for key, value in state[name].items() if key in turns}
+                      for name in ("answers", "deliveries", "decisions", "response_turns")}
+            response_ids = {row.get("responseId") for row in result["answers"].values()} | {
+                row.get("responseId") for row in result["response_turns"].values()}
+            result["responses"] = {key: state["responses"][key] for key in response_ids if key in state["responses"]}
+            result["completed_text"] = {key: state["completed_text"][key] for key in response_ids if key in state["completed_text"]}
+            return result
+        projected = self.journal.project("work-display", initial, reduce, select=select)
+        answers, deliveries, completed_text, decisions, responses, response_turns = (projected[name] for name in
+            ("answers", "deliveries", "completed_text", "decisions", "responses", "response_turns"))
+        if limit is not None:
+            turns = dict(list(turns.items())[-limit:])
+            answers = {key: value for key, value in answers.items() if key in turns}
         for answer in answers.values():
             created = response_turns.get(answer["turnId"])
             if answer.get("status") == "foreground" and created:
@@ -627,7 +650,7 @@ class CaseWorkLedger:
                         answer[metric] = round((datetime.fromisoformat(response[event]["timestamp"]) - datetime.fromisoformat(received_at)).total_seconds() * 1000, 1)
                 if answer.get("status") == "completed" and answer.get("channel") == "background-text":
                     answer["inputToCompleteMs"] = round((datetime.fromisoformat(answer["timestamp"]) - datetime.fromisoformat(received_at)).total_seconds() * 1000, 1)
-            if answer.get("status") == "completed" and answer.get("channel") in {"speech", "generated-audio"}:
+            if answer.get("status") == "completed" and answer.get("channel") in {"speech", "generated-audio", "generated-text"}:
                 answer["text"] = completed_text.get(answer.get("responseId"), "")
                 response = responses.get(answer.get("responseId"), {})
                 finished = response.get("response.finished")

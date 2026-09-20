@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 from typing import Any, Mapping
 from uuid import uuid4
 
-from egoassist.product.contracts import (
+from egoassist.core.contracts import (
     AmbientFrameContext,
     AmbientObservationHypothesis,
     ObservationEvidence,

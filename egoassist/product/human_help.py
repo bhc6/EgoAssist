@@ -9,7 +9,7 @@ from urllib.parse import urlsplit
 
 import aiohttp
 
-from .contracts import HumanHelpReceipt, HumanHelpRequest
+from egoassist.core.contracts import HumanHelpReceipt, HumanHelpRequest
 
 
 class WebhookHumanHelpAdapter:

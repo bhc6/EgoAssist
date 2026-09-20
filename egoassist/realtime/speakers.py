@@ -88,29 +88,117 @@ class SpeakerRegistry:
     def __init__(self, journal):
         self.journal = journal
         self.profiles = {}
-        for row in journal.entries():
+        self.merges = []
+        self.contaminated = set()
+        for row in journal.entries(types={'speaker.profile', 'speaker.merge', 'speaker.merge.undo', 'scene.turn'}):
             if row.get("type") == "speaker.profile":
                 self.profiles[row["speakerId"]] = dict(row)
+            elif row.get('type') == 'speaker.merge':
+                self.merges.append(row)
+            elif row.get('type') == 'speaker.merge.undo':
+                self.merges = [m for m in self.merges if m['id'] != row['mergeId']]
+            elif row.get('type') == 'scene.turn':
+                segments = row.get('speaker', {}).get('segments', [])
+                for segment in segments:
+                    if segment.get('method') == 'new-acoustic-profile' and any(
+                        other['cluster'] != segment['cluster'] and max(other['startMs'], segment['startMs']) < min(other['endMs'], segment['endMs'])
+                        for other in segments):
+                        self.contaminated.add(segment['speakerId'])
+
+    def canonical(self, speaker_id):
+        links = {m['sourceId']: m['targetId'] for m in self.merges}
+        seen = set()
+        while speaker_id in links:
+            if speaker_id in seen:
+                raise ValueError('speaker merge cycle')
+            seen.add(speaker_id)
+            speaker_id = links[speaker_id]
+        return speaker_id
+
+    def merge(self, source_id, target_id):
+        if source_id not in self.profiles or target_id not in self.profiles:
+            raise ValueError('请选择有效的声音档案')
+        if source_id != self.canonical(source_id) or target_id != self.canonical(target_id) or source_id == target_id:
+            raise ValueError('请选择两个不同的独立声音档案')
+        self.merges.append(self.journal.append('speaker.merge', {'sourceId': source_id, 'targetId': target_id,
+            'identitySource': 'account-confirmed', 'meaning': '保留目标称呼和身份，原始语音与声纹不删除'}))
+
+    def undo_merge(self, merge_id):
+        if not self.merges or self.merges[-1]['id'] != merge_id:
+            raise ValueError('请从最近一次合并开始撤销')
+        self.journal.append('speaker.merge.undo', {'mergeId': merge_id})
+        self.merges.pop()
 
     def public(self):
-        return [{k: v for k, v in row.items() if k not in {"embedding"}} for row in self.profiles.values()]
+        # Journal insertion order is stable across renames and restarts, including
+        # old profiles which predate readable labels. IDs remain audit keys only.
+        labels = {sid: row.get('name') or f'声音 {index}' for index, (sid, row) in enumerate(self.profiles.items(), 1)}
+        result = []
+        for sid, row in self.profiles.items():
+            if self.canonical(sid) != sid:
+                continue
+            members = [key for key in self.profiles if self.canonical(key) == sid]
+            result.append({**{k: v for k, v in row.items() if k != 'embedding'}, 'displayName': labels[sid],
+                           'memberIds': members, 'memberNames': [labels[key] for key in members],
+                           'matchingEligible': any(key not in self.contaminated for key in members),
+                           'excludedSampleCount': sum(key in self.contaminated for key in members)})
+        return result
+
+    def merge_state(self):
+        suggestions = []
+        rows = self.public()[:100]
+        for index, left in enumerate(rows):
+            for right in rows[index + 1:]:
+                score = max(float(np.dot(self.profiles[a]['embedding'], self.profiles[b]['embedding']))
+                            for a in left['memberIds'] for b in right['memberIds'])
+                if score >= .75:
+                    suggestions.append({'sourceId': left['speakerId'], 'targetId': right['speakerId'],
+                                        'similarity': round(score, 4), 'claim': 'similarity-not-identity'})
+        return {'suggestions': sorted(suggestions, key=lambda s: -s['similarity'])[:12],
+                'latestMerge': self.merges[-1] if self.merges else None,
+                'suggestionScope': 'first-100-active-profiles'}
 
     def match(self, analysis):
         result = {**analysis, "segments": []}
+        if not analysis.get("segments"):
+            return {**result, "status": analysis.get("status") if analysis.get("status") in {"unknown", "unavailable"} else "unknown",
+                    "speakerId": None, "wearer": False, "name": None}
         matched_clusters = {}
         threshold = float(os.getenv("EGOASSIST_SPEAKER_MATCH_THRESHOLD", "0.65"))
         for segment in analysis.get("segments", []):
+            # A mono crop containing simultaneous clusters is a mixture, not an
+            # isolated person's voice. It must not enroll or identify anyone.
+            if any(other["cluster"] != segment["cluster"]
+                   and max(other["startMs"], segment["startMs"]) < min(other["endMs"], segment["endMs"])
+                   for other in analysis["segments"]):
+                result["segments"].append({k: v for k, v in segment.items() if k != "embedding"} | {
+                    "speakerId": None, "name": None, "wearer": False, "method": "overlapping-speech",
+                    "reason": "Mono overlap cannot provide an isolated speaker embedding",
+                    "claim": "Acoustic hypothesis; not authentication or proof of personal identity"})
+                continue
             vector = segment["embedding"]
             occupied = {sid for cluster, sid in matched_clusters.items() if cluster != segment["cluster"]}
-            scores = sorted(((float(np.dot(vector, p["embedding"])), sid) for sid, p in self.profiles.items()
-                             if sid not in occupied), reverse=True)
+            grouped = {}
+            for sid, profile in self.profiles.items():
+                if sid in self.contaminated:
+                    continue
+                root = self.canonical(sid)
+                grouped[root] = max(grouped.get(root, -1), float(np.dot(vector, profile['embedding'])))
+            all_scores = sorted(((score, sid) for sid, score in grouped.items()), reverse=True)
+            scores = [score for score in all_scores if score[1] not in occupied]
             best = scores[0] if scores else (0, None)
             margin = best[0] - (scores[1][0] if len(scores) > 1 else 0)
             speaker_id = matched_clusters.get(segment["cluster"])
             method = "within-clip-cluster" if speaker_id else "unknown"
-            if not speaker_id and best[0] >= threshold and margin >= 0.08:
+            conflict = any(sid in occupied and score >= threshold - 0.15 and score >= best[0] - 0.08
+                           for score, sid in all_scores)
+            if not speaker_id and conflict:
+                method = "cluster-conflict"
+            elif not speaker_id and best[0] >= threshold and margin >= 0.08:
                 speaker_id, method = best[1], "acoustic-match"
-            elif not speaker_id and (not scores or best[0] < threshold - 0.15):
+            elif not speaker_id and any(sid in occupied and score >= threshold - 0.15 for score, sid in all_scores):
+                method = "cluster-conflict"
+            elif not speaker_id and (not all_scores or all_scores[0][0] < threshold - 0.15):
                 speaker_id, method = "speaker-" + uuid4().hex[:12], "new-acoustic-profile"
                 self.profiles[speaker_id] = self.journal.append("speaker.profile", {
                     "speakerId": speaker_id, "embedding": vector, "name": None, "wearer": False,
@@ -132,6 +220,7 @@ class SpeakerRegistry:
         return result
 
     def confirm(self, speaker_id, *, name, wearer=False, person_ref=None):
+        speaker_id = self.canonical(speaker_id)
         if speaker_id not in self.profiles:
             raise ValueError("unknown speaker")
         if not isinstance(name, str) or not name.strip() or len(name) > 80 or type(wearer) is not bool:

@@ -2,7 +2,7 @@ import asyncio
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 
-from egoassist.product.answer_jobs import AnswerJobs, answer_jobs
+from egoassist.product.answer_jobs import AnswerJobs, answer_jobs, answer_job_summaries
 from egoassist.realtime import CaseWorkLedger, SessionJournal
 
 
@@ -27,6 +27,19 @@ async def wait_status(journal, turn_id, status):
         while answer_jobs(journal)[turn_id]["status"] != status:
             await asyncio.sleep(0.01)
     return answer_jobs(journal)[turn_id]
+
+
+def test_router_answer_summary_tracks_updates_and_erasure_without_copying_context(tmp_path):
+    journal = SessionJournal(tmp_path / 'summary.jsonl')
+    row = journal.append('answer.job', {'turnId':'one', 'question':'original question', 'status':'foreground',
+        'instructions':'large prompt', 'context':{'media':'large evidence'}})
+    assert answer_job_summaries(journal) == {'one':{'turnId':'one','question':'original question','status':'foreground'}}
+    journal.append('answer.job', {**{k:v for k,v in row.items() if k not in {'id','timestamp'}}, 'status':'cancelled'})
+    assert answer_job_summaries(journal)['one']['status'] == 'cancelled'
+    restored = SessionJournal(journal.path)
+    assert answer_job_summaries(restored) == answer_job_summaries(journal)
+    journal.rewrite(lambda rows:[r for r in rows if r.get('turnId') != 'one'])
+    assert answer_job_summaries(journal) == {}
 
 
 def test_prepare_answer_during_slow_correction_without_publishing_or_regenerating(tmp_path, monkeypatch):

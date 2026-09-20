@@ -31,7 +31,7 @@ async def verify(output):
         async with TestClient(TestServer(app)) as client:
             assert (await client.post("/api/auth/register", json={"username": "interaction",
                 "password": "isolated-interaction-test-123"})).status == 200
-            for case in ("text-continuation", "older-target", "quiet-reconnect"):
+            for case in ("text-continuation", "speech-resume", "older-target", "quiet-reconnect"):
                 row = {"name": case, "passed": False, "events": []}
                 report["cases"].append(row)
                 sid = (await (await client.post("/api/sessions")).json())["session"]["id"]
@@ -60,7 +60,7 @@ async def verify(output):
                 original = await send("请用阿拉伯数字计算七乘八，然后详细解释乘法原理，至少讲二十句话。")
                 row["originalTurnId"] = original
                 await until(lambda e: e.get("type") == "audio" and e.get("origin", {}).get("turnId") == original)
-                if case == "text-continuation":
+                if case in {"text-continuation", "speech-resume"}:
                     control = await send("别念出来，继续整理好后放到屏幕上。")
                     await until(lambda e: e.get("type") == "speech_control" and e.get("turnId") == control)
                     async with asyncio.timeout(60):
@@ -74,6 +74,16 @@ async def verify(output):
                     assert "56" in answer["text"] and answer.get("providerRequestId"), answer
                     assert len([t for t in state["workLedger"]["turnInbox"] if t.get("answer")]) == 1
                     row["answer"] = answer
+                    if case == "speech-resume":
+                        resumed = await send("现在请把刚才七乘八的答案重新读给我听。")
+                        await until(lambda e: e.get("type") == "audio" and e.get("origin", {}).get("turnId") == resumed)
+                        await until(lambda e: e.get("type") == "response_status" and e.get("origin", {}).get("turnId") == resumed and e.get("status") == "completed")
+                        state = await (await client.get("/api/state", params={"session": sid})).json()
+                        row["resumedAnswer"] = next(t for t in state["workLedger"]["turnInbox"] if t["turnId"] == original)["answer"]
+                        assert row["resumedAnswer"]["status"] == "completed"
+                        assert row["resumedAnswer"]["model"] == "qwen-flash"
+                        assert row["resumedAnswer"]["channel"] == "generated-audio"
+                        assert not state["performance"]["timeouts"], state["performance"]
                 elif case == "older-target":
                     newer = await send("另外一个独立问题，请详细解释光合作用，至少讲二十句话。")
                     await until(lambda e: e.get("type") == "audio" and e.get("origin", {}).get("turnId") == newer)

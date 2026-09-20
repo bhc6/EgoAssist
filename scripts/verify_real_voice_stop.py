@@ -6,6 +6,7 @@ physical microphone, echo cancellation, or glasses speaker latency.
 import argparse
 import asyncio
 import base64
+import hashlib
 import io
 import json
 import os
@@ -30,6 +31,17 @@ from verify_real_skill_lifecycle import connect
 from research_interruption_semantics import assess
 
 
+def decode_fixture(wav):
+    with wave.open(io.BytesIO(wav)) as stream:
+        assert stream.getsampwidth() == 2
+        rate, channels = stream.getframerate(), stream.getnchannels()
+        samples = np.frombuffer(stream.readframes(stream.getnframes()), dtype="<i2").reshape(-1, channels).mean(axis=1)
+    pcm = np.interp(np.arange(round(len(samples) * 16000 / rate)) * rate / 16000,
+                    np.arange(len(samples)), samples).astype("<i2").tobytes()
+    return pcm, {"inputRate": rate, "durationMs": len(pcm) / 32,
+                 "pcmSha256": hashlib.sha256(pcm).hexdigest()}
+
+
 async def synthesize(text, output, index, voice="Cherry"):
     import dashscope
     api_key = os.getenv("QWEN_API_KEY") or os.getenv("DASHSCOPE_API_KEY")
@@ -44,21 +56,17 @@ async def synthesize(text, output, index, voice="Cherry"):
             response.raise_for_status()
             wav = await response.read()
     (output / f"input-{index}.wav").write_bytes(wav)
-    with wave.open(io.BytesIO(wav)) as stream:
-        assert stream.getsampwidth() == 2
-        rate, channels = stream.getframerate(), stream.getnchannels()
-        samples = np.frombuffer(stream.readframes(stream.getnframes()), dtype="<i2").reshape(-1, channels).mean(axis=1)
     # The fixture resampler only adapts TTS output to the real 16 kHz PCM input.
-    pcm = np.interp(np.arange(round(len(samples) * 16000 / rate)) * rate / 16000,
-                    np.arange(len(samples)), samples).astype("<i2").tobytes()
-    return pcm, {"requestId": payload.get("request_id"), "usage": payload.get("usage"),
-                 "inputRate": rate, "durationMs": len(pcm) / 32}
+    pcm, metadata = decode_fixture(wav)
+    return pcm, {"requestId": payload.get("request_id"), "usage": payload.get("usage"), **metadata}
 
 
-async def verify(output, text_only=False):
+async def verify(output, text_only=False, fixture_dir=None):
     load_env(str(ROOT / ".env"))
     output.mkdir(parents=True, exist_ok=False)
-    report = {"passed": False, "mock": False, "hardwareMeasured": False, "semantic": [], "audio": []}
+    report = {"passed": False, "mock": False, "hardwareMeasured": False, "semantic": [], "audio": [],
+              "backend": os.getenv("EGOASSIST_REALTIME_BACKEND", "omni"),
+              "fixtureDirectory": str(fixture_dir) if fixture_dir else None}
     router = SemanticTurnRouter(os.getenv("QWEN_API_KEY") or os.getenv("DASHSCOPE_API_KEY"))
     try:
         for phrase, stop, cancel in [
@@ -85,7 +93,10 @@ async def verify(output, text_only=False):
         if not text_only:
             phrases = [("闭嘴。", False), ("让我安静一会儿，先别出声。", False),
                        ("这个答案我不需要了，不用继续回答。", True)]
-            fixtures = [await synthesize(text, output, index) for index, (text, _) in enumerate(phrases)]
+            if fixture_dir:
+                fixtures = [decode_fixture((fixture_dir / f"input-{index}.wav").read_bytes()) for index in range(len(phrases))]
+            else:
+                fixtures = [await synthesize(text, output, index) for index, (text, _) in enumerate(phrases)]
             app = create_app(str(BUILTIN_SKILLS_ROOT), None, str(output / "runtime.json"),
                              "qwen3.5-omni-flash-realtime", "Ethan")
             async with TestClient(TestServer(app)) as client:
@@ -169,5 +180,6 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--text-only", action="store_true")
+    parser.add_argument("--fixture-dir", type=Path, help="Replay existing input-0/1/2.wav fixtures identically across backends")
     args = parser.parse_args()
-    raise SystemExit(0 if asyncio.run(verify(args.output, args.text_only)) else 1)
+    raise SystemExit(0 if asyncio.run(verify(args.output, args.text_only, args.fixture_dir)) else 1)

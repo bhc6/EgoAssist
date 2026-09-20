@@ -92,8 +92,8 @@ async def compare(args):
             vectors = np.asarray(vectors, dtype=np.float32)
             return vectors / np.maximum(np.linalg.norm(vectors, axis=1, keepdims=True), 1e-8)
 
-        texts = [json.dumps(r, ensure_ascii=False) for r in records]
-        queries = [json.dumps({"question": q["question"], "target": q["target"]}) for q in questions]
+        texts = [json.dumps({"sourceId": r["sourceId"], "text": r["text"]}, ensure_ascii=False) for r in records]
+        queries = [q["question"] for q in questions]
         started = time.perf_counter()
         vectors = await embed(texts, "document")
         embedding_write_ms = (time.perf_counter() - started) * 1000
@@ -148,7 +148,7 @@ async def compare(args):
                 retrieve_ms = (time.perf_counter() - started) * 1000
                 messages = [{"role": "system", "content": prompt_text("memory_comparison/answer")},
                             {"role": "user", "content": json.dumps({"question": question["question"],
-                             "target": question["target"], "evidence": evidence}, ensure_ascii=False)}]
+                             "evidence": [{"sourceId": r["sourceId"], "text": r["text"]} for r in evidence]}, ensure_ascii=False)}]
                 row = {"mode": mode, "questionIndex": qi, **question, "sourceRecall": question["goldSourceId"] in {r["sourceId"] for r in evidence},
                        "evidenceIds": [r["sourceId"] for r in evidence], "evidenceChars": used,
                        "retrievalMs": round(retrieve_ms, 3)}

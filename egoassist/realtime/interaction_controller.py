@@ -25,9 +25,10 @@ async def apply_interaction(semantic, turn_id, turn_sequence, *, owner, interact
         if semantic.get("speechControl"):
             control["quiet"] = {"mode": "set", "allowReplies": True}
     current = turn_sequence == owner.latest_input_sequence
+    turns = CaseWorkLedger(harness.journal).turns()
     if current:
         interaction_state.apply(control, turn_id,
-            timestamp=CaseWorkLedger(harness.journal).turns()[turn_id]["timestamp"])
+            timestamp=turns[turn_id]["timestamp"])
     target = control.get("targetTurnId")
     action = control["action"]
     answers = answer_jobs(harness.journal)
@@ -77,11 +78,14 @@ async def apply_interaction(semantic, turn_id, turn_sequence, *, owner, interact
                 bridge.cancel_response(drop_queued_below=101, reason="resume-without-audio-cache")
                 answer_executor.resume(user_id, harness.journal, resume_target)
                 original = answers[resume_target]
+                text_input = any(turns.get(key, {}).get("source") == "explicit-control"
+                                 for key in (turn_id, resume_target))
                 request_bridge_response(bridge, prompt_text("interaction/resume") + "\n" + json.dumps({
                     "question": original["question"], "context": original.get("context"),
                     "playback": interaction_state.playback_context()}, ensure_ascii=False),
                     priority=100, reason="resume-original-answer", origin={"turnId": turn_id,
-                    "answerObligation": resume_target, "generation": owner.output_generation})
+                    "answerObligation": resume_target, "generation": owner.output_generation,
+                    "inputChannel": "explicit-control" if text_input else "microphone"})
         else:
             bridge.cancel_response(drop_queued_below=101, reason="semantic-stop-speaking" if semantic.get("speechControl") else "semantic-interaction-control")
             if action == "uncertain":

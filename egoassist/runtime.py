@@ -6,7 +6,7 @@ derives knowledge. This module joins their snapshots without awaiting their work
 from copy import deepcopy
 from datetime import datetime, timezone
 
-from egoassist.realtime.settings import integer
+from egoassist.core.settings import integer
 from egoassist.realtime.observation_reviews import ObservationReviews
 
 
@@ -24,20 +24,26 @@ class ThreeLaneRuntime:
     def observation_references(self, timeline, *, task=None):
         limit = integer("EGOASSIST_OBSERVATION_REFERENCE_LIMIT", 4, maximum=32)
         text_limit = integer("EGOASSIST_OBSERVATION_REFERENCE_CHARS", 1000, maximum=16000)
-        messages = [row for row in self.journal.entries()
-                    if row.get("type") == "message" and row.get("message", {}).get("role") == "user"]
+        def recent_users(state, row):
+            if row.get("type") == "message" and row.get("message", {}).get("role") == "user":
+                state["count"] += 1
+                state["rows"].append(row)
+                del state["rows"][:-limit]
+        user_history = self.journal.project(("observation-users", limit), lambda: {"count": 0, "rows": []}, recent_users)
+        messages = user_history["rows"]
         cards = timeline.cards(user_id=self.user_id, case_id=self.session_id, limit=limit)
         pending = timeline.pending_draft(user_id=self.user_id, case_id=self.session_id)
         self.reviews.reconcile(pending)
         return deepcopy({
             "basis": "historical-references-not-current-visual-evidence",
-            "limit": limit, "textLimit": text_limit, "totalUserMessages": len(messages),
-            "userMessages": [{"sourceId": row["id"], "referenceId": "u" + str(index + 1), "recordedAt": row["timestamp"],
+            "limit": limit, "textLimit": text_limit, "totalUserMessages": user_history["count"],
+            "userMessages": [{"sourceId": row["id"], "referenceId": "u" + str(index + 1), "recordedAt": (row.get("metadata") or {}).get("sourceRecordedAt") or row["timestamp"],
                               "text": str(row["message"]["content"])[:text_limit],
                               "truncated": len(str(row["message"]["content"])) > text_limit}
                              for index, row in enumerate(messages[-limit:])],
             "memory": [{**{key: card.get(key) for key in
-                        ("id", "text", "kind", "scope", "subject", "predicate", "sourceIds", "happenedAt", "recordedAt")},
+                        ("id", "text", "kind", "scope", "subject", "predicate", "sourceIds", "happenedAt", "recordedAt",
+                         "effectiveAt", "effectiveEnd", "timezone", "grounding")},
                         "referenceId": "m" + str(index + 1),
                         "frame": card.get("metadata", {}).get("evidenceContext", {}).get("frame")}
                        for index, card in enumerate(cards)],
@@ -50,8 +56,8 @@ class ThreeLaneRuntime:
 
     def snapshot(self, *, observation, scheduler, pending_inputs=0, classifying=0,
                  consolidating=False, memory_enabled=True):
-        jobs, latest_observation, phases = {}, None, {}
-        for row in self.journal.entries():
+        def reduce(state, row):
+            jobs, phases = state["jobs"], state["phases"]
             kind = row.get("type")
             if kind == "turn.progress":
                 phases[row["turnId"]] = row
@@ -62,8 +68,11 @@ class ThreeLaneRuntime:
             if kind == "answer.job" and row.get("status") in {"completed", "failed", "cancelled", "paused"}:
                 phases.pop(row["turnId"], None)
             if kind == "ambient_observation" and row.get("status") == "accepted":
-                if latest_observation is None or str(row.get("frame_captured_at", "")) >= str(latest_observation.get("frame_captured_at", "")):
-                    latest_observation = row
+                previous = state["observation"]
+                if previous is None or str(row.get("frame_captured_at", "")) >= str(previous.get("frame_captured_at", "")):
+                    state["observation"] = row
+        projected = self.journal.project("three-lanes", lambda: {"jobs": {}, "phases": {}, "observation": None}, reduce)
+        jobs, phases, latest_observation = projected["jobs"], projected["phases"], projected["observation"]
         memory_jobs = [row for (kind, _), row in jobs.items() if kind != "answer.job"]
         answer_jobs = [row for (kind, _), row in jobs.items() if kind == "answer.job"]
         evidence = (latest_observation or {}).get("evidence") or {}

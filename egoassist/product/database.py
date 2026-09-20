@@ -12,7 +12,7 @@ from sqlalchemy import create_engine, select, delete as sql_delete
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, sessionmaker
 
-from egoassist.realtime.context_harness import SessionJournal
+from egoassist.core.journal import SessionJournal
 
 from .models import (
     Base,
@@ -26,7 +26,7 @@ from .models import (
     JobAttemptRow, ArtifactRow, DeliveryAttemptRow, MemoryCardRow, MemoryDraftRow,
     AuditEventRow,
 )
-from .contracts import ObservationEvidence
+from egoassist.core.contracts import ObservationEvidence
 
 
 def _timestamp(value: Any) -> datetime:
@@ -52,7 +52,7 @@ class ProductDatabase:
         self.engine: Engine = create_engine(raw, future=True, connect_args=connect_args)
         self.session_factory = sessionmaker(self.engine, expire_on_commit=False, class_=Session)
         self._projection_lock = threading.RLock()
-        self._journal_projections: dict[tuple[str, str, str], tuple[int, str | None, dict[str, int]]] = {}
+        self._journal_projections: dict[tuple[str, str, str], tuple[Any, dict[str, int]]] = {}
 
     def create_schema(self) -> None:
         Base.metadata.create_all(self.engine)
@@ -158,6 +158,8 @@ class ProductDatabase:
         return counts
 
     def set_retention_policy(self, user_id: str, category: str, retention_days: int, *, deletion_mode: str = "hard-delete") -> dict[str, Any]:
+        if category not in {"transcript", "observation", "operational", "memory"} or deletion_mode != "hard-delete":
+            raise ValueError("unsupported retention policy")
         if int(retention_days) < 0 or int(retention_days) > 36500:
             raise ValueError("retention_days must be between 0 and 36500")
         self.ensure_user(str(user_id))
@@ -171,9 +173,29 @@ class ProductDatabase:
                 row.retention_days = int(retention_days); row.deletion_mode = str(deletion_mode)
             return self._row_payload(row)
 
-    def retention_policies(self, user_id: str) -> list[dict[str, Any]]:
+    def retention_policies(self, user_id: str | None = None) -> list[dict[str, Any]]:
         with self.session() as session:
-            return [self._row_payload(row) for row in session.scalars(select(RetentionPolicyRow).where(RetentionPolicyRow.user_id == str(user_id)).order_by(RetentionPolicyRow.category))]
+            return [self._row_payload(row) for row in session.scalars(select(RetentionPolicyRow).where(RetentionPolicyRow.user_id == str(user_id) if user_id else True).order_by(RetentionPolicyRow.category))]
+
+    def forget_turns(self, user_id, turn_ids):
+        """Remove dependent projections before their source turn disappears."""
+        if not turn_ids:
+            return
+        with self.session() as session:
+            intents = select(IntentRow.intent_id).where(IntentRow.user_id == user_id, IntentRow.turn_id.in_(turn_ids))
+            jobs = select(JobRow.job_id).where(JobRow.intent_id.in_(intents))
+            results = select(ResultRow.result_id).where(ResultRow.intent_id.in_(intents))
+            for model, criterion in (
+                (DeliveryAttemptRow, DeliveryAttemptRow.result_id.in_(results)),
+                (JobAttemptRow, JobAttemptRow.job_id.in_(jobs)),
+                (TaskPlanRow, TaskPlanRow.intent_id.in_(intents)),
+                (IntentRelationRow, IntentRelationRow.source_intent_id.in_(intents) | IntentRelationRow.target_intent_id.in_(intents)),
+                (ResultRow, ResultRow.intent_id.in_(intents)),
+                (JobRow, JobRow.intent_id.in_(intents)),
+                (IntentRow, IntentRow.intent_id.in_(intents)),
+                (ConversationTurnRow, (ConversationTurnRow.user_id == user_id) & ConversationTurnRow.turn_id.in_(turn_ids)),
+            ):
+                session.execute(sql_delete(model).where(criterion), execution_options={"synchronize_session": False})
 
     def apply_retention(self, *, now: datetime | None = None, user_id: str | None = None) -> dict[str, Any]:
         """Apply configured policies and return bounded deletion evidence."""
@@ -323,20 +345,25 @@ class ProductDatabase:
         source = journal if isinstance(journal, SessionJournal) else SessionJournal(journal)
         key = (str(source.path.resolve()), source.session_id, str(user_id))
         with self._projection_lock:
-            entries = source.entries()
-            offset, leaf, previous = self._journal_projections.get(
-                key, (0, None, {"turns": 0, "intents": 0, "jobs": 0, "results": 0}),
-            )
-            if offset > len(entries) or (offset and entries[offset - 1]["id"] != leaf):
-                offset, previous = 0, {"turns": 0, "intents": 0, "jobs": 0, "results": 0}
-            if key in self._journal_projections and offset == len(entries):
+            cursor, previous = self._journal_projections.get(key, (None, {"turns": 0, "intents": 0, "jobs": 0, "results": 0}))
+            next_cursor, entries, reset = source.read_since(cursor)
+            if reset:
+                previous = {"turns": 0, "intents": 0, "jobs": 0, "results": 0}
+            if cursor and not reset and not entries:
                 return dict(previous)
-            if not offset:
+            if cursor is None or reset:
                 self.create_schema()
                 self.ensure_user(str(user_id), display_name=display_name)
-            counts = self._project_entries(source, entries[offset:], str(user_id), display_name)
+            cutoffs = {p["category"]: datetime.now(timezone.utc) - timedelta(days=p["retention_days"])
+                       for p in self.retention_policies(str(user_id))}
+            erased_turns = {turn for row in entries if row.get("type") == "retention.deleted" for turn in row.get("turnIds", [])}
+            expired_turns = {row["turnId"] for row in entries if row.get("type") == "turn_inbox"
+                             and cutoffs.get("transcript") and _timestamp(row.get("timestamp")) < cutoffs["transcript"]}
+            self.forget_turns(str(user_id), erased_turns | expired_turns)
+            entries = [row for row in entries if row.get("turnId") not in erased_turns | expired_turns]
+            counts = self._project_entries(source, entries, str(user_id), display_name)
             totals = {name: previous[name] + counts[name] for name in previous}
-            self._journal_projections[key] = (len(entries), entries[-1]["id"] if entries else None, totals)
+            self._journal_projections[key] = (next_cursor, totals)
             return dict(totals)
 
     def _project_entries(

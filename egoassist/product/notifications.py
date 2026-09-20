@@ -7,7 +7,7 @@ from typing import Any
 
 import aiohttp
 
-from .contracts import NotificationReceipt, NotificationRequest
+from egoassist.core.contracts import NotificationReceipt, NotificationRequest
 
 
 class NtfyNotificationAdapter:

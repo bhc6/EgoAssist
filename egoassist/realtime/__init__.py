@@ -61,7 +61,7 @@ except ImportError:  # livekit is an optional dependency
     LiveKitSettings = None  # type: ignore[assignment,misc]
 
     def livekit_capability(*_args, **_kwargs) -> dict:  # type: ignore[misc]
-        return {"available": False, "reason": "livekit-agents is not installed."}
+        return {"available": False, "reason": "LiveKit RTC/API dependencies are not installed."}
 from .intent_decomposition import normalize_intent_candidates
 
 __all__ = [

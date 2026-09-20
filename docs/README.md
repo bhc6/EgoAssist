@@ -1,40 +1,34 @@
 # 文档导航
 
-## 当前说明
+## 当前使用
 
-- [三链路主架构](../ARCHITECTURE.md)：核心职责、双向影响、执行边界与代码归属。
-- [跨链路闭环验收](CROSS_LANE_REVIEW_2026-09-10.md)：来源校验、主动澄清、记忆纠正、刷新去重和真实并发延迟。
-- [观察、交互与记忆独立运行](OBSERVATION_LANES_2026-09-10.md)：独立视觉调度、历史背景与问题快照、真实并行测量及限制。
-- [视频事件分割调研](STREAMING_VIDEO_EVENTS_RESEARCH_2026-09-10.md)：流式边界、动作与重要性提取、硬件成本、当前差距及对照实验。
-- [硬编码改造验收](HARDCODING_REFACTOR_2026-09-10.md)：八项整改、后台记忆恢复、多轮工具、真实语音与尾延迟。
+- [项目启动与配置](../README.md)：唯一应用入口 `run_egoassist.py`。
+- [三链路架构](../ARCHITECTURE.md)。
+- [完整记忆链路与机制](../MEMORY_ARCHITECTURE.md)（2026-09-20 源码核对）：原文索引与 Timeline 双路径、写入/检索/回答注入、时间与人物约束、后台恢复、长事件、日记，以及开关与删除的实际范围。
+- [个人日记](DIARY_IMPLEMENTATION_2026-09-17.md)：独立日、周、月归档；同一服务共用账户与登录状态，页面为 `/diary.html`。
+- [原始证据与历史问答](SOURCE_EVIDENCE_ARCHITECTURE_2026-09-17.md)：原文持久化、独立历史导入、FTS 检索、共享证据包。
+- [删除、快照与统计修复](SOURCE_EVIDENCE_LIFECYCLE_FIX_2026-09-17.md)：回归与真实链路记录；可回答题证据召回 72.82%，尚未达到 80% 目标。
+- [开发约束](../CONTRIBUTING.md)、[提示词维护](../egoassist/prompts/README.md)、[安全说明](../SECURITY.md)。
 
-- [项目 README](../README.md)：启动、能力、配置、验证和部署。
-- [记忆机制](../MEMORY_ARCHITECTURE.md)：实际数据流、时间语义、报告与失效模式。
-- [提示词](../egoassist/prompts/README.md)：模板与真实模型请求审计。
-- [代码审查](CODE_REVIEW_2026-09-09.md)：本轮检查范围、修复、剩余风险与验证。
-- [自然打断实现与验收](INTERACTION_IMPLEMENTATION_2026-09-09.md)：本地停播、输出权限、原答续播、真实 Qwen 证据。
-- [工具链路验收](TOOL_USE_2026-09-10.md)：默认自动执行、原问题绑定、真实工具 API、前端凭据和失败记录。
-- [开放观测验收](OPEN_OBSERVATION_2026-09-10.md)：移除默认行为与地点白名单，静默记忆、原始采样证据及视觉报告。
+## 当前选择
 
-## 架构决策
+| 场景 | 推荐入口或实现 | 选择依据 |
+| --- | --- | --- |
+| 日常语音、摄像头与工具 | 主控制台 `/`，默认 Omni | 现有端到端路径；模块化后端仍作为可选方案 |
+| 个人日记、周/月回顾 | `/diary.html`，`egoassist/diary/` | 账户级持久归档、分层压缩、来源引用和恢复 |
+| 历史原文导入与文字问答 | `/api/history/*` | 原文可检索性不依赖结构化抽取成功 |
+| 实时记忆卡片、当前建议 | 现有 Timeline 和 `/api/insights` | 仍有实际调用和持久任务，尚未被新证据服务完整替代 |
 
-| 文档 | 主题 |
-| --- | --- |
-| [ADR 003](ADR_003_LIVEKIT_AND_MULTI_INTENT.md) | 媒体传输与多意图工作账本 |
-| [ADR 004](ADR_004_ARTIFACTS_AND_HUMAN_HELP.md) | 资料与人工求助 |
-| [ADR 005](ADR_005_CHECKPOINT_BOUND_PERCEPTION.md) | 绑定检查点的观察证据 |
-| [ADR 006](ADR_006_PRIVACY_EVALUATION_GOVERNANCE.md) | 隐私与评价治理 |
-| [ADR 007](ADR_007_AMBIENT_OBSERVATION.md) | 无任务观察授权与边界 |
+尚无实验证据支持一个方案在所有场景最优。原生历史协议、实时语音、视觉回看分别验收，不用不同协议的分数替换默认方案。
 
-## 历史研究与验收
+常规使用无需选择架构：上述推荐方案均已作为默认启用。主导航优先展示个人日记；原报告页以“当前建议”为入口并默认选择建议，日/周/月回顾使用独立日记。其他后端、旧报告和研究配置需要显式选择。
 
-日期文档描述当次代码、提示词和实验，不自动随代码更新。旧测试数量、默认参数和延迟不能视为当前值；失败证据继续保留。
+## 演示与研究
 
-- [记忆机制对比](MEMORY_MECHANISM_COMPARISON_2026-09-09.md)
-- [人际交流与时间记忆](SOCIAL_TEMPORAL_MEMORY_2026-09-09.md)
-- [Skill 结构](SKILLS_ARCHITECTURE_2026-09-09.md)、[生命周期](SKILL_LIFECYCLE_VALIDATION_2026-09-09.md)
-- [记忆和 Skill 延迟](MEMORY_SKILLS_VALIDATION_2026-09-09.md)
-- [早期真实验收](REAL_VALIDATION_2026-09-08.md)、[延迟分析](LATENCY_VALIDATION_2026-09-08.md)
-- [归档证据](validation/)、[相关工作](RELATED_WORK.md)、[早期项目设想](PROJECT_CHARTER_2026.md)
+- [最新 EgoLife 原文证据复测](EGOLIFE_SOURCE_RETEST_2026-09-17.md)：30 题、180 次真实回答；新路径 32.22%，本轮旧路径 28.89%，尚未证明稳定提升。
+- [个人日记真实演示](DIARY_IMPLEMENTATION_2026-09-17.md)、[历史视觉修复演示](EGOLIFE_HISTORY_FIX_2026-09-16.md)。
+- [生活化多轮录屏](NATURAL_STORY_VIDEOS_2026-09-16.md)、[EgoLifeQA 长录屏](EGOLIFE_LONG_VIDEO_2026-09-16.md)：录屏保留真实回答与失败，不能作为全量质量保证。
+- [完整历史与实验索引](HISTORY.md)：旧评测、对照方案、原始证据与复现命令集中在此；不再混作当前使用指南。
+- [本轮整理记录](WORKSPACE_CLEANUP_2026-09-17.md)：删除范围、保留依据和后续清理方式。
 
-`outputs/` 不提交 Git，其中产物不一定随克隆获得。重新运行脚本会生成新的证据目录，不应覆盖已有归档。
+历史文件位置保持稳定，已有录屏及证据链接继续可用。`outputs/` 不提交 Git，克隆后不保证包含本地演示产物。

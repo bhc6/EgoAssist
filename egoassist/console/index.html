@@ -28,8 +28,9 @@
     <div class="brand"><b>EgoAssist</b><span>智能眼镜助手</span></div>
     <nav class="workspace-nav" aria-label="主导航">
       <a href="#/conversation" aria-current="page">对话与记忆</a>
-      <a href="#/reports">报告</a>
+      <a href="diary.html" target="_blank" rel="noopener">个人日记</a>
       <a href="#/tasks">任务</a>
+      <a href="#/reports">当前建议</a>
       <a href="#/audit">运行审计</a>
     </nav>
     <div class="identity-controls">
@@ -71,8 +72,9 @@
         <div class="device-actions">
           <button id="realtimeButton" class="primary">开始语音对话</button>
           <button id="cameraButton" title="仅管理摄像头与麦克风设备">启用设备</button>
+          <label class="camera-mirror"><input id="microphoneEnabled" type="checkbox" checked>麦克风</label>
           <label class="camera-mirror" title="开启时预览和模型输入同时左右翻转；第一视角智能眼镜应关闭"><input id="mirrorCamera" type="checkbox" checked>镜像</label>
-          <label>FPS<select id="videoFps"><option>1</option><option selected>2</option><option>4</option></select></label>
+          <label>FPS<select id="videoFps"><option>1</option><option>2</option><option selected>4</option></select></label>
         </div>
         <form id="textTurnForm" class="text-turn-form">
           <label for="textTurnInput">文字对话</label>
@@ -85,7 +87,11 @@
           <article><span>现场语音转写</span><p id="transcript">等待语音</p></article>
           <article id="assistantCaption"><span>助手正在说</span><p>等待语音输出</p></article>
         </div>
-        <h2 class="history-heading">对话记录</h2><div id="turnHistory" aria-label="全部对话记录" tabindex="0"></div>
+        <h2 class="history-heading">对话记录</h2>
+        <p><button id="olderConversation" type="button" hidden>加载更早记录</button> <small id="conversationCount"></small></p>
+        <p id="conversationError" role="status"></p>
+        <div id="turnHistory" aria-label="对话记录，可加载更早消息" tabindex="0"></div>
+        <details><summary>最近问题的处理状态</summary><div id="turnWorkHistory"></div></details>
       </aside>
 
       <section class="memory-workspace panel" aria-labelledby="memoryTitle">
@@ -151,9 +157,9 @@
     </div>
 
     <section data-view="reports" hidden class="insights-panel panel" aria-labelledby="insightTitle">
-      <div class="panel-head"><h2 id="insightTitle">记录报告与建议</h2><span id="insightStatus" role="status"></span></div>
+      <div class="panel-head"><h2 id="insightTitle">当前建议与报告记录</h2><span id="insightStatus" role="status"></span></div>
       <form id="insightForm" class="insight-controls">
-        <label>周期<select id="insightKind"><option value="daily">日报</option><option value="weekly">周报</option><option value="monthly">月报</option><option value="suggestions">当前建议</option></select></label>
+        <label>内容<select id="insightKind"><option value="suggestions" selected>当前建议</option><option value="daily">日报</option><option value="weekly">周报</option><option value="monthly">月报</option></select></label>
         <label>日期<input id="insightDate" type="date" required></label>
         <label>来源范围<select id="insightScope"><option value="case">当前会话</option><option value="account">我的全部会话</option></select></label>
         <button id="insightGenerate" type="submit">生成</button>
@@ -163,6 +169,12 @@
       <section><h3 id="insightResultTitle">尚未选择报告</h3><div id="insightResults" aria-live="polite"></div></section></div>
     </section>
 
+    <section data-view="conversation" class="shared-scene-band" aria-labelledby="longEventTitle">
+      <h2 id="longEventTitle">事件回顾</h2>
+      <div id="longEventActions"><button type="button" data-event-action="refresh">整理已有记录 / 重试</button>
+        <button type="button" data-event-action="rebuild">从原始证据重新整理</button><span id="longEventStatus" role="status"></span></div>
+      <div id="longEvents"></div>
+    </section>
     <section data-view="conversation" class="shared-scene-band" aria-labelledby="sharedSceneTitle">
       <div class="panel-head"><h2 id="sharedSceneTitle">共享现场与说话人</h2><span id="sharedSceneStatus">等待音视频</span></div>
       <div class="shared-scene-grid">
@@ -170,10 +182,15 @@
         <div><div id="sharedSpeakers"></div>
           <form id="speakerIdentityForm" class="speaker-identity-form">
             <label>声音<select id="speakerIdentitySelect" required></select></label>
-            <label>姓名<input id="speakerIdentityName" maxlength="80" required></label>
+            <label>称呼<input id="speakerIdentityName" placeholder="例如：我、妈妈、同事小王" maxlength="80" required></label>
             <label>画面人物<select id="speakerPersonRef"><option value="">未关联</option></select></label>
             <label><input id="speakerIsWearer" type="checkbox">这是我的声音</label>
             <button type="submit">确认身份</button><span id="speakerIdentityStatus" role="status"></span>
+          </form>
+          <form id="speakerMergeForm" class="speaker-identity-form">
+            <label>要归并的声音<select id="speakerMergeSource" required></select></label>
+            <label>保留称呼与身份<select id="speakerMergeTarget" required></select></label>
+            <button type="submit">确认同一人并合并</button><span id="speakerMergeStatus" role="status"></span>
           </form>
         </div>
       </div>
@@ -250,12 +267,14 @@
   <script src="vendor/vad/ort.wasm.min.js"></script>
   <script src="vendor/vad/bundle.min.js"></script>
   <script src="local_vad.js?v=20260909"></script>
-  <script src="shared_scene.js?v=20260909"></script>
+  <script src="long_events.js?v=20260918"></script>
+  <script src="shared_scene.js?v=20260918-speaker-merge"></script>
   <script src="workspace.js?v=20260909"></script>
   <script src="memory_view.js?v=20260909"></script>
-  <script src="workflow.js?v=20260909-workspace"></script>
+  <script src="workflow.js?v=20260918-speakers"></script>
   <script src="request.js?v=20260910"></script>
   <script src="tool_activity.js?v=20260910"></script>
   <script src="app.js?v=20260910"></script>
+  <script src="conversation_history.js?v=20260918"></script>
 </body>
 </html>

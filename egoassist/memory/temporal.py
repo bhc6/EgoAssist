@@ -17,6 +17,46 @@ _DATE_ISO = re.compile(r"(?<!\d)(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})(?!\d)")
 _DATE_CJK = re.compile(r"(?:(\d{4})年)?(\d{1,2})月(\d{1,2})日")
 _CLOCK = re.compile(r"(?<!\d)(\d{1,2})(?::(\d{1,2})|点(?:(\d{1,2})分?)?)(?!\d)")
 _CJK_CLOCK = re.compile(r"([零〇一二两三四五六七八九十]{1,3})点(?:([零〇一二两三四五六七八九十]{1,3})分?)?")
+_DAY_OFFSETS = {
+    "大前天": -3, "前天": -2, "昨天": -1, "昨日": -1, "昨晚": -1,
+    "今天": 0, "今日": 0, "今晚": 0, "今早": 0, "今晨": 0, "今中午": 0,
+    "明天": 1, "明日": 1, "明早": 1, "明晚": 1, "后天": 2, "大后天": 3,
+    "day before yesterday": -2, "yesterday": -1, "last night": -1,
+    "today": 0, "tonight": 0, "this morning": 0, "this evening": 0,
+    "tomorrow": 1, "day after tomorrow": 2,
+}
+_DAY_WORDS = re.compile("|".join(
+    (r"\b" + re.escape(word) + r"\b") if word.isascii() else re.escape(word)
+    for word in sorted(_DAY_OFFSETS, key=len, reverse=True)
+), re.I)
+_RELATIVE_DAYS = re.compile(r"(\d+|[一二两三四五六七八九十]+)天([前后])|\b(\d+) days? (ago|later)\b", re.I)
+_VAGUE_TIME = re.compile(r"前几天|几天前|那天|当天|当时|之前|刚才|最近|上次|下次|过几天|"
+                         r"[上下本这]周|[上下这]个?月|去年|明年|星期[一二三四五六日天]|"
+                         r"\b(?:recently|earlier|that day|last time|a few days ago|just now|"
+                         r"(?:last|next|this) (?:week|month|year)|monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b", re.I)
+
+
+def date_mentions(text: str, clock: ClockContext) -> list[tuple[str, date | None]]:
+    """Resolve each expression independently; invalid dates remain explicitly unknown."""
+    result = []
+    for pattern in (_DATE_ISO, _DATE_CJK):
+        for match in pattern.finditer(text):
+            try:
+                day = date(int(match[1] or clock.local_now.year), int(match[2]), int(match[3]))
+            except ValueError:
+                day = None
+            result.append((match[0], day))
+    for match in _DAY_WORDS.finditer(text):
+        result.append((match[0], clock.local_now.date() + timedelta(days=_DAY_OFFSETS[match[0].casefold()])))
+    for match in _RELATIVE_DAYS.finditer(text):
+        count = (int(match[1]) if match[1].isdigit() else _cjk_number(match[1])) if match[1] else int(match[3])
+        offset = -count if match[2] == "前" or (match[4] or "").casefold() == "ago" else count
+        try:
+            day = clock.local_now.date() + timedelta(days=offset)
+        except OverflowError:
+            day = None
+        result.append((match[0], day))
+    return result
 
 
 def _fixed_offset(minutes: int) -> timezone:
@@ -67,13 +107,20 @@ class ClockContext:
 
     def prompt_payload(self) -> dict[str, Any]:
         return {
-            "nowUtc": self.now_utc.isoformat(timespec="seconds"),
-            "localNow": self.local_now.isoformat(timespec="seconds"),
+            "nowUtc": self.now_utc.isoformat(timespec="milliseconds"),
+            "localNow": self.local_now.isoformat(timespec="milliseconds"),
             "timezone": self.timezone_name,
             "utcOffsetMinutes": self.utc_offset_minutes,
             "authority": "server-clock",
             "timezoneSource": "iana" if getattr(self.tzinfo, "key", None) else "fixed-offset-fallback",
         }
+
+    def at_source(self, timestamp: str | None) -> "ClockContext":
+        """Retain civil timezone while anchoring delayed work to its durable input."""
+        if not timestamp:
+            return self
+        return self.current(self.timezone_name, self.utc_offset_minutes,
+            now_utc=datetime.fromisoformat(timestamp.replace("Z", "+00:00")))
 
 
 def _cjk_number(value: str) -> int | None:
@@ -110,41 +157,13 @@ def _clock_from_text(text: str) -> tuple[int, int] | None:
         if hour is None or minute is None:
             return None
     lowered = text.casefold()
-    if any(marker in lowered for marker in ("下午", "晚上", "傍晚", "pm")) and hour < 12:
+    if (any(marker in lowered for marker in ("下午", "晚上", "傍晚")) or re.search(r"\bpm\b", lowered)) and hour < 12:
         hour += 12
-    if any(marker in lowered for marker in ("凌晨", "上午", "早上", "am")) and hour == 12:
+    if (any(marker in lowered for marker in ("凌晨", "上午", "早上")) or re.search(r"\bam\b", lowered)) and hour == 12:
         hour = 0
     if not 0 <= hour <= 23 or not 0 <= minute <= 59:
         return None
     return hour, minute
-
-
-def _calendar_date(text: str, clock: ClockContext) -> tuple[date, bool]:
-    local = clock.local_now
-    lowered = text.casefold()
-    iso = _DATE_ISO.search(text)
-    if iso:
-        try:
-            return date(int(iso.group(1)), int(iso.group(2)), int(iso.group(3))), True
-        except ValueError:
-            return local.date(), False
-    cjk = _DATE_CJK.search(text)
-    if cjk:
-        try:
-            return date(int(cjk.group(1) or local.year), int(cjk.group(2)), int(cjk.group(3))), True
-        except ValueError:
-            return local.date(), False
-    if any(marker in lowered for marker in ("前天", "day before yesterday")):
-        return local.date() - timedelta(days=2), True
-    if any(marker in lowered for marker in ("昨天", "昨日", "yesterday")):
-        return local.date() - timedelta(days=1), True
-    if any(marker in lowered for marker in ("后天", "day after tomorrow")):
-        return local.date() + timedelta(days=2), True
-    if any(marker in lowered for marker in ("明天", "tomorrow")):
-        return local.date() + timedelta(days=1), True
-    if any(marker in lowered for marker in ("今天", "今日", "today", "tonight")):
-        return local.date(), True
-    return local.date(), False
 
 
 def _local_datetime(day: date, clock_value: tuple[int, int], clock: ClockContext) -> datetime:
@@ -163,16 +182,17 @@ def resolve_time_semantics(text: str, clock: ClockContext, *, kind: str | None) 
 
     value = " ".join(str(text).split())
     lowered = value.casefold()
-    target_date, date_explicit = _calendar_date(value, clock)
+    mentions = date_mentions(value, clock)
+    target_date = next((day for _, day in mentions if day is not None), clock.local_now.date())
+    date_explicit = bool(mentions)
     clock_value = _clock_from_text(value)
     # Multiple dates describe potentially different events. Do not silently
     # choose whichever keyword happens to be checked first.
-    mentions = set(re.findall(
-        r"day before yesterday|day after tomorrow|yesterday|tomorrow|today|tonight|"
-        r"前天|昨天|昨日|今天|今日|明天|后天|\d{4}[-/.]\d{1,2}[-/.]\d{1,2}|(?:\d{4}年)?\d{1,2}月\d{1,2}日",
-        lowered,
-    ))
-    ambiguous = len(mentions) > 1
+    invalid = any(day is None for _, day in mentions) or bool((_CLOCK.search(value) or _CJK_CLOCK.search(value)) and clock_value is None)
+    unresolved = bool(_VAGUE_TIME.search(value))
+    ambiguous = len({day for _, day in mentions}) > 1 or len(_CLOCK.findall(value)) + len(_CJK_CLOCK.findall(value)) > 1
+    # Quoted relative dates can be anchored to another speaker's turn.
+    ambiguous = ambiguous or bool(re.search(r'[“「『"].*(?:今天|昨天|明天|\btoday\b|\byesterday\b|\btomorrow\b)', value, re.I))
     recurrence = None
     if any(marker in lowered for marker in ("每天", "每日", "every day", "daily")):
         recurrence = {
@@ -189,7 +209,7 @@ def resolve_time_semantics(text: str, clock: ClockContext, *, kind: str | None) 
 
     effective_at = None
     effective_end = None
-    if ambiguous:
+    if ambiguous or invalid or unresolved or recurrence:
         pass
     elif date_explicit and clock_value is None:
         local_start = _local_datetime(target_date, (0, 0), clock)
@@ -212,6 +232,9 @@ def resolve_time_semantics(text: str, clock: ClockContext, *, kind: str | None) 
         "dateExplicit": date_explicit,
         "clockExplicit": clock_value is not None,
         "ambiguous": ambiguous,
+        "unresolved": unresolved or invalid,
+        "status": "needs-clarification" if ambiguous or unresolved or invalid else "resolved" if effective_at else "unspecified",
+        "expressions": [{"expression": phrase, "localDate": day.isoformat() if day else None} for phrase, day in mentions],
     }
 
 

@@ -1,17 +1,17 @@
 """Durable memory-only recovery; never replay dialogue controls or tool effects."""
 import asyncio
 from datetime import datetime
-import hashlib
 import time
 
 from egoassist.memory.evidence import ground_context
 from egoassist.memory.temporal import ClockContext, resolve_time_semantics
 from egoassist.realtime.semantic import SemanticTurnRouter
-from egoassist.realtime.settings import integer, number
+from egoassist.core.settings import integer, number
+from egoassist.core.events import latest
 
 
 def recovery_jobs(journal):
-    return {row["turnId"]: row for row in journal.entries() if row.get("type") == "memory.recovery.job"}
+    return latest(journal, "memory.recovery.job", "turnId")
 
 
 class MemoryRecovery:
@@ -29,12 +29,12 @@ class MemoryRecovery:
             **changes,
         }, parent_id=row.get("id"))
 
-    def submit(self, journal, *, user_id, turn_id, text, source_id, clock, draft=None, scene=None):
+    def submit(self, journal, *, user_id, turn_id, text, source_id, clock, draft=None, scene=None, memory_candidates=None):
         self.journals[str(journal.path)] = journal
         if turn_id not in recovery_jobs(journal):
             journal.append("memory.recovery.job", {
                 "turnId": turn_id, "userId": user_id, "text": text, "sourceId": source_id,
-                "clock": clock, "draft": draft, "scene": scene,
+                "clock": clock, "draft": draft, "scene": scene, "memoryCandidates": memory_candidates or [],
                 "status": "queued", "attempt": 0, "nextAttemptAt": time.time() + self.delay,
             }, idempotency_key="memory-recovery:" + turn_id)
 
@@ -49,15 +49,18 @@ class MemoryRecovery:
         if not row or row["status"] != "failed":
             raise ValueError("only failed memory recovery can be retried")
         self.journals[str(journal.path)] = journal
+        self.router._blocked_failure = None
         self.update(journal, row, status="queued", attempt=0, nextAttemptAt=time.time(), error=None)
 
     async def execute(self, journal, row):
+        decision = None
         row = recovery_jobs(journal).get(row["turnId"], row)
         if row["status"] == "completed":
             return
         row = self.update(journal, row, status="running", attempt=row["attempt"] + 1)
         try:
-            self.router.set_turn_context(clock_context=row["clock"], memory_draft=row.get("draft"), scene=row.get("scene"))
+            self.router.set_turn_context(clock_context=row["clock"], memory_draft=row.get("draft"), scene=row.get("scene"),
+                                         memory_candidates=row.get("memoryCandidates"))
             decision = row.get("decision")
             if decision is None:
                 decision = await self.router.classify(row["text"], [])
@@ -69,13 +72,14 @@ class MemoryRecovery:
                                          now_utc=datetime.fromisoformat(row["clock"]["nowUtc"]))
             policy = self.policy(row["userId"], journal.session_id)["components"]["timeline"]
             ids = []
-            for index, atom in enumerate(decision.get("memoryAtoms") or []):
+            for atom in decision.get("memoryAtoms") or []:
                 scope = atom["scope"]
                 if not policy["preference_enabled" if scope == "participant" else "episodic_enabled"]:
                     continue
                 temporal = resolve_time_semantics(atom["text"], clock, kind=atom["kind"])
                 context = ground_context(atom.get("context"), row["text"], clock)
                 context.update({"sourceText": row["text"], "speaker": (row.get("scene") or {}).get("speaker"),
+                                "sourceSessionId": journal.session_id,
                                 "recoveredAt": datetime.now().astimezone().isoformat()})
                 card = self.timeline.remember(
                     atom["text"], user_id=row["userId"], case_id=journal.session_id, scope=scope,
@@ -86,10 +90,10 @@ class MemoryRecovery:
                     timezone_name=clock.timezone_name, utc_offset_minutes=clock.utc_offset_minutes,
                     subject=atom.get("subject"), predicate=atom.get("predicate"), value=atom.get("value"),
                     metadata={"source": "semantic-memory-recovery", "evidenceContext": context},
-                    supersede=False,
-                    replaces_card_id=atom.get("replaces"),
-                    card_id=hashlib.sha256(f'{journal.session_id}:{row["turnId"]}:{index}'.encode()).hexdigest()[:24])
-                if card:
+                    supersede=bool(atom.get("subject") and atom.get("predicate")),
+                    recurrence=temporal["recurrence"],
+                    replaces_card_id=atom.get("replaces"))
+                if card and card["id"] not in ids:
                     ids.append(card["id"])
             pending = self.timeline.pending_draft(user_id=row["userId"], case_id=journal.session_id)
             draft = decision.get("memoryDraft")
@@ -108,7 +112,9 @@ class MemoryRecovery:
             self.update(journal, row, status="queued", nextAttemptAt=time.time())
             raise
         except Exception as exc:
-            self.update(journal, row, status="failed" if row["attempt"] >= self.attempts else "queued",
+            retryable = (decision or {}).get("retryable", True)
+            self.update(journal, row, status="failed" if not retryable or row["attempt"] >= self.attempts else "queued",
+                        retryable=retryable, providerError=(decision or {}).get("providerError"),
                         error=type(exc).__name__ + ": " + str(exc)[:200],
                         nextAttemptAt=time.time() + self.delay * row["attempt"])
 

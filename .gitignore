@@ -22,10 +22,9 @@ tmp/
 
 # ---- 运行产物 / 缓存 ----
 outputs/
+/artifacts/
 .cache/
-.egoassist/
-.egoassist-real-demo/
-.egoassist-tools-demo/
+.egoassist*/
 research_references/
 *.log
 
@@ -43,4 +42,3 @@ research_references/
 # ---- 系统 ----
 .DS_Store
 node_modules/
-.egoassist-insights-demo/

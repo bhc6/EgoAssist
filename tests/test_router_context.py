@@ -25,6 +25,7 @@ def test_router_projection_keeps_identity_and_time_without_media_metadata():
     assert projected["outputPermission"] == {"quiet": True}
     assert "sha256" not in str(projected)
     assert context == original
+    assert project_context(projected) == projected
 
 
 def test_unverified_voice_needs_explicit_addressee_before_answering():

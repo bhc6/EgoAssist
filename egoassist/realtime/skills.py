@@ -135,16 +135,6 @@ class SkillRuntime:
         self.task = None
         self.custom_tasks = {}
 
-    def _require_skill(self) -> SkillPackage:
-        if self.skill is None:
-            raise ValueError("no active skill")
-        return self.skill
-
-    def _require_task(self) -> TaskSession:
-        if self.task is None:
-            raise ValueError("no active task")
-        return self.task
-
     @property
     def tasks(self) -> dict[str, TaskSpec]:
         if self.skill is not None:

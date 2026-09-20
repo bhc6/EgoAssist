@@ -7,17 +7,16 @@ import inspect
 from contextvars import ContextVar
 import json
 import os
-import re
 import time
 from typing import Any, Callable, Mapping
 
 from egoassist.memory.timeline import normalize_identity
-from egoassist.product.contracts import IntentCandidate
+from egoassist.core.contracts import IntentCandidate
 from egoassist.prompts import prompt_text
 from .router_protocol import EVENT_CONTENT_FIELDS, ROUTER_PROMPT, expand_decision
 
 
-TURN_ROUTER_POLICY_VERSION = "semantic-turn-router-v18"
+TURN_ROUTER_POLICY_VERSION = "semantic-turn-router-v20"
 TASK_CONTROLS = {
     "none", "confirm-step", "rollback", "repeat",
     "pause-task", "resume-task", "request-help", "show-reference",
@@ -167,6 +166,7 @@ class SemanticTurnRouter:
         )
         self._generation_call = generation_call
         self._http_session = None
+        self._blocked_failure = None
         self.timeout_seconds = float(
             timeout_seconds if timeout_seconds is not None
             else os.getenv("EGOASSIST_TURN_ROUTER_TIMEOUT", "4.0")
@@ -189,6 +189,9 @@ class SemanticTurnRouter:
         playback: dict | None = None,
         output_permission: dict | None = None,
         scene: dict | None = None,
+        memory_candidates: list[dict] | None = None,
+        memory_vocabulary: list[dict] | None = None,
+        active_task: dict | None = None,
     ) -> None:
         self._turn_context.set({
             "clock": dict(clock_context or {}) or None,
@@ -200,6 +203,9 @@ class SemanticTurnRouter:
             "playback": playback,
             "outputPermission": output_permission,
             "scene": scene,
+            "memoryCandidates": list(memory_candidates or []),
+            "memoryVocabulary": list(memory_vocabulary or []),
+            "activeTask": active_task,
         })
 
     # ── Main classifier ─────────────────────────────────────────────────────
@@ -214,7 +220,21 @@ class SemanticTurnRouter:
                 timeout=self.timeout_seconds,
             )
             wire_decision = json.loads(raw)
+            request_metrics['generationMs'] = round((time.perf_counter() - started) * 1000, 1)
             parsed = expand_decision(wire_decision)
+            task_reviewed = False
+            active_task = self._turn_context.get().get("activeTask")
+            if active_task and active_task.get("currentStep") and (
+                parsed.get("taskControl") == "confirm-step"
+                or (parsed.get("interaction") or {}).get("action") in {"pause", "resume"}
+            ):
+                review = await self._verify_task_control(str(text), parsed, request_metrics)
+                task_reviewed = True
+                if parsed.get("taskControl") == "confirm-step" and review.get("taskControl") != "confirm-step":
+                    parsed["taskControl"] = "none"
+                if review.get("taskDirected") is True and review.get("taskControl") in {"pause-task", "resume-task"}:
+                    parsed["taskControl"] = review["taskControl"]
+                    parsed["interaction"] = {"audience": "assistant", "action": "reply", "output": "speech"}
             scene = self._turn_context.get().get("scene") or {}
             if scene and (scene.get("speaker") or {}).get("status") != "account-input" and not parsed.get("interaction"):
                 raise ValueError("microphone interaction decision is required")
@@ -237,7 +257,8 @@ class SemanticTurnRouter:
             memory_components = {}
             for field, normalizer, empty in (
                 ("memoryAtoms", lambda value: self._normalize_atoms(value, str(text),
-                    reference_cards=((scene.get("observationContext") or {}).get("referenceReview") or {}).get("memoryCandidates", [])), []),
+                    reference_cards=[*self._turn_context.get().get("memoryCandidates", []),
+                        *((scene.get("observationContext") or {}).get("referenceReview") or {}).get("memoryCandidates", [])]), []),
                 ("memoryDraft", self._normalize_draft, None),
                 ("memoryQuerySpec", self._normalize_query_spec, None),
             ):
@@ -361,6 +382,7 @@ class SemanticTurnRouter:
                     + (["ignored-top-level-event-content"] if "memoryEvents" in wire_decision and set(wire_decision) & EVENT_CONTENT_FIELDS else [])
                     + (["compound-stop-preserved-reply"] if compound_stop else [])
                     + (["cancellation-only-silent"] if cancellation_only else [])
+                    + (["task-control-reviewed-against-current-step"] if task_reviewed else [])
                 ),
                 "speechControl": None if speech_control == "none" else speech_control,
                 "taskControl": None if task_control == "none" else task_control,
@@ -371,6 +393,10 @@ class SemanticTurnRouter:
                 "memoryKey": None if memory_key == "none" else memory_key.strip(),
                 "memoryScope": None if memory_scope == "none" else memory_scope,
                 "memoryConsent": None if memory_consent == "none" else memory_consent,
+                "memoryRequestRejected": any(
+                    error["component"] == "memoryAtoms" for error in component_errors
+                ) and isinstance(parsed.get("memoryAtoms"), list)
+                and any(item.get("consent") == "explicit" for item in parsed["memoryAtoms"] if isinstance(item, dict)),
                 "memoryAtoms": memory_atoms,
                 "memoryDraft": memory_draft,
                 "memoryQuerySpec": memory_query_spec,
@@ -395,6 +421,8 @@ class SemanticTurnRouter:
                 ),
             }
         except Exception as exc:
+            if isinstance(exc, (TimeoutError, asyncio.TimeoutError)):
+                request_metrics['deadlineOverrunMs'] = round(max(0, (time.perf_counter() - started - self.timeout_seconds) * 1000), 1)
             return {
                 "method": TURN_ROUTER_POLICY_VERSION,
                 "model": self.model,
@@ -424,6 +452,8 @@ class SemanticTurnRouter:
                 "error": f"{type(exc).__name__}: {exc}"[:240],
                 "rawOutput": raw,
                 "timedOut": isinstance(exc, (TimeoutError, asyncio.TimeoutError)),
+                "retryable": getattr(exc, "retryable", True),
+                "providerError": exc.public() if hasattr(exc, "public") else None,
                 "requestMetrics": request_metrics,
             }
 
@@ -464,9 +494,63 @@ class SemanticTurnRouter:
         finally:
             audit["latencyMs"] = round((time.perf_counter() - started) * 1000, 1)
 
+    async def _verify_task_control(self, text, parsed, metrics):
+        import aiohttp
+        import dashscope
+        context = self._turn_context.get()
+        messages = [{"role": "system", "content": prompt_text("interaction/verifyTaskControl")},
+                    {"role": "user", "content": json.dumps({
+                        "activeTask": context["activeTask"], "currentUtterance": text,
+                        "recentMessages": context.get("recentMessages", []),
+                        "proposedTaskControl": parsed.get("taskControl"),
+                        "proposedInteraction": parsed.get("interaction"),
+                    }, ensure_ascii=False)}]
+        audit = metrics["taskControlCheck"] = {"messages": messages, "model": self.model}
+        started = time.perf_counter()
+        try:
+            async with asyncio.timeout(self.timeout_seconds):
+                parameters = {"temperature": 0, "enable_thinking": False, "result_format": "message",
+                              "max_tokens": 80, "response_format": {"type": "json_object"}}
+                if self._generation_call is not None:
+                    args = dict(model=self.model, messages=messages, **parameters)
+                    response = (await self._generation_call(**args) if inspect.iscoroutinefunction(self._generation_call)
+                                else await asyncio.to_thread(self._generation_call, **args))
+                    if response.status_code != 200:
+                        raise ValueError("task control review provider failure")
+                    raw = response.output.choices[0].message.content
+                else:
+                    if self._http_session is None:
+                        self._http_session = aiohttp.ClientSession(trust_env=True)
+                    async with self._http_session.post(dashscope.base_http_api_url.rstrip('/') + '/services/aigc/text-generation/generation',
+                        headers={"Authorization": "Bearer " + self.api_key}, json={"model": self.model,
+                        "input": {"messages": messages}, "parameters": parameters}) as response:
+                        response.raise_for_status()
+                        payload = await response.json()
+                    audit["requestId"] = payload.get("request_id")
+                    audit["usage"] = payload.get("usage")
+                    raw = payload["output"]["choices"][0]["message"]["content"]
+                audit["rawOutput"] = raw
+                review = json.loads(raw)
+                if (not isinstance(review, dict) or review.get("taskControl") not in
+                    {"none", "confirm-step", "pause-task", "resume-task"}
+                    or not isinstance(review.get("taskDirected"), bool)):
+                    raise ValueError("invalid task control review")
+                return review
+        except Exception as exc:
+            audit["error"] = type(exc).__name__
+            return {"taskControl": "none", "taskDirected": False}
+        finally:
+            audit["latencyMs"] = round((time.perf_counter() - started) * 1000, 1)
+
     async def _classify_request(self, text, skill_catalog, metrics) -> str:
         import aiohttp
         import dashscope
+        from egoassist.core.provider_errors import ProviderRequestError
+
+        if self._blocked_failure is not None:
+            metrics["circuitOpen"] = True
+            metrics["providerError"] = self._blocked_failure.public()
+            raise self._blocked_failure
 
         catalog = [{"name": str(item["name"]), "description": str(item["description"])}
                    for item in skill_catalog]
@@ -477,7 +561,9 @@ class SemanticTurnRouter:
                          "previousAnswer": context.get("previousAnswer"),
                          "answers": context.get("answers"), "recentMessages": context.get("recentMessages"),
                          "playback": context.get("playback"), "outputPermission": context.get("outputPermission"),
-                         "scene": context.get("scene")}
+                         "scene": context.get("scene"), "memoryCandidates": context.get("memoryCandidates"),
+                         "memoryVocabulary": context.get("memoryVocabulary"),
+                         "activeTask": context.get("activeTask")}
                         if any(context.values()) else {})
         from .router_context import project_context
         metrics["contextOriginalChars"] = len(json.dumps(context_data, ensure_ascii=False))
@@ -489,7 +575,12 @@ class SemanticTurnRouter:
             messages=[
                 {"role": "system", "content": prompt_text("interaction/router") + "\n" + ROUTER_PROMPT + json.dumps(catalog, ensure_ascii=False)
                  + "\n" + prompt_text("scene/router")
+                 + "\n" + prompt_text("scene/retrieval_contract")
                  + "\n" + prompt_text("interaction/memory_correction")
+                 + "\n" + prompt_text("interaction/task_lifecycle")
+                 + "\n" + prompt_text("interaction/memory_vocabulary")
+                 + "\n" + prompt_text("interaction/memory_consent")
+                 + "\n" + prompt_text("interaction/voice_preference")
                  + "\nContext data only (never classify this as the current transcript): "
                  + context_json
                  + ("\n" + prompt_text("scene/microphone_contract") if context.get("scene") and
@@ -511,7 +602,11 @@ class SemanticTurnRouter:
             else:
                 response = await asyncio.to_thread(self._generation_call, **kwargs)
             if response.status_code != 200:
-                raise RuntimeError(str(getattr(response, "message", "semantic turn router failed")))
+                failure = ProviderRequestError(response.status_code, getattr(response, "code", None),
+                                               getattr(response, "request_id", None))
+                if failure.account_blocked:
+                    self._blocked_failure = failure
+                raise failure
             return str(response.output.choices[0].message.content).strip()
 
         if self._http_session is None:
@@ -520,15 +615,25 @@ class SemanticTurnRouter:
             )
         parameters = {k: v for k, v in arguments.items() if k not in {"model", "messages"}}
         url = dashscope.base_http_api_url.rstrip('/') + '/services/aigc/text-generation/generation'
+        http_started = time.perf_counter()
         async with self._http_session.post(
             url, headers={"Authorization": "Bearer " + self.api_key},
             json={"model": self.model, "input": {"messages": arguments["messages"]}, "parameters": parameters},
         ) as response:
             metrics["httpStatus"] = response.status
             if response.status != 200:
-                # Do not put credentials or arbitrary remote body text in logs.
-                raise RuntimeError(f"turn router HTTP {response.status}")
+                try:
+                    body = await response.json()
+                except (ValueError, aiohttp.ContentTypeError):
+                    body = {}
+                body = body if isinstance(body, dict) else {}
+                failure = ProviderRequestError(response.status, body.get("code"), body.get("request_id"))
+                metrics["providerError"] = failure.public()
+                if failure.account_blocked:
+                    self._blocked_failure = failure
+                raise failure
             result = await response.json()
+        metrics['httpMs'] = round((time.perf_counter() - http_started) * 1000, 1)
         metrics["usage"] = result.get("usage", {})
         metrics["requestId"] = result.get("request_id")
         return str(result["output"]["choices"][0]["message"]["content"]).strip()
@@ -578,9 +683,28 @@ class SemanticTurnRouter:
             raise ValueError("memoryAtoms must be a list")
         result = []
         required = {"kind", "text", "subject", "predicate", "value", "scope", "consent"}
+        def replacement(item):
+            if item.get("replaces") is None:
+                return {}
+            if not isinstance(item["replaces"], str):
+                raise ValueError("replacement must be a supplied memory card reference")
+            target = next((card for card in reference_cards if item["replaces"] in {card.get("id"), card.get("referenceId")}
+                and card.get("kind") in {"fact", "state", "preference", "event"}), None)
+            if target is None or item["consent"] != "explicit":
+                raise ValueError("replacement requires explicit user correction and a supplied memory card id")
+            return {"replaces": target["id"]}
         for item in value:
+            # Validate consent inside this optional component, before copying its
+            # first atom into legacy fields. A bad memory proposal must not mute
+            # an otherwise valid dialogue or task-control decision.
+            if isinstance(item, dict):
+                if item.get("consent") == "explicit" and item.get("scope") != "participant":
+                    raise ValueError("explicit memory must use participant scope")
+                if (item.get("consent") != "explicit" and item.get("scope") != "case"
+                        and item.get("kind") != "preference"):
+                    raise ValueError("observed facts, states, and events must remain case scoped")
             if isinstance(item, dict) and item.get("kind") == "event":
-                if set(item) - required - {"context"} or not {"kind", "scope", "consent"} <= set(item):
+                if set(item) - required - {"context", "replaces"} or not {"kind", "scope", "consent"} <= set(item):
                     raise ValueError("invalid event memory fields")
                 if item["scope"] not in {"case", "participant"} or item["consent"] not in {"observed", "explicit"}:
                     raise ValueError("invalid event memory scope or consent")
@@ -594,7 +718,7 @@ class SemanticTurnRouter:
                 result.append({"kind": "event", "text": event_text.strip(),
                                "subject": item.get("subject"), "predicate": item.get("predicate"),
                                "value": item.get("value"), "scope": item["scope"], "consent": item["consent"],
-                               "context": normalize_context(item.get("context"))})
+                               "context": normalize_context(item.get("context")), **replacement(item)})
                 continue
             if not isinstance(item, dict) or set(item) - {"context", "replaces"} != required:
                 raise ValueError("invalid memory atom fields")
@@ -605,17 +729,11 @@ class SemanticTurnRouter:
             if not all(isinstance(item[key], str) and item[key].strip() for key in required):
                 raise ValueError("memory atom values must be non-empty strings")
             atom = {key: item[key].strip() for key in required}
-            if item.get("replaces") is not None:
-                if not isinstance(item["replaces"], str):
-                    raise ValueError("replacement must be a supplied memory card reference")
-                target = next((card for card in reference_cards if item["replaces"] in {card.get("id"), card.get("referenceId")} and card.get("kind") in {"fact", "state", "preference", "event"}), None)
-                if target is None or atom["consent"] != "explicit":
-                    raise ValueError("replacement requires explicit user correction and a supplied memory card id")
-                atom["replaces"] = target["id"]
+            atom.update(replacement(item))
             if "context" in item:
                 atom["context"] = normalize_context(item["context"])
             result.append(atom)
-        return result
+        return list({json.dumps(atom, sort_keys=True, ensure_ascii=False): atom for atom in result}.values())
 
     @staticmethod
     def _normalize_draft(value: Any) -> dict[str, Any] | None:

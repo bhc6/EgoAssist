@@ -1,8 +1,7 @@
 """EgoAssist full-duplex embodied assistance framework.
 
-Core memory research path:
-    capture(stream) -> events -> hierarchical memory -> retrieval
-                     -> temporal localization -> answer -> conformal abstention
+Core runtime: observation, interaction, and memory coordinated by application/.
+Offline capture/retrieval benchmarks are separate research entry points.
 """
 
 from pathlib import Path

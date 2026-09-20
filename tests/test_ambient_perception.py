@@ -8,10 +8,10 @@ tests here are load-bearing for that claim --
 """
 
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 
 import pytest
 from pydantic import ValidationError
+from egoassist import PACKAGE_ROOT
 
 from egoassist.product import (
     AmbientFrameContext,
@@ -49,7 +49,7 @@ def test_open_json_fences_and_wrong_gate_schema():
 
 
 CAPTURED = datetime(2026, 7, 30, 8, 0, tzinfo=timezone.utc)
-WATCHLIST = Path(__file__).resolve().parents[1] / "watchlists" / "medication.json"
+WATCHLIST = PACKAGE_ROOT / "watchlists" / "medication.json"
 
 
 def watchlist() -> AmbientWatchList:

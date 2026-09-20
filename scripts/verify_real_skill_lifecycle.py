@@ -6,6 +6,7 @@ Every attempt writes its own report, including failures; no retries hide errors.
 import argparse
 import asyncio
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -61,6 +62,7 @@ async def verify(output, model):
     load_env(str(ROOT / '.env'))
     output.mkdir(parents=True, exist_ok=False)
     report = {'mock': False, 'model': model, 'input': 'text-control',
+              'backend': os.getenv('EGOASSIST_REALTIME_BACKEND', 'omni'),
               'physicalCompletionMeasured': False, 'passed': False, 'turns': [], 'restores': []}
     credentials = {'username': 'lifecycle-acceptance', 'password': 'isolated-lifecycle-test-123'}
     sid = None
@@ -71,12 +73,16 @@ async def verify(output, model):
     async def exercise(client, ws, text, *expected):
         result = {'input': text, 'passed': False}
         report['turns'].append(result)
-        result.update(await turn(ws, output, sid, text))
-        state = await (await client.get('/api/state?session=' + sid)).json()
-        result['observedState'] = {
-            'activeSkill': state.get('activeSkill'), 'task': state.get('task'),
-            'routing': state.get('intentRouting'),
-        }
+        try:
+            result.update(await turn(ws, output, sid, text))
+        finally:
+            # Retain actual task state even when silent routing causes the
+            # spoken-response helper to time out.
+            state = await (await client.get('/api/state?session=' + sid)).json()
+            result['observedState'] = {
+                'activeSkill': state.get('activeSkill'), 'task': state.get('task'),
+                'routing': state.get('intentRouting'),
+            }
         result['state'] = check_state(state, *expected)
         result['passed'] = True
         print(json.dumps({key: result[key] for key in ('input', 'passed', 'firstAudioMs', 'transcript')},

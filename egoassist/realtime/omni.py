@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from egoassist.prompts import prompt_text
+from egoassist.core.provider_errors import access_failure
 
 import asyncio
 import base64
@@ -18,7 +19,7 @@ import re
 import socket
 import threading
 import time
-from dataclasses import dataclass, replace as _dc_replace
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Callable
 from uuid import uuid4
@@ -26,13 +27,12 @@ from uuid import uuid4
 import requests
 
 from .tools import tool_result_succeeded
-from .settings import integer
+from egoassist.core.settings import integer
 from .ambient import AMBIENT_SCHEMA_VERSION, NONE_OBSERVED, UNKNOWN_LOCATION
 from .perception import (
     frame_prompt,
     parse_ambient_hypothesis,
     parse_perception_hypothesis,
-    perception_prompt,
 )
 
 if TYPE_CHECKING:
@@ -162,6 +162,9 @@ def _realtime_public_ips(host: str = _DASHSCOPE_HOST) -> list[str]:
 
 
 def _connect_with_resolved_ip(conversation, host: str = _DASHSCOPE_HOST) -> None:
+    if getattr(conversation, "uses_http_pipeline", False):
+        conversation.connect()
+        return
     public_ips = _realtime_public_ips(host)
     if not public_ips:
         conversation.connect()
@@ -179,12 +182,28 @@ def _connect_with_resolved_ip(conversation, host: str = _DASHSCOPE_HOST) -> None
                 conversation.connect()
                 return
             except Exception as exc:
+                if getattr(conversation, "_egoassist_access_failure", None):
+                    raise conversation._egoassist_access_failure from exc
                 errors.append(f"{public_ip}: {exc}")
                 if getattr(conversation, "ws", None):
                     conversation.close()
             finally:
                 socket.getaddrinfo = original
     raise ConnectionError("DashScope realtime connection failed via public DNS: " + "; ".join(errors))
+
+
+def _observe_access_errors(conversation, on_failure):
+    # The SDK logs WebSocket errors without forwarding them to its callback.
+    original = getattr(conversation, "_on_error", None)
+    if original is not None:
+        def on_error(ws, error):
+            failure = access_failure(error)
+            if failure is not None:
+                conversation._egoassist_access_failure = failure
+                on_failure(failure)
+            original(ws, error)
+        conversation._on_error = on_error
+    return conversation
 
 
 class _OmniPerceptionLane:
@@ -227,8 +246,9 @@ class _OmniPerceptionLane:
         self._generation = 0
         self._connect_lock = asyncio.Lock()
         self._reconnect_scheduled = False
+        self._blocked_failure = None
         self._request_started = None
-        from .settings import perception_settings
+        from egoassist.core.settings import perception_settings
         self.settings = perception_settings()
         self._response_starts = {}
 
@@ -242,12 +262,19 @@ class _OmniPerceptionLane:
             def on_close(self, close_status_code=None, close_msg=None):
                 if generation == lane._generation and not lane.closed:
                     lane.connected = False
+                    failure = access_failure(close_msg)
+                    if failure is not None:
+                        lane._block_provider(failure)
                     lane._schedule_reconnect("provider-closed")
 
             def on_event(self, response):
                 if generation != lane._generation or lane.closed:
                     return
                 event_type = str(response.get("type", ""))
+                if event_type == "pipeline.metrics":
+                    lane.trace("provider.pipeline.metrics", {**response, "lane": "perception"})
+                elif event_type == "pipeline.error":
+                    lane.trace("provider.pipeline.error", {**response, "lane": "perception"})
                 if event_type == "response.created":
                     lane._response_starts[lane._response_id(response)] = lane._request_started
                     lane.trace("perception.response.created", {"lane": "perception"}, response_id=lane._response_id(response))
@@ -272,7 +299,10 @@ class _OmniPerceptionLane:
                     lane._response_starts.pop(lane._response_id(response), None)
                     lane._finish("")
                 elif event_type == "error":
-                    if _is_response_idle_timeout(response):
+                    failure = access_failure(response)
+                    if failure is not None:
+                        lane._block_provider(failure)
+                    elif _is_response_idle_timeout(response):
                         lane.connected = False
                         lane.trace("provider.session.idle_timeout", {"lane": "perception"})
                         lane._schedule_reconnect("response-idle-timeout")
@@ -280,12 +310,24 @@ class _OmniPerceptionLane:
                         lane.trace("perception.response.error", {"error": str(response)})
                         lane._finish("")
 
-        return self._conversation_cls(
+        conversation = self._conversation_cls(
             model=self.model,
             callback=Callback(),
             api_key=self.api_key,
             url="wss://dashscope.aliyuncs.com/api-ws/v1/realtime",
         )
+        return _observe_access_errors(conversation, lambda failure: lane._block_provider(failure)
+                                      if generation == lane._generation and not lane.closed else None)
+
+    def _block_provider(self, failure):
+        if self._blocked_failure is not None:
+            return
+        self._blocked_failure = failure
+        self.connected = False
+        self.active = False
+        self.pending_frame = None
+        self.active_context = None
+        self.trace("provider.account.blocked", {"lane": "perception", **failure.public()})
 
     @staticmethod
     def _response_id(payload: dict[str, Any]) -> str | None:
@@ -295,6 +337,8 @@ class _OmniPerceptionLane:
 
     async def connect(self) -> None:
         async with self._connect_lock:
+            if self._blocked_failure is not None:
+                raise self._blocked_failure
             if self.closed or self.connected:
                 return
             self._generation += 1
@@ -302,6 +346,9 @@ class _OmniPerceptionLane:
             conversation = self._new_conversation(generation)
             self.conversation = conversation
             await asyncio.to_thread(_connect_with_resolved_ip, conversation)
+            if self._blocked_failure is not None:
+                await asyncio.to_thread(conversation.close)
+                raise self._blocked_failure
             if generation != self._generation or self.closed:
                 await asyncio.to_thread(conversation.close)
                 return
@@ -318,7 +365,7 @@ class _OmniPerceptionLane:
             self._dispatch_pending()
 
     def request(self, image_b64: str, context: dict[str, Any] | None = None) -> bool:
-        if not image_b64 or self.closed:
+        if not image_b64 or self.closed or self._blocked_failure is not None:
             return False
         if self.pending_frame:
             previous = self.pending_frame[1] or {}
@@ -347,7 +394,8 @@ class _OmniPerceptionLane:
                 instructions=instructions, enable_input_audio_transcription=False, enable_turn_detection=False)
             # Qwen Omni requires audio to precede an image. This lane uses a
             # deterministic silent ordering token, never user microphone data.
-            self.conversation.append_audio(self._SILENT_PCM16)
+            if not getattr(self.conversation, "uses_http_pipeline", False):
+                self.conversation.append_audio(self._SILENT_PCM16)
             self.conversation.append_video(frame)
             self.conversation.commit()
             self.conversation.create_response(
@@ -394,8 +442,8 @@ class _OmniPerceptionLane:
         self._buffer = ""
         context = self.active_context
         self.active_context = None
+        self.trace("perception.raw_output", {"frameId": (context or {}).get("frame_id"), "rawOutput": raw_text})
         if context:
-            self.trace("perception.raw_output", {"frameId": context.get("frame_id"), "rawOutput": raw_text})
             decision = (
                 OmniBrowserBridge.parse_ambient_output(raw_text, open_observation=context.get("observation_mode") == "open")
                 if context.get("schema_version") == AMBIENT_SCHEMA_VERSION
@@ -409,7 +457,7 @@ class _OmniPerceptionLane:
             self.loop.call_soon_threadsafe(self._dispatch_pending)
 
     def _schedule_reconnect(self, reason: str) -> None:
-        if self.closed or self._reconnect_scheduled or not self.loop.is_running():
+        if self.closed or self._blocked_failure is not None or self._reconnect_scheduled or not self.loop.is_running():
             return
         if not self.active and self.pending_frame is None:
             return
@@ -443,7 +491,8 @@ class _OmniPerceptionLane:
         return {
             "connected": self.connected,
             "connectionPolicy": "on-demand",
-            "connectionState": "ready" if self.connected else "connecting" if self._reconnect_scheduled else "idle",
+            "connectionState": "blocked" if self._blocked_failure else "ready" if self.connected else "connecting" if self._reconnect_scheduled else "idle",
+            "providerError": self._blocked_failure.public() if self._blocked_failure else None,
             "active": self.active,
             "pendingFrame": bool(self.pending_frame),
             "activeContextId": self.active_context.get("context_id") if self.active_context else None,
@@ -477,11 +526,20 @@ class OmniBrowserBridge:
         on_transcript: Callable[[str], Any],
     ) -> None:
         import dashscope
-        from dashscope.audio.qwen_omni import (
-            MultiModality,
-            OmniRealtimeCallback,
-            OmniRealtimeConversation,
-        )
+        self.backend = os.getenv("EGOASSIST_REALTIME_BACKEND", "omni").strip().lower()
+        if self.backend == "modular":
+            from .modular import (
+                Modalities as MultiModality, Callback as OmniRealtimeCallback,
+                ModularConversation as OmniRealtimeConversation, settings as modular_settings,
+            )
+            self.modular_config = modular_settings()
+            model = self.modular_config["textModel"]
+        elif self.backend == "omni":
+            from dashscope.audio.qwen_omni import (
+                MultiModality, OmniRealtimeCallback, OmniRealtimeConversation,
+            )
+        else:
+            raise ValueError("EGOASSIST_REALTIME_BACKEND must be omni or modular")
 
         dashscope.api_key = api_key
         self.loop = asyncio.get_running_loop()
@@ -494,6 +552,7 @@ class OmniBrowserBridge:
         self.closed = False
         self._dialogue_generation = 0
         self._dialogue_exchanges = 0  # completed response.done events since last reconnect
+        self._blocked_failure = None
         self._reconnect_lock = asyncio.Lock()
         self._reconnect_scheduled = False
         self._buffered_audio: deque[str] = deque()
@@ -541,6 +600,8 @@ class OmniBrowserBridge:
         self._input_segment_sequence = 0
         self._active_input_segment_id: str | None = None
         self._pending_input_segments: deque[str] = deque()
+        self._text_conversation = None
+        self._response_conversation = None
         bridge = self
 
         class Callback(OmniRealtimeCallback):
@@ -558,12 +619,29 @@ class OmniBrowserBridge:
                     bridge._trace("provider.session.closed", {
                         "lane": "dialogue", "message": str(close_msg or ""),
                     })
+                    failure = access_failure(close_msg)
+                    if failure is not None:
+                        bridge._block_provider(failure)
                     bridge._schedule_reconnect("provider-closed")
 
             def on_event(self, response):
                 if self.generation != bridge._dialogue_generation or bridge.closed:
                     return
                 event_type = response.get("type", "")
+                if event_type == "pipeline.metrics":
+                    bridge._trace("provider.pipeline.metrics", {k: v for k, v in response.items() if k != "type"})
+                elif event_type == "pipeline.warning":
+                    bridge._trace("provider.pipeline.warning", response)
+                    bridge._schedule({"type": "audio_unavailable", "responseId": response.get("responseId"),
+                                      "message": "语音暂不可用，回答已显示为文字。"})
+                elif event_type == "pipeline.error":
+                    bridge._trace("provider.pipeline.error", response)
+                    if getattr(bridge, "backend", "omni") == "omni" and response.get("responseId"):
+                        bridge._schedule({"type": "error", "message": "回答生成失败，请重试。",
+                                          "responseId": response.get("responseId")})
+                    else:
+                        bridge._schedule({"type": "provider_unavailable", "lane": response.get("stage"),
+                                          "reason": response.get("reason")})
                 if event_type == "response.created":
                     bridge._response_created(response)
                 elif event_type in {"response.done", "response.cancelled", "response.failed"}:
@@ -617,7 +695,10 @@ class OmniBrowserBridge:
                 elif event_type == "input_audio_buffer.speech_stopped":
                     bridge._input_segment_stopped(response)
                 elif event_type == "error":
-                    if _is_response_idle_timeout(response):
+                    failure = access_failure(response)
+                    if failure is not None:
+                        bridge._block_provider(failure)
+                    elif _is_response_idle_timeout(response):
                         LOGGER.info("DashScope dialogue session reached response idle timeout; reconnecting")
                         bridge.connected = False
                         bridge._trace("provider.session.idle_timeout", {"lane": "dialogue"})
@@ -640,10 +721,21 @@ class OmniBrowserBridge:
                         bridge._schedule_reconnect("media-ordering-error")
                     else:
                         LOGGER.error("DashScope realtime error: %s", response)
+                        message = _provider_error_message(response)
+                        error = response.get("error") or {}
+                        code = error.get("code") if isinstance(error, dict) else None
+                        event_id = response.get("event_id")
+                        serving_error = "InternalError.Algo.ModelServingError" in message
                         bridge._trace("provider.error", {
-                            "message": _provider_error_message(response), "payloadType": event_type,
+                            "message": message, "payloadType": event_type,
+                            "code": code, "eventId": event_id, "retryable": serving_error,
                         })
-                        bridge._schedule({"type": "error", "message": str(response)})
+                        bridge._schedule({
+                            "type": "error",
+                            "message": "云端实时模型处理失败，本次回答可能中断，请重试。"
+                            if serving_error else message,
+                            "code": code, "eventId": event_id, "retryable": serving_error,
+                        })
 
         self._Callback = Callback
         self.conversation = None
@@ -671,6 +763,9 @@ class OmniBrowserBridge:
             modalities=MultiModality, on_decision=self._handle_proactive_decision,
             trace=lambda event, payload, **kw: self._trace(event, {**payload, "lane": "ambient"}, **kw),
         )
+        if self.backend == "modular":
+            self.perception.model = self.modular_config["visionModel"]
+            self.ambient_perception.model = self.modular_config["visionModel"]
         self._ambient_context_provider = None
         self.last_ambient_check = 0.0
 
@@ -688,6 +783,8 @@ class OmniBrowserBridge:
             return
         # The isolated observation lane connects when its first frame is requested.
         self.connecting = False
+        if self.closed:
+            return
         await self.emit({"type": "ready", "lanes": self.provider_lanes_snapshot()})
         for call_id, pending in list(getattr(self, "_pending_tool_calls", {}).items()):
             if getattr(self, "auto_approve_tools", False):
@@ -703,16 +800,30 @@ class OmniBrowserBridge:
             })
 
     def _new_dialogue_conversation(self, generation: int):
-        return self._Conversation(
+        conversation = self._Conversation(
             model=self.model,
             callback=self._Callback(generation),
             api_key=self.api_key,
             url="wss://dashscope.aliyuncs.com/api-ws/v1/realtime",
         )
+        return _observe_access_errors(conversation, lambda failure: self._block_provider(failure)
+                                      if generation == self._dialogue_generation and not self.closed else None)
+
+    def _block_provider(self, failure):
+        if getattr(self, "_blocked_failure", None) is not None:
+            return
+        self._blocked_failure = failure
+        self.connected = False
+        self._buffered_audio.clear()
+        self._trace("provider.account.blocked", {"lane": "dialogue", **failure.public()})
+        self._schedule({"type": "provider_unavailable", "lane": "dialogue",
+                        "reason": str(failure), "retryable": False, "code": failure.code})
 
     def _configure_dialogue(self, conversation) -> None:
+        from egoassist.core.settings import integer
+        silence_ms = integer('EGOASSIST_SPEECH_END_SILENCE_MS', 1200, minimum=300, maximum=3000)
         tools = [] if getattr(self, "tool_model", None) else getattr(self, "_provider_tools", [])
-        signature = (conversation, self.voice, self.instructions, json.dumps(tools, sort_keys=True))
+        signature = (conversation, self.voice, self.instructions, json.dumps(tools, sort_keys=True), silence_ms)
         if getattr(self, "_last_dialogue_configuration", None) == signature:
             return
         conversation.update_session(
@@ -723,13 +834,14 @@ class OmniBrowserBridge:
             enable_turn_detection=True,
             turn_detection_type="server_vad",
             turn_detection_threshold=0.2,
-            turn_detection_silence_duration_ms=650,
+            turn_detection_silence_duration_ms=silence_ms,
             turn_detection_param={"create_response": False, "interrupt_response": not getattr(self, "interaction_managed", False)},
             tools=tools,
         )
         self._last_dialogue_configuration = signature
         self._trace("model.prompt", {"channel": "session.update", "instructions": self.instructions,
-                                    "tools": tools, "model": getattr(self, "model", None)})
+                                    "tools": tools, "model": getattr(self, "model", None),
+                                    "speechEndSilenceMs": silence_ms})
 
     def _replay_context(self, conversation) -> int:
         harness = getattr(self, "_context_harness", None)
@@ -737,6 +849,8 @@ class OmniBrowserBridge:
             return 0
         items = harness.provider_replay_items()
         for item in items:
+            if self.closed or conversation is not self.conversation:
+                return 0
             conversation.create_item(item)
         self._replayed_compaction_id = harness.projection_checkpoint_id
         self._dialogue_exchanges = 0  # reset after each fresh DashScope session
@@ -750,18 +864,31 @@ class OmniBrowserBridge:
 
     async def _connect_dialogue(self) -> None:
         async with self._reconnect_lock:
+            if getattr(self, "_blocked_failure", None) is not None:
+                raise self._blocked_failure
             if self.closed or self.connected:
                 return
             self._dialogue_generation += 1
             generation = self._dialogue_generation
             conversation = self._new_dialogue_conversation(generation)
             self.conversation = conversation
+            started = time.monotonic()
+            await self.emit({"type": "connection_progress", "stage": "provider-connect"})
             await asyncio.to_thread(_connect_with_resolved_ip, conversation)
+            if self._blocked_failure is not None:
+                await asyncio.to_thread(conversation.close)
+                raise self._blocked_failure
             if generation != self._dialogue_generation or self.closed:
                 await asyncio.to_thread(conversation.close)
                 return
-            self._configure_dialogue(conversation)
-            self._replay_context(conversation)
+            await self.emit({"type": "connection_progress", "stage": "context-restore"})
+            # The SDK sends synchronously; history replay must not block HTTP,
+            # WebSocket heartbeats, or cancellation on the application loop.
+            await asyncio.to_thread(self._configure_dialogue, conversation)
+            await asyncio.to_thread(self._replay_context, conversation)
+            if generation != self._dialogue_generation or self.closed:
+                await asyncio.to_thread(conversation.close)
+                return
             self.connected = True
             self._reset_scheduler_after_reconnect()
             self._replayed_audio_samples = 0
@@ -771,11 +898,13 @@ class OmniBrowserBridge:
                 self._replayed_audio_samples += len(base64.b64decode(audio)) // 2
             self._trace("provider.session.ready", {
                 "lane": "dialogue", "generation": generation,
-                "turnDetection": "server-vad-explicit-response",
+                "startupMs": round((time.monotonic() - started) * 1000, 1),
+                "backend": getattr(self, "backend", "omni"),
+                "turnDetection": "webrtc-vad-segment-asr" if getattr(self, "backend", "omni") == "modular" else "server-vad-explicit-response",
             })
 
     def _schedule_reconnect(self, reason: str) -> None:
-        if self.closed or self._reconnect_scheduled or not self.loop.is_running():
+        if self.closed or getattr(self, "_blocked_failure", None) is not None or self._reconnect_scheduled or not self.loop.is_running():
             return
         self._reconnect_scheduled = True
         asyncio.run_coroutine_threadsafe(self._recover_dialogue(reason), self.loop)
@@ -788,6 +917,11 @@ class OmniBrowserBridge:
             self._trace("provider.session.reconnecting", {"lane": "dialogue", "reason": reason})
             self._drop_open_input_segments(f"provider-reconnect:{reason}")
             self._persist_active_interruptions(f"provider-reconnect:{reason}")
+            text_conversation = getattr(self, "_text_conversation", None)
+            if text_conversation is not None:
+                await text_conversation.aclose()
+                self._text_conversation = None
+            self._response_conversation = None
             old = self.conversation
             self.connected = False
             self._dialogue_generation += 1
@@ -862,11 +996,26 @@ class OmniBrowserBridge:
 
     def _input_segment_stopped(self, payload: dict[str, Any]) -> None:
         with self._media_lock:
-            segment_id = getattr(self, "_active_input_segment_id", None)
-            if segment_id in getattr(self, "_input_segment_contexts", {}):
-                self._input_segment_contexts[segment_id]["audioEndMs"] = payload.get("audio_end_ms")
-            self._active_input_segment_id = None
-            self._input_speech_active = False
+            contexts = getattr(self, "_input_segment_contexts", {})
+            item_id = payload.get("item_id")
+            active = getattr(self, "_active_input_segment_id", None)
+            segment_id = next((sid for sid, row in contexts.items()
+                               if item_id and row.get("providerItemId") == item_id), None)
+            if segment_id is None:
+                # Some provider stops replace the provisional VAD-start item ID.
+                # Rebind only the sole open interval; never guess between intervals.
+                opened = [sid for sid, row in contexts.items() if row.get("audioEndMs") is None]
+                if opened == [active]:
+                    segment_id = active
+            if segment_id in contexts:
+                row = contexts[segment_id]
+                row["audioEndMs"] = payload.get("audio_end_ms")
+                if item_id and row.get("providerItemId") != item_id:
+                    row["startProviderItemId"] = row.get("providerItemId")
+                    row["providerItemId"] = item_id
+            if segment_id == active:
+                self._active_input_segment_id = None
+                self._input_speech_active = False
         self._trace("input.segment.stopped", {
             "segmentId": segment_id,
             "providerItemId": payload.get("item_id"),
@@ -915,7 +1064,7 @@ class OmniBrowserBridge:
             )
 
     def append_audio(self, audio_b64: str) -> bool:
-        if not audio_b64:
+        if not audio_b64 or getattr(self, "_blocked_failure", None) is not None:
             return False
         if not getattr(self, "connected", True) or not self.conversation:
             self._buffer_audio_for_reconnect(audio_b64)
@@ -1077,7 +1226,7 @@ class OmniBrowserBridge:
                 should_dispatch = True
         if should_cancel:
             try:
-                self.conversation.cancel_response()
+                self._cancel_provider_response()
                 self._trace("response.cancel.requested", {"reason": "higher-priority-request"})
             except Exception:
                 pass
@@ -1613,7 +1762,7 @@ class OmniBrowserBridge:
 
     def set_context_harness(self, harness: ContextHarness) -> None:
         self._context_harness = harness
-        entries = harness.journal.entries()
+        entries = harness.journal.entries(types={"tool_call", "tool_result", "tool_execution"})
         finished = {e.get("callId") for e in entries if e.get("type") == "tool_result"}
         calls = {e.get("callId"): e for e in entries if e.get("type") == "tool_call"}
         # A process loss can occur after an external effect but before its receipt.
@@ -1625,7 +1774,7 @@ class OmniBrowserBridge:
                     "status": "interrupted", "reason": "Execution ended without a committed result; effect is unconfirmed and was not repeated.",
                 }, is_error=True, metadata={"origin": entry.get("origin", {})})
         self._pending_tool_calls = harness.journal.pending_tool_confirmations()
-        for entry in harness.journal.entries()[-512:]:
+        for entry in harness.journal.entries(tail=512):
             if entry.get("type") == "tool_call" and entry.get("callId"):
                 self._remember_tool_call_signature(str(entry["callId"]), (
                     str(entry.get("name", "")),
@@ -1883,7 +2032,7 @@ class OmniBrowserBridge:
             else:
                 self._cancel_when_created = True
         if should_cancel:
-            self.conversation.cancel_response()
+            self._cancel_provider_response()
         runner = getattr(self, "_tool_runner", None)
         if runner:
             runner.cancel_selection()
@@ -1918,7 +2067,7 @@ class OmniBrowserBridge:
                 and request.purpose == "conversation" and request.reason != "tool-result"
                 and (request.origin or {}).get("turnId")):
             turn_id = request.origin["turnId"]
-            receipts = [entry for entry in self._context_harness.journal.entries()
+            receipts = [entry for entry in self._context_harness.journal.entries(types={"tool_result", "tool_execution"})
                         if entry.get("type") in {"tool_result", "tool_execution"}
                         and (entry.get("origin") or entry.get("metadata", {}).get("origin", {})).get("turnId") == turn_id]
             if receipts:
@@ -1941,7 +2090,12 @@ class OmniBrowserBridge:
             self._return_result_to_inbox(request, "output-permission")
             self._trace("response.permission.blocked", {"origin": request.origin, "purpose": request.purpose})
             return
+        if (getattr(self, "backend", "omni") == "omni"
+                and (request.origin or {}).get("inputChannel") == "explicit-control"):
+            self.loop.call_soon_threadsafe(self._send_text_response, request)
+            return
         try:
+            self._response_conversation = self.conversation
             self._trace("response.dispatched", {"sequence": request.sequence, "priority": request.priority, "speechPolicy": request.speech_policy, "outputMode": request.output_mode, "purpose": request.purpose,
                                                 "instructions": request.instructions, "origin": dict(request.origin or {})})
             self.conversation.create_response(
@@ -1957,6 +2111,68 @@ class OmniBrowserBridge:
                     self._response_pending = False
                     self._inflight_response = None
             raise
+
+    def _send_text_response(self, request: _ResponseRequest) -> None:
+        try:
+            self._start_text_response(request)
+        except Exception as exc:
+            with self._response_lock:
+                if self._inflight_response is not request:
+                    return
+                self._inflight_response = None
+                self._response_pending = False
+                self._cancel_when_created = False
+            self._trace("response.text_start.failed", {"error": type(exc).__name__, "origin": request.origin})
+            self._schedule({"type": "error", "message": "文字回答启动失败，请重试。"})
+            lifecycle = getattr(self, "_response_lifecycle_handler", None)
+            if lifecycle:
+                lifecycle(dict(request.origin or {}), "suspended")
+            self._return_result_to_inbox(request, "text-response-start-failed")
+            self._schedule_queued_dispatch()
+
+    def _start_text_response(self, request: _ResponseRequest) -> None:
+        # An explicit text turn must not wait for an audio commit in Omni.
+        # Rebuild this delivery channel from the same durable context and tools.
+        if self.closed or self._inflight_response is not request:
+            return
+        if self._cancel_when_created:
+            with self._response_lock:
+                self._inflight_response = None
+                self._response_pending = False
+                self._cancel_when_created = False
+            self._return_result_to_inbox(request, "text-response-cancelled-before-start")
+            self._schedule_queued_dispatch()
+            return
+        from .modular import ModularConversation
+
+        conversation = getattr(self, "_text_conversation", None)
+        if conversation is None:
+            conversation = ModularConversation(
+                model=self.model, api_key=self.api_key,
+                callback=self._Callback(self._dialogue_generation), text_only=True,
+            )
+            self._text_conversation = conversation
+            conversation.connect()
+        conversation.update_session(enable_input_audio_transcription=True, instructions=self.instructions)
+        conversation.items.clear()
+        conversation.item_ids.clear()
+        if self._context_harness is not None:
+            for item in self._context_harness.provider_replay_items():
+                conversation.create_item(item)
+        self._response_conversation = conversation
+        self._trace("response.dispatched", {
+            "sequence": request.sequence, "purpose": request.purpose, "outputMode": request.output_mode,
+            "instructions": request.instructions, "origin": dict(request.origin or {}),
+            "backend": "text-and-tts", "model": conversation.model,
+        })
+        conversation.create_response(
+            instructions=request.instructions,
+            output_modalities=["text"] if request.output_mode == "text" else ["audio", "text"],
+        )
+
+    def _cancel_provider_response(self) -> None:
+        conversation = getattr(self, "_response_conversation", None) or self.conversation
+        conversation.cancel_response()
 
     def _schedule_response_watchdog(self, stage: str, identity: int | str, generation: int) -> None:
         loop = getattr(self, "loop", None)
@@ -2064,6 +2280,7 @@ class OmniBrowserBridge:
         self._trace(
             "response.created",
             {"sequence": request.sequence, "purpose": request.purpose, "outputMode": request.output_mode,
+             "model": (payload.get("response") or {}).get("model"),
              "providerInitiated": provider_initiated, "origin": dict(request.origin or {})},
             response_id=response_id,
         )
@@ -2085,7 +2302,7 @@ class OmniBrowserBridge:
                 "finish", response_id, getattr(self, "_dialogue_generation", 0),
             )
         if should_cancel:
-            self.conversation.cancel_response()
+            self._cancel_provider_response()
 
         self._schedule({"type": "response_status", "status": "responding", "responseId": response_id,
                         "origin": request.correlation})
@@ -2153,7 +2370,10 @@ class OmniBrowserBridge:
         if request and request.origin and lifecycle_handler:
             try:
                 lifecycle_handler(
-                    {**dict(request.origin), "responseId": response_id}, "suspended" if interrupted else "completed",
+                    {**dict(request.origin), "responseId": response_id,
+                     **({"audioAvailable": response["audioAvailable"]}
+                        if isinstance(response, dict) and isinstance(response.get("audioAvailable"), bool) else {})},
+                    "suspended" if interrupted else "completed",
                 )
             except Exception as exc:
                 self._trace("intent.lifecycle.update_failed", {"error": str(exc)})
@@ -2186,6 +2406,7 @@ class OmniBrowserBridge:
                 usage,
                 status=event_type.removeprefix("response."),
                 model=str(model) if model else None,
+                context_scope="request" if str(response_id).startswith("modular-") else "persistent-session",
             )
         self._trace(
             "response.finished",
@@ -2197,6 +2418,7 @@ class OmniBrowserBridge:
                 "interrupted": interrupted,
                 "localCancelRequested": locally_cancelled,
                 "providerStatus": provider_status,
+                "model": response.get("model") if isinstance(response, dict) else None,
                 "origin": dict(request.origin or {}) if request else {},
             },
             response_id=response_id or None,
@@ -2206,7 +2428,7 @@ class OmniBrowserBridge:
                         "providerStatus": provider_status})
         # Track completed exchanges so refresh_harness_context() can trigger
         # a proactive compact+reconnect when DashScope's live context grows too large.
-        if not interrupted:
+        if not interrupted and not str(response_id).startswith("modular-"):
             self._dialogue_exchanges = getattr(self, "_dialogue_exchanges", 0) + 1
         if should_dispatch:
             self._schedule_queued_dispatch()
@@ -2372,10 +2594,13 @@ class OmniBrowserBridge:
     def provider_lanes_snapshot(self) -> dict[str, Any]:
         return {
             "dialogue": {
+                "backend": getattr(self, "backend", "omni"),
+                "models": getattr(self, "modular_config", None),
                 "connected": self.connected,
+                "providerError": self._blocked_failure.public() if getattr(self, "_blocked_failure", None) else None,
                 "microphone": True,
-                "cameraContext": True,
-                "turnDetection": "server-vad-explicit-response",
+                "cameraContext": "question-bound-visual-evidence" if getattr(self, "backend", "omni") == "modular" else True,
+                "turnDetection": "webrtc-vad-segment-asr" if getattr(self, "backend", "omni") == "modular" else "server-vad-explicit-response",
                 "userVisibleOutput": True,
             },
             "perception": self.perception.snapshot(),
@@ -2409,6 +2634,10 @@ class OmniBrowserBridge:
         self.connected = False
         self._drop_open_input_segments("bridge-closed")
         self._dialogue_generation += 1
+        text_conversation = getattr(self, "_text_conversation", None)
+        if text_conversation is not None:
+            await text_conversation.aclose()
+            self._text_conversation = None
         if getattr(self, "_tool_runner", None):
             await self._tool_runner.close()
         if getattr(self, "tool_model", None):

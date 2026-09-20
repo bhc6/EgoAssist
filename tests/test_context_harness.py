@@ -263,7 +263,8 @@ def test_turn_context_is_audited_but_only_original_transcript_is_replayed(tmp_pa
     replay = harness.provider_replay_items()
     assert len(replay) == 1
     assert replay[-1]["role"] == "user"
-    assert replay[-1]["content"][0]["text"] == "现在的问题"
+    assert replay[-1]["content"][0]["text"].endswith("\n现在的问题")
+    assert "recorded at" in replay[-1]["content"][0]["text"]
     assert "current_turn_context" not in replay[-1]["content"][0]["text"]
 
 
@@ -363,6 +364,32 @@ def test_provider_usage_forces_projection_checkpoint_and_is_audited(tmp_path):
     assert built["manifest"]["providerUsage"]["inputTokens"] == 900
     assert built["manifest"]["providerUsageAppliesToProjection"] is False
     assert built["manifest"]["latestCompactionId"] == compaction["id"]
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+def test_request_usage_is_audited_without_rebuilding_live_session(tmp_path, legacy):
+    journal = SessionJournal(tmp_path / "request-usage.jsonl")
+    harness = ContextHarness(journal, small_settings())
+    harness.record_user("hello", source="test", turn_id="one")
+    payload = {"responseId": "modular-text", "model": "qwen-flash", "usage": {"inputTokens": 32000}}
+    if not legacy:
+        payload["contextScope"] = "request"
+    journal.append("provider_usage", payload)
+    built = harness.build([ContextLayer("policy", "bounded", required=True)])
+    assert not journal.entries(types={"compaction"})
+    assert built["manifest"]["providerUsage"]["inputTokens"] == 32000
+    assert built["manifest"]["providerUsageAppliesToProjection"] is False
+    # An unrelated HTTP call must not hide a real Omni budget overflow either.
+    harness.record_provider_usage("omni-response", {"inputTokens": 900}, status="done")
+    for i in range(4):
+        journal.append("provider_usage", {**payload, "responseId": f"modular-{i}"})
+    built = harness.build([ContextLayer("policy", "bounded", required=True)])
+    assert len(journal.entries(types={"compaction"})) == 1
+    assert built["manifest"]["providerUsageAppliesToProjection"] is False
+    # Restarted projection also respects the compaction boundary.
+    reopened = ContextHarness(SessionJournal(journal.path), small_settings())
+    reopened.build([ContextLayer("policy", "bounded", required=True)])
+    assert len(journal.entries(types={"compaction"})) == 1
 
 
 def test_journal_refreshes_only_appended_tail_across_instances(tmp_path, monkeypatch):

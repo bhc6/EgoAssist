@@ -1,6 +1,6 @@
 """全局配置。所有可调超参集中在此，便于消融实验。"""
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 
 @dataclass

@@ -2,7 +2,7 @@
 from datetime import datetime, timezone
 import hashlib
 
-from egoassist.product.contracts import ObservationReferenceCheck
+from egoassist.core.contracts import ObservationReferenceCheck
 
 
 class ObservationReviews:

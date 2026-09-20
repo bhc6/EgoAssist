@@ -1,180 +1,310 @@
-# EgoAssist 记忆机制
+# EgoAssist 记忆机制与完整链路
 
-本文描述当前代码，而非预期能力。目标是在可审计原始证据上提供低延迟回忆，尽量少规定人物类型、关系本体和专用字段。用户隔离、时钟、来源和执行权限仍是必要约束。
+本文按 **2026-09-20 当前工作区源码**核对，包含尚未提交的实现；描述实际调用路径，不把历史设计或实验能力当作默认产品能力。主框架见 [ARCHITECTURE.md](ARCHITECTURE.md)。
 
-记忆是[观察、交互、记忆主框架](ARCHITECTURE.md)中的平级链路，接收观察证据与用户原话，为另外两条链路提供可追溯背景。补答属于交互；报告和建议候选属于记忆加工，主动播报由交互决定。
+当前机制可以概括为：**先保留来源，再按需形成结构化记忆；回答时检索来源与卡片，按预算组装上下文；后台完成恢复、事件整理和日记；纠正与删除分别处理来源、派生记录和缓存。** 模型连接是临时的，本地日志和数据库负责持久化。
 
-最新路径优先保存完整来源事件，不再用电话、位置、服药正则补造事实，也不要求特定“保存”关键词。模型故障时，原话进入持久后台解析队列，沿用原始时钟、来源和未知说话人归属；后台只补记忆，不重放操作。恢复失败可从审计界面重试。语音与文字具有相同指令能力，声纹分析只补充归属证据。旧章节中的历史结果应结合[八项改造及真实验收](docs/HARDCODING_REFACTOR_2026-09-10.md)阅读。
+## 1. 先区分六类“记忆”
 
-## 组件分工
+| 层 | 实际内容与职责 | 主要实现 | 默认应用中的位置 |
+| --- | --- | --- | --- |
+| 原始来源 | 用户原话、已交付助手文本、采样观察、工具回执、请求及状态日志；支持追溯与恢复 | [core/journal.py](egoassist/core/journal.py)、[core/source_events.py](egoassist/core/source_events.py) | 来源底座；并非所有日志类型都进入原文检索 |
+| 原文证据索引 | 将部分来源全文切段、FTS 检索、补相邻轮次，生成可复用证据包 | [memory/source_index.py](egoassist/memory/source_index.py)、[evidence_service.py](egoassist/memory/evidence_service.py) | 历史 API 直接使用；实时开启 episodic 时也使用 |
+| Timeline 卡片 | 事实、事件、状态、偏好及观察的结构化视图；范围、时间、状态、纠正和确认 | [memory/timeline.py](egoassist/memory/timeline.py)、[commit.py](egoassist/memory/commit.py) | 在线记忆；与原文索引并行存在 |
+| 模型工作上下文 | 系统/Skill 政策、状态、摘要、近期消息及本轮检索证据 | [realtime/context_harness.py](egoassist/realtime/context_harness.py) | 每次模型会话的预算内投影 |
+| 派生整理 | 长事件、当前建议、个人日记、日/周/月回顾 | [realtime/long_events.py](egoassist/realtime/long_events.py)、[memory/insights.py](egoassist/memory/insights.py)、[diary/](egoassist/diary/) | 有来源引用的后台加工；不能成为独立事实证明 |
+| 离线向量记忆 | 视频分段、向量索引、事件合并、来源展开、关键帧定位 | [memory/store.py](egoassist/memory/store.py)、[qa/pipeline.py](egoassist/qa/pipeline.py) | 研究路径；未作为默认实时检索器 |
 
-| 组件 | 实际职责 | 默认实时路径 |
-| --- | --- | --- |
-| `SessionJournal` / `ContextHarness` | 原始交流、执行轨迹、预算内上下文和确定性摘取 | 是 |
-| `TimelineMemory` | SQLite 原文卡片、FTS 词法检索、用户/案例/时间边界 | 是 |
-| `RealtimeEpisodeMemory` / `PreferenceMemory` | Timeline 的业务适配器，事件、保存同意与偏好确认 | 是；不是独立算法或第三种数据库 |
-| `HierarchicalMemory` | 离线向量研究：事件合并、分层检索、来源展开与帧定位 | 否 |
+`RealtimeEpisodeMemory` 和 `PreferenceMemory` 是同一个 Timeline 的业务适配器。`case/participant` 是召回范围，`short/long` 是存储层级，`current` 是检索时派生的近期视图；这些概念不能互换。LiveKit 是媒体传输，Temporal 是提醒工作流，都不是记忆数据库。
 
-`memory_policy.py` 的 profile 是共享组件的开关组合，不是四套独立算法。LiveKit 是媒体传输，Temporal 是提醒工作流，均不是记忆模型。
-
-## 数据流
-
-环境观察与任务检查使用独立的有界视觉通道，回答生成不停止观察。观察请求引用近期用户原话、案例记忆、待澄清事项和任务状态；这些历史背景不能证明当前画面事实。每个问题保存当时已收到、采集时间不晚于问题边界的观察快照，携带来源、帧时间和不确定性，后到观察不会覆盖这个快照。原帧的专门问答结果仍可补充同一问题。详见[三链路实现与真实验收](docs/OBSERVATION_LANES_2026-09-10.md)。
+## 2. 从输入到回答的完整链路
 
 ```mermaid
 flowchart TD
-    Input[发言 / 观察 + 用户与案例] --> Journal[原始会话日志]
-    Input --> Router[单次路由提出语义候选]
-    Router --> Validate[原文依据 / 同意 / 时间校验]
-    Validate --> Cards[SQLite 证据卡片]
-    Query[查询 + 当前时间 + 用户时区] --> Retrieve[范围过滤与词法检索]
-    Cards --> Retrieve
-    Retrieve --> Evidence[原文 + 来源 + 记录时间 + 事件时间]
-    Journal --> Context[预算内上下文]
-    Evidence --> Context
-    Context --> Answer[实时回答]
-    Journal --> Jobs[异步报告]
-    Jobs --> Report[独立模型 + 引用校验]
-    Report --> Journal
+    U[文字或语音输入] --> T[TurnCoordinator / 持久 turn_inbox]
+    T --> J[SessionJournal / 原话与来源时钟]
+    T --> R[SemanticTurnRouter / 语义候选]
+    R --> C[MemoryCommitService / 政策与来源约束]
+    C --> M[Timeline / 结构化卡片]
+    R -->|失败或记忆字段无效| REC[MemoryRecovery / 后台补解析]
+    REC --> M
+    O[采样声画] --> V[ObservationService / 校验]
+    V --> J
+    V -->|开启事件记忆且证据有变化| M
+    H[独立历史导入] --> J
+    J --> S[SourceIndex / 全文索引]
+    Q[本轮问题与范围] --> S
+    Q --> M
+    S --> P[EvidencePackage / 原文片段与邻接轮次]
+    M --> I[Timeline 检索证据与偏好]
+    J --> X[ContextHarness / 摘要与近期消息]
+    P --> A[前台回答 / 原生历史问答 / 后台补答]
+    I --> A
+    X --> A
+    J --> L[长事件 / Insight / 日记]
+    M --> L
+    A -->|交付与请求回执| J
 ```
 
-## 原文、索引与状态
+箭头表示数据依赖，不表示一个统一事务。实时 Timeline 通常先检索已有卡片，再提交本轮记忆；原文证据包在交互处理尾部生成，并排除当前用户消息作为检索来源。原生 `/api/history/*` 不经过实时指令路由。
 
-无任务观察默认采用开放描述，不再使用服药和地点分类白名单。模型只返回描述、可见证据、疑点、澄清问题和变化提示；兼容旧习惯接口的 activityId 是描述文本，不是固定本体。每次送检帧及模型原文完整保留，Timeline 保存可见证据并绑定采样时间、用户时区、原帧校验值和 observationId。相邻完全相同的证据文本不重复建卡；模型的变化标记不能删除原始观测。日报、周报、月报的共享来源收集器也包含这些观测，按采样时间筛选，并明确区分视觉模型观察与用户亲述。
+### 2.1 用户发言
 
-必要的澄清由交互链路安排，发送音频后进入待补充记忆流程，用户后续回应交给语义路由解释。静音、未决输入、已有待确认事项和提问间隔会暂缓主动提问；之后的新鲜采样可以重新判断，刷新后恢复已问状态。设备开始播放与澄清结束分别记录，不声称用户一定听见或同意。
+1. `TurnCoordinator` 先用 `turn_inbox` 保存收到的原始输入，按轮次组织分类与执行。`turn_inbox_state` 表示处理状态，`turn_delivery` 表示回答交付状态，两者分离。
+2. `InteractionService.process_transcript` 取得或写入用户 `message`；若已有来源记录，时钟回到 `sourceRecordedAt` 或原始日志时间，避免排队后改用处理时间解释“昨天”。
+3. `SemanticTurnRouter` 提出 `memoryAtoms`、`memoryDraft`、`memoryQuerySpec`、指令和交互候选。单个 `event` 优先保留整段原话；多事件摘录必须存在于原话。结构化事实的字段和范围会验证，但并无通用的事实蕴含证明器。
+4. `InteractionService` 按配置检索案例卡片，并在允许时补取同账户的 participant 记忆；`MemoryCommitService.commit` 随后处理本轮写入、草稿与纠正，任务偏好另经适配器处理。
+5. 开启 episodic 记忆且有账户案例时，调用 `EvidenceService.query` 生成同案例原文证据包，排除本轮用户消息，并追加 `evidence.package` 日志。
+6. `grounded_user_instructions` 将本轮卡片证据和原文证据包注入前台回答；`turn_answer_context` 将问题、证据、时钟、任务状态和声画快照保存给后台补答。
 
-真实 Qwen + EgoLife 样本已通过“旧记忆与当前画面不一致 → 主动澄清 → 用户明确纠正 → 旧记忆版本化 → 刷新不重复提问”。原始开放观测实验见[开放观测验收](docs/OPEN_OBSERVATION_2026-09-10.md)，新增证据见[跨链路闭环验收](docs/CROSS_LANE_REVIEW_2026-09-10.md)。采样不是连续录像，有限样本不能证明所有模糊行为均能正确识别。
+源码入口：[turn_coordinator.py](egoassist/realtime/turn_coordinator.py)、[interaction_service.py](egoassist/realtime/interaction_service.py)、[semantic.py](egoassist/realtime/semantic.py)、[composition.py](egoassist/application/composition.py)、[answer_service.py](egoassist/product/answer_service.py)。
 
-追加日志保存发言、模型请求、工具回执、任务转换和报告。摘要或索引缩短不应抹掉来源。Timeline 是可检索视图，单条索引文本目前有 1,000 字符上限，不能代替完整原文日志。
+### 2.2 观察与工具回执
 
-问题原文首先进入 `turn_inbox`。`turn_inbox_state` 表示路由和状态处理，`turn_delivery` 单独表示收到、正在回答、响应完成、中断或失败。新话题不会删除旧问题；已处理却没有完整输出的问题不能标成回答成功。同一问题可能有多个子任务，详细结果仍需查看对应 intent/job/result；问题行不是所有子任务都成功的证明。
+开放观察保存可见证据、疑点、采样时间、来源帧及媒体引用。`ObservationService` 校验授权、采样上下文和模型结构后，记录产品观察和 `ambient_observation`，更新场景并调度长事件整理。观察结果仍是模型对采样的解释。
 
-明确更正通过 `turn_revision` 关联新旧输入；语义模型仍可能漏识别更正，不能把普通换话题自动解释为撤销已执行的记忆或工具动作。重复文本请求用客户端 ID 去重，音频/字幕用问题 ID 和响应 ID 归属；这些是传输和执行约束，不增加人物关系本体。
+开启 episodic 且满足观察条件时，可见证据与上一观察不同才创建 `observation` 卡片；重复可见文字不建新卡，但已接受的原始观察日志仍保留。任务检查、工具回执和任务状态有各自日志及投影；`remember_tool_effect` 可记录工具效果卡片。当前 `SourceIndex` 并不索引每一种工具、任务或审计事件；日记使用更广的来源收集器。
 
-现场历史比对提供 `memoryCandidates` 后，语义路由可对当前用户明确纠正的目标生成 `memoryAtoms.replaces`。模型优先使用当前快照的短引用，服务端映射回真实记忆 ID，并验证用户、案例、范围及活动状态；旧卡设为 `superseded` 与新卡写入同一 SQLite 事务。原始发言和旧卡保留。若旧陈述只保存成事件卡，也能版本化该卡；另存的历史发言事件仍可能保留，不能将“过去说过”误当作当前有效事实。当前只允许同案例的明确目标，不是全局自动矛盾消解。
+提问的现场快照绑定当时证据。历史帧回看还要求采样时间和提交时间都不晚于问题边界。旧背景和后到观察不能自动变成“提问当时现场”的证明。
 
-| 数据 | 作用 | 边界 |
+### 2.3 历史导入
+
+`POST /api/history/import` 接收 `conversation_id` 和 1–500 条独立事件，每条允许 `id/text/speaker/source_at/timezone/media_refs/supersedes`，文字上限 100,000 字符。验证账户拥有该案例后，直接追加 `source.event`，不执行 Skill、工具，也不要求抽取卡片成功。
+
+同一来源 ID、同一内容重复导入是幂等的；不同内容复用 ID 被拒绝。修正使用新 ID 和 `supersedes`，目标必须已在该会话中存在。被擦除的 ID 不能用于重新导入。来源日志保存成功而索引同步失败时返回 `accepted-index-pending`（HTTP 202），下次同步可重建索引。
+
+这里的 `supersedes` 目前只是提供给回答的修订关系：旧来源仍可检索，没有自动冲突裁决。它与 Timeline 将旧卡改为 `superseded` 的机制不同。
+
+## 3. 持久化位置与重建关系
+
+以默认 `--memory-path .egoassist/runtime.json` 为例，父目录 `.egoassist/` 是数据根目录；更换文件名但不更换父目录，不会得到独立数据环境。
+
+| 位置 | 保存内容 | 恢复与边界 |
 | --- | --- | --- |
-| `user_id/case_id/scope` | 身份与案例隔离 | 数据所有权不等于所有案例自动互相召回 |
-| `text/sourceIds` | 证据片段与引用 | 来源存在不证明陈述真实 |
-| `recordedAt` | 服务器记录时间 | 不一定是事件发生时间 |
-| `effectiveAt/effectiveEnd` | 可解析的事件有效时间 | 不接受模型任意编造日期 |
-| `evidenceContext` | 可选实体、场景、多时间引用 | 不是预定义图谱或可靠身份消歧 |
-| `subject/predicate/value` | 兼容明确的单值事实和状态更新 | 不强迫交流事件成为三元组 |
-| `kind/status/tier` | 类型、生命周期和检索组织 | `long` 不表示事件一定久远 |
+| `identity.sqlite3` | 账户、案例、案例记忆政策和时区等 | 决定所有权和范围 |
+| `timeline.sqlite3` | `memory_cards`、草稿、全文索引及迁移状态 | 账户共享物理库，查询必须携带所有权条件；不能随意当缓存删除 |
+| `product.sqlite3` | 产品状态、观察、任务及隐私政策等 | 产品投影与持久状态，非全文记忆替代品 |
+| `users/<user>/sessions/<session>.jsonl` | 原话、历史来源、观察、控制、工具、作业、审计、压缩检查点 | 在线来源与恢复依据；正常追加，隐私擦除会改写为墓碑 |
+| `users/<user>/source-index.sqlite3` | 原文 `events`、FTS `passages`、日志游标、证据 `snapshots` | 可从来源重建；删除缓存也会丢掉其中的旧快照 ID |
+| `users/<user>/diary.sqlite3` | 日记归档、生成检查点、补记、反馈、定时设置 | 独立数据库；个人补记不能从会话日志重建 |
+| 案例关联媒体及 trace | 采样 JPEG/WAV、来源校验值、记忆活动与请求证据 | 并非连续全天录音录像；随隐私和保留流程处理 |
 
-`kind` 包含 `fact/event/state/preference/task-preference/scene/observation/tool-effect/capture/legacy`。capture 默认不可召回，空类型集合不能扩大范围。旧卡片通过 schema 迁移保留。
+`SessionJournal.project` 维护增量投影，追加时增量归约，文件改写后使投影失效。会话恢复依据本地日志，不依赖云端模型记住上次连接。
 
-`short/long` 是持久层级，`current` 是根据时间窗口派生的视图。Timeline 整理主要做确定性提升和状态管理，不等同于离线向量有损合并。
+整个根目录由单进程写入租约保护。SQLite 单库事务、日志追加、媒体落盘之间没有一个跨文件原子事务；也没有跨设备同步协议。备份应停止写入后复制完整根目录，不能只备份 `runtime.json`。
 
-## 写入与范围
+## 4. 原文检索：SourceIndex
 
-单次路由可提出事件和查询，不要求额外提取请求。单事件优先使用原始发言；多事件摘录、实体和场景需有原文依据。业务适配器决定能否保存及范围，模型的 `explicit` 标签本身不能授权跨案例长期保存。
+### 4.1 哪些记录进入索引
 
-普通事件通常留在当前案例。显式保存、已确认偏好等符合政策的内容可进入 `participant` 范围。两种范围都有同一用户边界。任务偏好存在提议与确认流程，不能把建议视为已接受。
+`core/source_events.project_source` 只投影以下来源：独立历史 `source.event`、状态为 `completed` 的 user/assistant `message`、已接受且有可见证据的 `ambient_observation`。
 
-有效保存需要实际卡片 ID 和来源。模型说“记住了”不算成功；真实验收需要关闭原连接，在新会话中查到卡片并正确使用随机测试值。
+每条来源带 `sourceId = sessionId:journalEventId`、完整 `text`、`speaker`、`sourceAt`、`receivedAt`、媒体引用和 `sourceHash`。`eventTime/validTime` 初始保持未知。助手文本标为 `assistant-delivery`，只能证明助手交付过这些文字，不能证明用户经历或现实动作。
 
-## 检索与人际交流
+因此，**原话已在 `turn_inbox` 保存，不等于已经进入 SourceIndex**：还要形成可投影的 completed 消息。会话 UI 能显示后台补答，也不意味着单独的 `answer.job` 就会成为全文索引来源。
 
-Timeline 使用 SQLite、FTS5 与词项重叠排序，默认不调用 embedding 或 FAISS。用户、案例、类型、已知主体/关系、实体、场景和时间约束候选；精确键可优先定位明确单值事实。
+### 4.2 同步、召回与预算
 
-当前仍读取范围内候选并在 Python 中检查，不是常数时间检索。严格标签能减少误召回，也会漏掉别名、同义词和关系链中间事件。尚未实现通用实体消歧、多跳推理或跨句时间解析。
+`sync()` 检查账户内会话日志的大小、修改时间、文件身份和前缀，追加场景从已读偏移续读；替换或缩短时重建该会话。删除/替换来源时检查旧快照依赖，失效快照不能继续取用。未完成的末行留待下次读取。
 
-`evidenceNetwork` 是从卡片构造的共现投影，显示人物、场景、事件和来源的关联，不自动创造“同事”“朋友”等事实边。同名不一定同人，共现不证明某种社会关系。
+默认检索流程：
 
-## 真实时间
+1. 将英文词和数字分词；连续中文使用双字片段；过滤一组英文停用词。查询最多取 64 个词项，FTS5 使用 OR 匹配和 BM25 排序。
+2. 完整原文按 **1,800 字符、步长 1,640** 切段，因此长文本尾部可以被检索，不只搜索开头。
+3. 只在指定案例内召回，最多检查 **256 个匹配片段**；通常选最多 **12 个命中锚点片段**。
+4. 给命中锚点补前后一条已索引来源，各最多取 1,800 字符；锚点和补充片段共用 **24,000 字符**预算，最终 `sources` 数可能超过 12。
+5. 另提供最多 **8 条近期来源**作为 `conversation`，合计最多 **8,000 字符**。这是额外预算，不包含在前述 24,000 内。
+6. 返回片段范围 `span`、完整长度、召回原因、候选审计、覆盖统计和快照 ID。
 
-`ClockContext` 提供服务器 UTC、用户时区和本地时间。代码计算日期；模型选择原文时间片段、角色和锚点。时区不可解析时披露回退来源。
+`audit` 覆盖本次取出的候选，不代表全库候选；`candidateTruncated` 说明是否超过 256。相邻来源按索引序号定义，不一定是紧挨着的原始 JSONL 行。没有词法命中时 `sources` 可以为空，而 `conversation` 仍有近期内容。
 
-若当地日期是 2026-09-09：
+### 4.3 快照与回答
 
-| 查询 | 可能解释 |
+`EvidencePackage` 包含 `sources/conversation/coverage/audit/conflicts/missingInformation` 等。快照记录此次已选证据，复用要求账户与案例正确、问题文字相同、来源仍存在且 hash 一致。追加其他来源不会扩展旧包；删掉被引用来源会使包失效。不同新查询各自取包，并非全局固定的语料快照。
+
+`POST /api/history/query` 只检索；`POST /api/history/ask` 用共享 `AnswerService` 生成结构化答案，返回 `answer/claims/unanswered_parts/conflicts/status`。校验结构和来源 ID，明确返回 `entailment: not-verified`、`statusAuthority: model-declared`。供应商故障返回 `unavailable`，与缺少证据的 `insufficient` 不同。
+
+实时前台和后台补答复用证据包/上下文契约，但不都经过原生历史 API 的结构化 `validate_answer`。原文检索没有自动向量融合、语义过滤或冲突消解；包中 `vector: not-enabled`、`conflictStatus: not-adjudicated` 正是当前边界。
+
+## 5. Timeline：如何形成、确认和更新记忆
+
+### 5.1 卡片字段与写入授权
+
+卡片包含 `user_id/case_id/scope`、`kind/tier/status`、原文或摘要、`sourceIds`、`subject/predicate/value`、来源时间、事件有效时间、`evidenceContext`、`grounding` 和修订关联。
+
+| 条件 | 默认处理 |
 | --- | --- |
-| 昨天讨论的前天的约定 | 讨论为 9 月 8 日、约定为 9 月 7 日，均相对当前发言 |
-| 昨天讨论、以那次讨论为参照的前天的约定 | 讨论为 9 月 8 日、约定为 9 月 6 日 |
-| 昨天他说“前天的约定” | 引语锚点可能不同，不明确时应澄清 |
+| 普通观察到的事实/状态/事件 | `case` 范围，通常 `short + active` |
+| 符合路由约束的明确长期保存 | `participant` 范围，`long + active`；受 preference 开关控制 |
+| 推测性原子 `consent=inferred` | `pending`，不进入默认 active 召回 |
+| 主体、指代或第一人称归属不明 | 记录 grounding 疑点；事实/状态/偏好可转 pending，召回过滤未解决指代 |
+| 只提出“记住”但缺主体或值 | 保存草稿，等待后续补充；不把草稿当已记住事实 |
+| 任务执行偏好 | 提议后由 `resolve_candidate` 接受/拒绝；按任务和检查点复用 |
 
-多个时间表达分别保留，不用单个关键词覆盖其余日期。可解析不表示语义一定正确，模型仍可能选错合法锚点。节日、农历、复杂转述和跨句指代没有全面验收。EgoLife 的 `DAY1` 不是可凭空确定的公历日期。
+语义标准化要求普通 observed 事实/状态/事件留在 case，explicit 保存使用 participant；兼容偏好规则另有分支。范围限制、原文摘录验证和说话人 grounding 是程序约束，用户意图与普通事实内容仍依赖模型判断，不能把 `explicit` 当成独立可靠的同意检测器。
 
-## 异步报告
+当前 `RealtimeEpisodeMemory.remember` 和 `TimelineMemory.remember` **不再统一截断到 1,000 字符**。UI 预览、提示词预算和各类模型输出仍可能有自己的长度限制。完整来源日志与结构化卡片各自保留，不能假定卡片涵盖全部原话。
 
-中断回答另由 `product/answer_jobs.py` 调度，不混入报告和记忆写入队列。每个已处理的问题保存当时的检索证据、提示词、时钟和任务快照。新问题只抢占语音，旧问题自动产生归属于原 `turnId` 的文字答案；恢复和重试不重放用户控制或工具。后台回答是模型输出，不作为用户事实写回记忆。
+成功保存以实际写出的 active 卡片 ID 为准：`memoryResponse.status=committed` 并有 `committedCardIds`。返回 `needs-input/not-committed` 或模型口头说“记住了”，都不等于保存成功。
 
-`answer.job/request/result` 保留排队、生成、失败、取消、实际请求和结果。界面展示原问题、答案、模型、耗时及请求 ID。前台已经生成完整答案时直接展示其转写；补答只有在中断、前台截止或重启恢复时启动。更正与取消在发布前检查，迟到结果不能覆盖取消状态。提示词位于 `prompts/answer_completion.json`。
+### 5.2 去重、纠正和晋升
 
-真实补答恢复测试发现，模型查询可能把实体和属性合并成一个标签。检索现在允许查询主体精确等于已存主体与属性的拼接，仍拒绝不同主体；没有加入取件码等领域词表。此修复不解决别名和任意同义词。完整验收还观察到时间锚点误判，以及路由超时后仅保留原文、缺少时间索引的降级，见[当前验收](docs/ANSWER_COMPLETION_2026-09-09.md)。
+- 同一来源、同一有效时间的重试复用卡片；稳定事实满足条件时合并支持来源。不同时间发生的相同事件/观察保留不同发生记录。
+- 单值事实由标准化 `subject + predicate` 形成键。允许更新的 active 状态会版本化旧值；迟到的较旧状态不会覆盖更新的状态。事件、观察、周期计划和带结束时间的陈述不无条件走这条覆盖路径。
+- 明确 `replaces` 必须指向给路由的候选，数据库还验证同用户、同案例、同范围、可替换类型和 active 状态。新卡与旧卡退役在同一 SQLite 事务内；同来源的重复原文事件投影也会被退役。原始日志仍保留。
+- 原文索引仍可能召回“过去说过的旧值”，它不依据 Timeline 状态自动剔除原文。回答必须区分历史陈述与当前有效事实；当前不是全局矛盾解决系统。
+- 默认 `current_window_seconds=600`、`short_term_capacity=40`。短期 active 卡片超容量时，`promote_to_long` 将较旧卡片**原地改为 long**，通常将 short 降到半容量；ID、时间和来源不变。晋升不是摘要、向量合并或删除。
 
-`InsightJobs` 保存任务、参数、状态、执行次数和阶段；`InsightGenerator` 收集原始用户记录，单独调用文本模型。两者复用会话日志，不增加记忆数据库。
+### 5.3 Timeline 检索
 
-1. `POST /api/insights` 持久化任务后返回 HTTP 202。
-2. 默认两个任务并行，新提交的总待办容量为 16，相同参数待办去重。
-3. 按用户时区计算日/周/月区间，周从周一开始，结束时间不含在内。
-4. 收集记录并披露总数、纳入数、遗漏数和错误。
-5. 保存实际提示词，调用独立模型，保留请求 ID、原始输出和用量。
-6. 校验输出结构与引用 ID，保存结果，前端恢复显示。
+`TimelineMemory.retrieve` 首先限定账户、范围、案例、active 状态与允许类型。`capture` 永不作为默认证据；默认类型也排除 `legacy/scene`，普通事件检索额外排除 `task-preference`，任务偏好走专门检索。
 
-默认预算为 300 条、32,000 字符，优先较新记录；超额标记不完整。这不是长周期完整分块汇总，也不是每日自动调度。按记录时间筛选输入，输出仍需区分事件日期、计划与已完成事实。
+范围内记录较少时读取全部候选；较多时结合精确键、FTS、时间窗口和近期记录收集有界候选。默认候选上限 **256**，可由 `EGOASSIST_MEMORY_CANDIDATE_LIMIT` 调整（32–4096）。之后在 Python 检查时间、主体、关系、实体、场景及指代约束。
 
-页面关闭后已受理任务继续执行。重启后未完成报告重新排队，恢复队列在名额释放时自动补位，不依赖页面刷新；连续重启不再触发固定两次执行上限。失败或取消的任务不会自动重试。
+普通排序分数为 `max(Jaccard 词项重叠, 归一化 BM25)`；精确主体/关系键符合所有硬约束时可置顶为 1.0。默认分数阈值 0.05、Timeline 默认 top-k 为 5；业务适配器和调用点可覆盖数量。分数不是正确率。时间未知的候选不能仅因键精确就回答特定日期的问题。
 
-进程停止可能导致供应商请求重做及额外费用，无法保证旧请求不会在供应商端完成。结果缓存不是跨外部系统的恰好一次协议。单写租约不支持多机竞争执行。
+结果包含 selected、候选拒绝原因、范围、时钟和截断统计。诊断可取完整的本次候选审计，状态页只显示有限窗口。这里既不是默认向量搜索，也不是每次无界全库评分；首次加载、计数和数据库检索仍受数据规模影响。
 
-前端阶段对应可观测事件：读取记录、准备证据、等待模型、验证输出、完成。展示等待时间与请求上限，不伪造百分比或模型隐藏思维链。主动建议目前依赖在线控制台触发；页面关闭不会主动创建新的建议任务。
+`EvidenceFirstPolicy` 支持把可选语义检索结果与已通过硬约束的候选做 RRF 排序；当前默认 `InteractionService` 直接调用 Timeline 适配器，未装配该语义检索器。不能因文件存在就宣称实时已使用 embedding。
 
-## 离线分层记忆
+## 6. 时间、人物与来源约束
 
-`HierarchicalMemory` 保存分段事件的向量、描述、音频文字、关键帧及时间。相邻高相似事件可合并为均值向量节点，活动索引定位候选。`Config` 控制窗口、容量、整理周期与 top-k。
+来源时间与事件时间必须分别解释：
 
-旧实现合并后删除来源且只保留前四段描述，导致信息丢失和不可加载快照。现在保留来源登记表及描述，快照保存真实时间，加载重建活动索引。写快照时锁住内存视图；多文件快照仍非断电原子事务，不应直接覆盖唯一备份。
+| 字段或概念 | 含义 |
+| --- | --- |
+| `receivedAt / recordedAt` | 系统接收/记录时间，不自动等于所述事件发生时间 |
+| `sourceAt / sourceRecordedAt` | 原始发言或来源时间；历史导入由来源提供 |
+| `effectiveAt / effectiveEnd` | 有依据的事件/状态有效区间，可为空 |
+| `happenedAt` | Timeline 存储排序兼容字段；无有效时间时可能回退记录时间，不能据此宣称事件日期已知 |
+| `ClockContext` | 来源 UTC、时区、本地日期及偏移，供确定性时间解析使用 |
+| `evidenceContext.times` | 多个时间表达、角色和锚点；不是单一“昨天”标签 |
 
-离线问答先找聚合候选，再展开原始来源按查询向量排序，交给回答与时间定位。存储层级不通过“昨天”“最近”等关键词冒充事件日期。聚合候选没找到时仍会漏检，不保证全库精确召回。
+`grounding.evidence_contract` 在写入、恢复和旧卡读取时应用同一来源约束；`source_time.annotate` 为原文回答提供基于 `sourceAt` 的日/月/年表达注释。注释只展开日历含义，不证明某事件属于这个时间。未知日期保持未知；周期习惯和计划不能证明今天已经完成。
 
-保留来源增加内存和快照体积，图像数组尚未按需磁盘加载。这条研究路径不适合无限时长地直接部署到眼镜端。
+例如当地 9 月 20 日说“昨天拿到包裹”，可锚定 9 月 19 日；9 月 22 日回忆时不重新解释为 9 月 21 日。视频 `DAY1` 或导入日期不能凭空变成真实公历事件日期。日记将来源日期/时区不足的导入列入 `unplacedSources`，不擅自塞进导入当天。
 
-## 实测与失败模式
+API 的 user 角色表示输入通道，不证明说话者就是账户拥有者。声纹、转写归属、账号确认和语义交互判断分别处理；第一人称来自未确认佩戴者时，grounding 可标为待澄清。历史人物名、环境声音和画面人物不能仅凭共现自动绑定。
 
-2026-09-09：22 条已下载片段对应的 EgoLife 原始标注、12 题、同一 `qwen-flash` 回答模型、6,000 字符证据预算。向量为真实 `text-embedding-v3`；这是文本摄入实验，不是摄像头或图像模型验收。
+`evidenceNetwork` 是从卡片生成的人物/场景/来源共现投影，没有通用实体消歧、社会关系图谱或多跳推理保证。复杂引语锚点、别名、代词和时间角色仍可能被模型选错。
 
-| 路径 | 目标来源召回 | 本地检索中位数 |
+## 7. 上下文压缩、会话历史与后台恢复
+
+### 7.1 ContextHarness
+
+默认上下文窗口 32,768、输出预留 4,096、近期尾部 6,000、摘要上限 3,000（估算 token，可用 `EGOASSIST_CONTEXT_*` 覆盖）。`build()` 按 required/priority 组装系统政策、Skill 和任务状态，再容纳预算内历史；超预算时形成 `compaction`。
+
+默认摘要是**确定性摘取**：保存近期尾部、来源时间、关键状态和旧消息摘录；单条摘录及总预算会截断。摘要写回日志，但不删除原消息，不是向量长期记忆，也不能保证保留每个细节。类支持自定义 summarizer，默认装配未提供。重连通过摘要和近期消息重放恢复工作上下文。
+
+会话历史是另一份只读投影：`GET /api/conversation` 从 turn inbox、message 和已完成后台答案按游标分页，默认 50、最大 200 条。UI 的有限工作面板、模型近期上下文、完整日志历史三者不是同一个窗口。刷新恢复文字和持久任务，不恢复旧音频缓存与媒体连接。
+
+### 7.2 记忆恢复与回答补全
+
+| 后台服务 | 触发与处理 | 持久依据及边界 |
 | --- | --- | --- |
-| 近期原文预算窗口 | 7/12 | 0.32 ms |
-| Timeline 词法检索 | 12/12 | 15.3 ms |
-| 原始向量检索 | 12/12 | 0.22 ms，不含 embedding |
-| 分层来源按合并顺序装入预算 | 9/12 | 0.51 ms |
-| 分层来源展开后重新排序 | 12/12 | 0.48 ms，不含 embedding |
+| `MemoryRecovery` | 路由不可用、输出无效或 memoryAtoms 部分失败后补解析；默认延迟 5 秒、最多 3 次、并发 1 | 保存原话、原始时钟、sourceId、场景和候选；重新检查当前政策，只写记忆/草稿，不重放用户工具控制 |
+| `AnswerJobs` | 前台中断、截止或重启恢复后为原 turnId 补文字答案 | 保存问题时证据和上下文；完成、取消和修订分别处理，来源不可用时不能发布迟到答案 |
+| `InsightJobs` | 受理报告或建议任务后异步执行 | 保存任务阶段、请求和结果；失败/取消不等于完成 |
 
-查询附带目标片段和帧范围，能提高检索表现；不能外推到任意开放对话。近期窗口漏旧事，聚合文本挤掉目标，模型引用合法也可能回答错事件。12/12 来源召回不等于回答准确率 100%。详见[对比记录](docs/MEMORY_MECHANISM_COMPARISON_2026-09-09.md)。
+`memory.recovery.job` 的 running 在重启时回到 queued；不可重试的供应商错误或达到次数上限会变 failed，可通过审计入口重试。completed 只表示该恢复任务处理完，可能没有生成卡片，需看 `cardIds`。恢复不改用重试当天解释旧时间。
 
-复查旧真实报告还发现：导入的 EgoLife 片段被表述成“2026 年 9 月 9 日发生”，实际该日期只是导入记录时间；`DAY1` 不提供公历事件日期。当前提示词已区分两者，但这份旧输出证明提示词和合法引用都不能保证时间忠实度。该问题需要真实模型复验，不以报告任务 `completed` 当作语义正确。
+后台回答是模型交付，不写成用户事实。网络中断或进程重启可能重做供应商请求；本地幂等不等于供应商计费、云端推理或外部工具副作用恰好一次。
 
-架构参考包括 [Mem0](https://github.com/mem0ai/mem0)、[Graphiti](https://github.com/getzep/graphiti)、[Letta](https://github.com/letta-ai/letta-code) 和 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)，涉及模型提取/混合检索、时间图谱、可编辑记忆与后台整理。本仓库没有部署实测这些外部框架，上表不是与它们的排行榜。
+## 8. 长事件、历史视觉、建议与日记
 
-## 置信度与数据边界
+### 8.1 长事件与原帧回看
 
-模型自报概率不是校准正确率。实时证据不要求模型给置信度，来源验证只证明出处，检索分数只用于排序。离线 conformal 需要独立校准数据及分布假设，不能直接用于保证实时路由或任务执行。
+`LongEvents` 从已接受采样观察和 completed 用户原话派生阶段事件。当前需要至少一条有效观察，处理其时间之后的来源；按来源时间排序，每批最多 24 条，大于 30 分钟间隙切批。调度默认限频 20 秒，连续失败 3 次后停止自动调度。送入模型的单条来源只取前 2,000 字符并标记截断，旧事件阶段也仅给最近 6 条；完整原始日志仍保留。
 
-评价应分别测原文保留、时间锚点、来源召回、答案忠实度、写入同意、错误执行与延迟。账户导出需披露损坏行，删除需处理相关副本和在途任务。
+事件有 title、summary、phases、状态、来源 ID 和 revision。更新必须含本批新证据；完成事件不能直接重新开启为另一轮发生。`coverage` 给证据跨度、采样数和超过 30 秒的缺口，`continuousDurationSeconds` 保持空值。它是可重建假设，不是连续活动计时或全天视频分割。
 
-原始媒体默认不完整保留；有限 UI 投影、保留政策、删除及本地备份决定真实边界，不承诺永久保存所有数据或跨设备同步。
+`VisualHistory` 则在问题需要时重看原帧：从最近最多 4,096 条观察中筛选问题边界前且有媒体的样本，去重，结合文字相关性与时间覆盖选最多 24 帧，调用视觉模型并验证来源引用。它可以补充描述遗漏，但仍受采样和选择上限影响。
 
-## 源码入口
+### 8.2 两套报告机制并存
 
-| 文件 | 阅读重点 |
+| 项目 | 当前建议/旧 Insight 报告 | 独立个人日记 |
+| --- | --- | --- |
+| 入口 | `/api/insights` | `/diary.html`、`/api/diary` |
+| 持久化 | 案例日志中的任务、请求和结果 | 账户 `diary.sqlite3` |
+| 来源 | completed 用户消息与已接受视觉观察；case 或 account 范围，不直接读取 source.event | 账户会话原话、助手交付、观察、历史导入、工具回执、作业结果、Timeline 状态/纠正、个人补记 |
+| 长周期策略 | 默认最多 300 条、32,000 字符，优先较新记录，披露遗漏 | 逐日分块、日内多层汇总、周期汇总；不按近期尾部直接丢旧记录 |
+| 执行 | 默认并发 2，待办容量 16 | 默认串行执行，调度任务上限 16 |
+| 定时 | 主动建议创建依赖在线控制台等触发 | 用户选择开启后，服务端每 30 秒检查最近已结束的日/周/月 |
+
+日记单条来源以 3,500 字符拆分，分块约 14,000 字符，汇总批约 18,000 字符。每个模型节点保留内容 hash、来源映射、输出和调用回执，重启可复用已完成节点。默认日记模型为 `qwen3-max`，可用 `EGOASSIST_DIARY_MODEL` 覆盖。
+
+日记周期超过 500 万来源字符、达到 500 次模型请求、无法继续合并、来源读错或输出校验失败时停止，不把部分结果伪装成完成。分块全部被处理不等于模型摘要保留全部细节；引用合法也不保证语义正确。
+
+发布前重新核对来源 fingerprint；来源变化则拒绝发布旧内容。读取已归档日记也检查来源，变化时标记 stale 并移除旧正文/来源快照/节点/调用内容。长事件提示附在原始来源上，不重复计为独立证据。
+
+定时默认关闭。开启后服务持续运行即可在页面关闭时生成最近结束的自然周期；不会自动补齐所有漏掉的历史周期。暂停或停止整个服务时没有后台执行。无记录日明确披露，不能写成“当天没有活动”。
+
+## 9. 开关、遗忘、保留和删除
+
+### 9.1 记忆 profile 的真实范围
+
+| profile | preference | episodic | 配置 scope |
+| --- | --- | --- | --- |
+| `all-online`（默认） | 开 | 开 | case |
+| `context-only` | 关 | 关 | case |
+| `confirmed-preference` | 开 | 关 | participant |
+| `lexical-episodic` | 关 | 开 | case |
+
+它们是同一套组件的实验开关。`all-online` 仍可另外召回 participant 长期记忆；profile 的 scope 不意味着所有保存都只能用这一个范围。原始日志与上下文压缩一直保留。
+
+尤其要注意：`context-only` 关闭由这些开关控制的实时事件/偏好写入、检索和注入，不关闭原始日志，也不作为独立 `/api/history/*` 或日记的总隐私开关。`remember_tool_effect` 自身没有读取该 profile，成功工具回执仍有单独的效果卡片写入路径；不能将 profile 理解为所有持久化的统一禁写开关。环境观察授权另由观察同意配置控制。
+
+### 9.2 四种不同操作
+
+| 操作 | 当前代码效果 | 不应推断的效果 |
+| --- | --- | --- |
+| 关闭记忆 profile | 后续实时按开关处理，日志仍保存 | 不等于删除历史或不再存储来源 |
+| `/api/memory/delete` 删除卡片 | 标记卡片 deleted，退出 active 检索；相关中间件使原文索引缓存和日记派生失效 | 不擦除原始发言；索引重建后原话仍可能被召回 |
+| `/api/history/delete` 删除导入来源 | 将目标 source.event 及同日志中可追踪的依赖改为墓碑，同步索引，旧证据快照失效 | 不是所有数据类别的账户级擦除入口；原生导入本来不自动生成 Timeline 卡片 |
+| 账户保留/隐私删除 | 暂停写入与在途任务，处理来源、派生引用、卡片、媒体、缓存与账户数据 | 不删除已经复制到系统外的备份，不保证外部供应商撤回旧请求 |
+
+`AccountRetention` 先停止账户连接、活动请求和后台作业，再运行 `PrivacyGovernance.retention`；`core.retention.erase_expired` 沿显式依赖传播删除，保留最少墓碑和幂等键，避免相同请求重试复活内容。之后丢弃旧运行时/投影、使来源索引与日记失效，并恢复仍有效的工作。默认保留检查间隔 3,600 秒，可配置。
+
+删除依赖建立在已记录的来源 ID 上，不能解释任意文本中的隐式引用。要验证“忘记了”，必须区分删除卡片和删除来源，并测试重启、索引重建和在途任务晚到结果；仅在 UI 看不到卡片不足以证明原文被擦除。
+
+## 10. 离线分层向量机制
+
+`StreamingMemoryAssistant.ingest` 对视频分段，`HierarchicalMemory.ingest` 编码帧、生成描述并附音频文字，保存向量、时间和最多 8 个关键帧。`current` 是时间窗口；事件进入 short 和活动向量索引。
+
+达到整理周期或容量时后台将较旧 short 分组，相邻相似事件合并为均值归一化向量的 long 节点。活动索引移除子节点、加入聚合节点，但 `_items_by_id` 保留原始子节点、描述、音频及来源。
+
+查询先检索活动节点；`expand_sources=True` 沿 child_ids 展开叶子来源，按查询向量相似度重新排序，再供回答与时间定位使用。聚合候选未命中时仍可能漏掉目标来源，保留来源不等于全库精确召回。
+
+`save_memory/load_memory` 保存并校验快照、真实时间和来源，加载重建活动索引。图像数组和来源登记仍占内存，多文件快照不是断电原子提交；不适合据此承诺无限长在线眼镜记忆。习惯归纳、conformal 拒答和可选语义排序属于额外研究组件，未接入默认原文检索链路。
+
+## 11. 排查与验证入口
+
+排查“为什么没记住/没想起来”时，按下面顺序核对，避免只看模型回答：
+
+1. `turn_inbox`、completed `message` 或 `source.event` 是否存在，来源时钟和账户/案例是否正确。
+2. 语义路由是否失败；有无 `memory.recovery.job`；实际 `committedCardIds` 是否为空；卡片是 active、pending 还是 superseded。
+3. 使用的是 SourceIndex 还是 Timeline：前者看 audit/coverage/片段预算，后者看 candidateAudit/拒绝原因/时间与主体约束；确认 profile 和 participant 范围。
+4. 本轮答案究竟注入了哪个 `evidence.package`、Timeline evidence 和声画快照；检索命中不等于已经传给模型。
+5. 任务是否完成、取消、来源被删除或结果过期；引用检查通过不等于回答语义正确。
+
+| 回归文件 | 主要验证 |
 | --- | --- |
-| `realtime/context_harness.py` | 日志追加、恢复、预算组装 |
-| `realtime/episodes.py`、`engine.py` | 事件和偏好适配 |
-| `memory/timeline.py` | 范围、状态、排序 |
-| `memory/evidence.py`、`temporal.py` | 原文标签、共现、时间锚点 |
-| `product/insight_jobs.py`、`memory/insights.py` | 报告执行与恢复 |
-| `memory/store.py`、`snapshot.py` | 离线分层与快照 |
-| `realtime/performance.py` | 性能投影 |
-| `prompts/` | 可修改提示词 |
+| [test_source_evidence.py](tests/test_source_evidence.py) | 长文尾部、中文召回、幂等来源、案例隔离、快照失效、在途删除 |
+| [test_memory_grounding.py](tests/test_memory_grounding.py)、[test_timeline_memory.py](tests/test_timeline_memory.py) | 来源时间、未知指代、重复发生、纠正、晋升、候选过滤 |
+| [test_memory_policy.py](tests/test_memory_policy.py)、[test_preference_memory.py](tests/test_preference_memory.py) | 开关、偏好确认与召回 |
+| [test_context_harness.py](tests/test_context_harness.py)、[test_conversation_history.py](tests/test_conversation_history.py) | 压缩恢复、分页历史和交付归属 |
+| [test_diary.py](tests/test_diary.py)、[test_long_events.py](tests/test_long_events.py) | 分块覆盖、来源引用、归档失效、定时、事件阶段与覆盖边界 |
+| [test_retention_recovery.py](tests/test_retention_recovery.py) | 擦除传播、重启不复活及跨案例依赖 |
+| [test_memory_snapshot.py](tests/test_memory_snapshot.py)、[test_retrieval_policy.py](tests/test_retrieval_policy.py) | 离线快照与可选检索政策 |
 
-以上路径均相对 `egoassist/`。复现命令见 [README](README.md#验证)。带日期的历史文档保留当时结果，以当前源码和本说明为现状入口。
-## 声画证据补充（2026-09-09）
+2026-09-20 文档核对时，上表 12 个测试文件合计 **166 项全部通过**。复现命令（项目根目录，PowerShell）：
 
-现场音频转写的 API `user` 角色不等于佩戴者。声纹分段先产生匿名声音编号；只有账号明确确认后才附带姓名或佩戴者标记。多人、短段遗漏或不确定匹配不能整句归于佩戴者，未确认声音不能触发个人记忆写入、任务变更或回答取消。自然对话是否需要回应由语义模型结合上下文判断，声音归属与谈话指向是两个问题。
+```powershell
+.\.venv\Scripts\python.exe -m pytest -q -p no:cacheprovider tests/test_source_evidence.py tests/test_memory_grounding.py tests/test_timeline_memory.py tests/test_memory_policy.py tests/test_preference_memory.py tests/test_context_harness.py tests/test_memory_snapshot.py tests/test_diary.py tests/test_long_events.py tests/test_retention_recovery.py tests/test_conversation_history.py tests/test_retrieval_policy.py
+```
 
-提问时的原始 WAV/JPEG、声纹分段、模型请求和账号确认追加到案例日志并随账户导出、删除。声音和画面人物不会只因同时出现就自动绑定；确认关系限定于参考帧，没有持续人脸跟踪。该层提供可审计证据，不直接将模型的场景猜测写成人际关系事实。连续音视频并未全天保存。详细结构、真实测试和延迟边界见 [声画与前端验收](docs/SHARED_SCENE_2026-09-09.md)。
+其他验证见 [README](README.md#验证)。确定性测试验证程序约束，不证明模型语义质量；本次文档核对未重新调用云端模型或运行真实声画验收。
+
+历史结果保留在各自协议下：原文证据开发集召回曾为 **72.82%**，30 题真实复测新路径回答准确率 **32.22%**、旧路径 **28.89%**，尚不能证明稳定提升。旧 12 题对照的 12/12 来源召回也不是通用准确率。详见 [来源生命周期](docs/SOURCE_EVIDENCE_LIFECYCLE_FIX_2026-09-17.md)、[真实复测](docs/EGOLIFE_SOURCE_RETEST_2026-09-17.md)、[旧机制对比](docs/MEMORY_MECHANISM_COMPARISON_2026-09-09.md)。
+
+本说明替代旧版中的“统一 1,000 字符卡片”“范围内全量评分”“所有日报均无定时/无分块”等描述。带日期文档继续保存当时的实验条件；当前能力与限制以源码及本说明为入口。

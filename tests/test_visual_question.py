@@ -68,6 +68,45 @@ def test_focused_question_deduplicates_and_ignores_slow_scene_request(tmp_path, 
     asyncio.run(run())
 
 
+def test_interaction_sequence_sends_recent_frames_and_validates_citations(tmp_path, monkeypatch):
+    import dashscope
+
+    async def run():
+        scene = scene_with_frame(tmp_path)
+        scene.frames.append({"frameId": "second", "sampleId": "sample-second", "receivedAt": scene.frames[-1]["receivedAt"],
+                            "monotonic": scene.frames[-1]["monotonic"] + 1, "device": {}, "data": scene.frames[-1]["data"]})
+        scene.turns["question-one"]["interactionWindow"] = {
+            "frames": [{**scene.turns["question-one"]["frame"], "sampleId": "sample-first", "offsetMs": -1000},
+                       {**scene.turns["question-one"]["frame"], "frameId": "second", "sampleId": "sample-second", "offsetMs": 0}],
+            "coverageMs": 1000, "gaps": []}
+        captured_at = scene.turns['question-one']['capturedAt']
+        scene.journal.append('message', {'status': 'completed',
+            'message': {'role': 'assistant', 'content': 'Later answer must not enter earlier context.'}})
+        # Speaker enrichment updates the journal row without moving its question boundary.
+        scene.turns['question-one']['timestamp'] = datetime.now(timezone.utc).isoformat()
+        async def answer(request):
+            body = await request.json()
+            content = body["input"]["messages"][-1]["content"]
+            assert sum("image" in part for part in content) == 2
+            assert body["parameters"]["response_format"]["type"] == "json_object"
+            return web.json_response({"request_id": "sequence", "output": {"choices": [{
+                "message": {"content": '{"evidence":[{"description":"动作发生后画面改变","sourceIds":["F01","F02"]}],"uncertainties":[]}'},
+                "finish_reason": "stop"}]}})
+        app = web.Application(); app.router.add_post("/services/aigc/multimodal-generation/generation", answer)
+        async with TestServer(app) as server:
+            monkeypatch.setattr(dashscope, "base_http_api_url", str(server.make_url("")))
+            result = await scene.context("question-one", describe_frame=True, question="刚才发生了什么")
+            assert result["visual"]["scope"] == "interaction-sequence"
+            assert "动作发生后" in result["visual"]["description"]
+            assert result['visual']['evidence'][0]['sourceIds'] == ['sample-first', 'sample-second']
+            assert result["interactionWindow"]["coverageMs"] == 1000
+            request = scene.journal.entries(types={'scene.question.request'})[-1]
+            assert request['dialogue'] == []
+            assert scene.turns['question-one']['capturedAt'] == captured_at
+        await scene.close()
+    asyncio.run(run())
+
+
 def test_visual_control_cancellation_releases_request(tmp_path):
     async def run():
         scene = scene_with_frame(tmp_path)

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import date, datetime, time as day_time, timedelta, timezone
+from datetime import date, datetime, time as day_time, timedelta
 import hashlib
 import json
 import os

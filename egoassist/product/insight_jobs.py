@@ -10,16 +10,13 @@ from uuid import uuid4
 
 from egoassist.memory.insights import calendar_period
 from egoassist.memory.temporal import ClockContext
+from egoassist.core.events import latest
 
 PENDING = {"queued", "running"}
 
 
 def insight_jobs(journal) -> list[dict]:
-    latest = {}
-    for row in journal.entries():
-        if row.get("type") == "insight.job":
-            latest[row["jobId"]] = row
-    return list(latest.values())
+    return list(latest(journal, "insight.job", "jobId").values())
 
 
 def visible_insight_jobs(journal) -> list[dict]:
@@ -162,6 +159,9 @@ class InsightJobs:
             task.cancel()
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
+
+    def resume_user(self, user_id):
+        self._blocked_users.discard(user_id)
 
     async def close(self):
         self._closing = True

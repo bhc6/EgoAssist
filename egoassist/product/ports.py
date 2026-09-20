@@ -6,7 +6,7 @@ from collections.abc import AsyncIterator, Mapping
 from datetime import timedelta
 from typing import Any, Protocol, runtime_checkable
 
-from .contracts import (
+from egoassist.core.contracts import (
     ArtifactDescriptor,
     HumanHelpReceipt,
     HumanHelpRequest,

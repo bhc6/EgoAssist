@@ -8,10 +8,11 @@ from pathlib import Path
 from typing import Any, Callable
 
 from egoassist.memory.timeline import (
-    DEFAULT_RETRIEVABLE_KINDS, DEFAULT_RETRIEVAL_MIN_SCORE, TimelineMemory,
+    DEFAULT_RETRIEVABLE_KINDS, TimelineMemory,
     looks_like_question,
 )
 from egoassist.memory.temporal import ClockContext
+from .engine import PreferenceMemory
 
 
 def retrieval_audit_from_events(events: list[dict[str, Any]]) -> dict[str, Any] | None:
@@ -67,7 +68,7 @@ class RealtimeEpisodeMemory:
         self._last_retrieval_by_session: dict[str, dict[str, Any]] = {}
         # Preference compatibility layer (lazy-initialized on first use)
         self._pref_lock = threading.RLock()
-        self._pref: "PreferenceMemory | None" = None  # type: ignore[name-defined]
+        self._pref: PreferenceMemory | None = None
         if timeline is None:
             self.import_legacy(legacy_path)
 
@@ -159,7 +160,7 @@ class RealtimeEpisodeMemory:
             status=status,
             importance=importance,
             metadata=metadata,
-            supersede=bool(memory_key),
+            supersede=bool(memory_key or (subject and predicate)),
             replaces_card_id=replaces_card_id,
         )
         if not card:
@@ -181,6 +182,7 @@ class RealtimeEpisodeMemory:
         clock: ClockContext | None = None,
         query_spec: dict[str, Any] | None = None,
         project: bool = True,
+        ranking_query: str | None = None,
     ) -> dict[str, Any]:
         user_id, case_id, memory_scope = self._identity(
             session_id=session_id,
@@ -197,13 +199,16 @@ class RealtimeEpisodeMemory:
             clock=clock,
             query_spec=query_spec,
             min_score=self.min_score,
+            ranking_query=ranking_query,
+            include_candidate_audit=True,
         )
-        candidates = [self._candidate(item) for item in raw["candidates"]]
+        candidates = [self._candidate(item) for item in raw.get("candidateAudit", raw["candidates"])]
         selected_ids = {item["cardId"] for item in raw["selected"]}
         selected = [item for item in candidates if item["episodeId"] in selected_ids]
         result = {
             "method": raw["method"],
             "query": str(query),
+            "rankingQuery": raw.get("rankingQuery", str(query)),
             "referential": bool(referential),
             "scope": {
                 "user": user_id,
@@ -214,14 +219,15 @@ class RealtimeEpisodeMemory:
             "routing": raw["routing"],
             "minimumScore": raw["minimumScore"],
             "timing": raw.get("timing", {}),
-            "candidates": candidates,
+            "candidates": candidates[:20],
+            "candidateAudit": candidates,
             "selected": selected,
             "injection": {"status": "not-injected", "episodeIds": []},
             "claimBoundary": raw["claimBoundary"],
         }
         if project:
             key = session_id or "__default__"
-            self._last_retrieval_by_session[key] = result
+            self._last_retrieval_by_session[key] = {key: value for key, value in result.items() if key != 'candidateAudit'}
         if emit and session_id is None:
             self._emit("episodic.memory.retrieved", {
                 "query": str(query),
@@ -256,13 +262,14 @@ class RealtimeEpisodeMemory:
                 "sourceIds": item["record"].get("sourceIds", []),
                 "evidenceContext": item["record"].get("evidenceContext", {}),
                 "temporalSupport": item.get("temporalSupport", "not-requested"),
+                "grounding": item["record"].get("grounding", {}),
             } for item in sorted(selected, key=lambda value: value["record"]["timestamp"])],
         }
         result["injection"] = injection
         scope = result.get("scope", {})
         if project:
             key = str(scope.get("session") or "__default__")
-            self._last_retrieval_by_session[key] = result
+            self._last_retrieval_by_session[key] = {name: value for name, value in result.items() if name != 'candidateAudit'}
         if scope.get("session") is None:
             self._emit("episodic.memory.injected", injection)
         return injection
@@ -299,7 +306,7 @@ class RealtimeEpisodeMemory:
             "count": timeline_state["count"],
             "layers": timeline_state["layers"],
             "recent": [self._record(item) for item in timeline_state["recent"]],
-            "retrieval": retrieval,
+            "retrieval": {name: value for name, value in retrieval.items() if name != 'candidateAudit'},
             "scope": memory_scope,
             "retainsRawMedia": False,
             "evidenceNetwork": timeline_state.get("evidenceNetwork", {}),
@@ -380,6 +387,7 @@ class RealtimeEpisodeMemory:
             "status": card.get("status"),
             "sourceIds": card.get("sourceIds", []),
             "evidenceContext": metadata.get("evidenceContext", {}),
+            "grounding": card.get("grounding", {}),
         }
 
     @classmethod
@@ -401,7 +409,7 @@ class RealtimeEpisodeMemory:
     # Preference delegation — unified interface over the same timeline DB
     # ------------------------------------------------------------------
 
-    def _get_pref(self) -> "PreferenceMemory":  # type: ignore[name-defined]
+    def _get_pref(self) -> PreferenceMemory:
         """Lazy-initialize the preference layer sharing the same TimelineMemory.
 
         Confirmed preferences are *participant*-durable, independent of this
@@ -423,7 +431,6 @@ class RealtimeEpisodeMemory:
         """
         with self._pref_lock:
             if self._pref is None:
-                from egoassist.realtime.engine import PreferenceMemory
                 self._pref = PreferenceMemory(
                     self._timeline.path,
                     event_sink=self._event_sink,

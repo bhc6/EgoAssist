@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from typing import Any, Mapping
 
-from egoassist.product.contracts import IntentCandidate
+from egoassist.core.contracts import IntentCandidate
 
 
 _ENGLISH_DELAY = re.compile(
@@ -49,15 +49,19 @@ def normalize_intent_candidates(
 ) -> list[IntentCandidate]:
     raw = semantic.get("intents")
     candidates: list[IntentCandidate] = []
+    def parse(item):
+        value = dict(item)
+        text = value.get('text')
+        if isinstance(text, str) and len(text) > 500:
+            value['source_text'] = text
+            value['text'] = text[:500]
+        return IntentCandidate.model_validate(value)
     if isinstance(raw, list):
         for item in raw:
-            candidates.append(IntentCandidate.model_validate(item))
+            candidates.append(parse(item))
     if not candidates:
-        candidates = [IntentCandidate(
-            kind=str(semantic.get("intentKind") or "foreground-dialogue"),
-            text=str(transcript).strip(),
-            parameters={},
-        )]
+        candidates = [parse({'kind': str(semantic.get("intentKind") or "foreground-dialogue"),
+            'text': str(transcript).strip(), 'parameters': {}})]
 
     normalized: list[IntentCandidate] = []
     seen: set[tuple[str, str]] = set()
@@ -66,7 +70,7 @@ def normalize_intent_candidates(
         if candidate.kind == "background-reminder":
             delay = parameters.get("delaySeconds")
             try:
-                delay = int(delay) if delay is not None else _delay_seconds(candidate.text)
+                delay = int(delay) if delay is not None else _delay_seconds(candidate.execution_text)
             except (TypeError, ValueError):
                 delay = None
             if delay is not None and 1 <= delay <= 31_536_000:
@@ -74,9 +78,9 @@ def normalize_intent_candidates(
             else:
                 parameters.pop("delaySeconds", None)
             parameters["label"] = str(
-                parameters.get("label") or _reminder_label(candidate.text)
+                parameters.get("label") or _reminder_label(candidate.execution_text)
             ).strip()[:80] or "Reminder"
-        key = (candidate.kind, candidate.text.casefold())
+        key = (candidate.kind, candidate.execution_text.casefold())
         if key in seen:
             continue
         seen.add(key)

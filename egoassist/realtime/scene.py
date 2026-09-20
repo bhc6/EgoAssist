@@ -20,7 +20,11 @@ from PIL import Image
 from egoassist.prompts import prompt_text
 from .speakers import MODELS, SpeakerRegistry
 from .visual_question import VisualQuestions
-from .settings import asr_settings
+from .visual_history import VisualHistory
+from .long_events import LongEvents
+from .interaction_window import BUFFER_SECONDS, BUFFER_BYTES, device_clock, select_frames
+from uuid import uuid4
+from egoassist.core.settings import asr_settings
 
 
 def restrict_unverified_speaker(semantic):
@@ -37,12 +41,14 @@ class SharedScene:
     def __init__(self, journal, api_key):
         self.journal, self.api_key = journal, api_key
         self.root = Path(journal.path).parent / "media" / journal.session_id
-        self.frames = deque(maxlen=64)
+        self.frames = deque(maxlen=360)
         self.audio = bytearray()
         self.audio_samples = 0
         self.audio_epoch = None
         self.audio_clock = deque(maxlen=2400)
+        self.audio_device_clock = deque(maxlen=2400)
         self.speakers = SpeakerRegistry(journal)
+        self.events = LongEvents(journal, api_key)
         self.turns = {r["turnId"]: r for r in journal.entries() if r.get("type") == "scene.turn"}
         self.last_vision = None
         self.observations = deque(maxlen=64)
@@ -55,6 +61,7 @@ class SharedScene:
         self.enriching = set()
         self.restored = False
         self.visual_questions = VisualQuestions(self)
+        self.visual_history = VisualHistory(self)
         self._http = None
         self.asr = asr_settings()
         self.transcription_limit = asyncio.Semaphore(self.asr["concurrency"])
@@ -102,8 +109,11 @@ class SharedScene:
             frame.verify()
         now = datetime.now(timezone.utc).isoformat()
         digest = hashlib.sha256(data).hexdigest()
-        self.frames.append({"frameId": digest[:24], "receivedAt": now, "monotonic": time.monotonic(),
+        self.frames.append({"frameId": digest[:24], "sampleId": uuid4().hex, "receivedAt": now, "monotonic": time.monotonic(),
                             "device": metadata or {}, "data": data})
+        total_bytes = sum(len(f['data']) for f in self.frames)
+        while self.frames and (total_bytes > BUFFER_BYTES or self.frames[-1]['monotonic'] - self.frames[0]['monotonic'] > BUFFER_SECONDS):
+            total_bytes -= len(self.frames.popleft()['data'])
         interval = float(os.getenv("EGOASSIST_SCENE_INTERVAL", "4"))
         if describe and self.api_key and (not self.vision_task or self.vision_task.done()) and (
                 not self.last_vision or time.monotonic() - self.last_vision[0] >= interval):
@@ -114,9 +124,9 @@ class SharedScene:
 
     def _frame_ref(self, frame):
         return {**self._save(frame["data"], ".jpg", "image/jpeg"),
-                "frameId": frame["frameId"], "receivedAt": frame["receivedAt"], "device": frame["device"]}
+                "frameId": frame["frameId"], "sampleId": frame.get("sampleId"), "receivedAt": frame["receivedAt"], "device": frame["device"]}
 
-    def append_audio(self, audio, epoch, *, sample_offset=0):
+    def append_audio(self, audio, epoch, *, sample_offset=0, metadata=None):
         data = base64.b64decode(audio, validate=True)
         if len(data) % 2 or len(data) > 320_000:
             raise ValueError("invalid PCM16 input")
@@ -125,18 +135,30 @@ class SharedScene:
             self.audio_samples = sample_offset
             self.audio_epoch = epoch
             self.audio_clock.clear()
+            self.audio_device_clock.clear()
         self.audio.extend(data)
         self.audio_samples += len(data) // 2
         self.audio_clock.append((self.audio_samples, time.monotonic()))
+        timing = device_clock(metadata, audio=True)
+        samples = len(data) // 2
+        if timing and abs((timing[2] - timing[1]) - samples / 16000) < .05:
+            self.audio_device_clock.append((self.audio_samples - samples, self.audio_samples, *timing))
         limit = 16000 * 2 * 90
         if len(self.audio) > limit:
             del self.audio[:-limit]
 
-    def capture(self, turn_id, *, segment=None, explicit=False):
+    def capture(self, turn_id, *, segment=None, explicit=False, metadata=None):
         if turn_id in self.turns:
             return self.turns[turn_id]
-        frame = self.frames[-1] if self.frames and time.monotonic() - self.frames[-1]["monotonic"] <= 5 else None
-        result = {"turnId": turn_id, "frame": self._frame_ref(frame) if frame and (explicit or not segment) else None,
+        captured_at = time.monotonic()
+        window_end, window_start, clock_id = captured_at, None, None
+        timing = device_clock(metadata)
+        if explicit and timing and any(device_clock(f.get('device')) and f['device'].get('clockId') == timing[0] for f in self.frames):
+            clock_id, window_end = timing
+        window_available = explicit or not segment
+        frame = self.frames[-1] if self.frames and captured_at - self.frames[-1]["monotonic"] <= 5 else None
+        result = {"turnId": turn_id, "capturedAt": datetime.now(timezone.utc).isoformat(),
+                  "frame": self._frame_ref(frame) if frame and (explicit or not segment) else None,
                   "speaker": {"status": "account-input" if explicit else "pending", "wearer": explicit},
                   "segment": segment, "audio": None, "synchronizedFrames": [],
                   "avAssociation": {"status": "unlinked", "reason": "Time coincidence alone does not identify the speaker"}}
@@ -154,6 +176,15 @@ class SharedScene:
                 audio_start = next((received - max(0, sample - start) / 16000 for sample, received in self.audio_clock if sample >= start), None)
                 audio_end = next((received - max(0, sample - end) / 16000 for sample, received in self.audio_clock if sample >= end), None)
                 if audio_start is not None and audio_end is not None:
+                    window_start, window_end = audio_start, audio_end
+                    window_available = True
+                    def sample_clock(sample):
+                        return next(((clock, begin + (sample - lo) / 16000)
+                                     for lo, hi, clock, begin, finish in self.audio_device_clock if lo <= sample <= hi), None)
+                    begin_clock, end_clock = sample_clock(start), sample_clock(end)
+                    if begin_clock and end_clock and begin_clock[0] == end_clock[0] and begin_clock[1] < end_clock[1]:
+                        clock_id = begin_clock[0]
+                        window_start, window_end = begin_clock[1], end_clock[1]
                     candidates = [f for f in self.frames if audio_start - 0.5 <= f["monotonic"] <= audio_end + 0.5]
                     stride = max(1, len(candidates) // 8)
                     result["synchronizedFrames"] = [{**self._frame_ref(f), "offsetMs": round((f["monotonic"] - audio_start) * 1000),
@@ -162,6 +193,24 @@ class SharedScene:
                         result["frame"] = result["synchronizedFrames"][-1]
             else:
                 result["speaker"] = {"status": "unknown", "wearer": False, "reason": "audio-range-unavailable"}
+        if window_available:
+            selected, window = select_frames(self.frames, end=window_end, start=window_start,
+                                            clock_id=clock_id, received_before=captured_at)
+            window['frames'] = [{**self._frame_ref(f), 'offsetMs': round((at - window_end) * 1000)} for at, f in selected]
+            window['status'] = 'available' if selected else 'no-frames'
+            result['interactionWindow'] = window
+            if window_start is not None:
+                synchronized = [(at, f) for at, f in selected if window_start - .5 <= at <= window_end]
+                if len(synchronized) > 8:
+                    synchronized = [synchronized[round(i * (len(synchronized) - 1) / 7)] for i in range(8)]
+                result['synchronizedFrames'] = [{**self._frame_ref(f), 'offsetMs': round((at - window_start) * 1000),
+                    'syncBasis': window['syncBasis'], 'matchingWindowMs': 500, 'syncAccuracy': 'unmeasured'}
+                    for at, f in synchronized]
+            # Prefer the frozen endpoint over the last frame at ASR completion.
+            result['frame'] = window['frames'][-1] if selected else None
+        else:
+            result['interactionWindow'] = {'scope': 'interaction-short-term', 'status': 'unavailable',
+                                           'reason': 'audio-range-unavailable', 'frames': []}
         reference_time = datetime.now(timezone.utc).isoformat() if explicit else (result.get("frame") or {}).get("receivedAt")
         result["observationContext"] = self.observation_context(reference_time) if reference_time else None
         self.turns[turn_id] = self.journal.append("scene.turn", result)
@@ -229,6 +278,9 @@ class SharedScene:
         except RuntimeError:
             return
         self.restored = True
+        self.events.closed = False
+        if self.events.snapshot()['job']:
+            self.events.schedule()
         if MODELS.available() and MODELS.diarizer is None:
             task = asyncio.create_task(self.warm_speakers(), name="scene-speaker-warmup")
             self.tasks.add(task)
@@ -346,32 +398,38 @@ class SharedScene:
                     self.vision_by_frame.pop(next(iter(self.vision_by_frame)))
             return result
 
-    async def context(self, turn_id, *, describe_frame=False, question=None):
+    async def context(self, turn_id, *, describe_frame=False, question=None, allow_history=False):
         row = self.turns.get(turn_id)
         if not row:
             return None
         if not row.get("utterances") and len({s.get("cluster") for s in row["speaker"].get("segments", [])}) > 1:
             self.start_transcription(turn_id)
-        # Audio and background answers already receive frames; text realtime needs a description.
+        # All interaction channels use the same frozen question-time evidence.
         ref = row.get("frame")
         visual = self.vision_by_frame.get(ref["frameId"], {"status": "frame-available", "frame": ref}) if ref else {"status": "no-frame"}
         if ref and describe_frame and self.api_key:
             if question and os.getenv("EGOASSIST_VISUAL_QUESTION_MODE", "focused") == "focused":
-                visual = await self.visual_questions.observe(turn_id, question, ref)
+                visual = await self.visual_questions.observe(turn_id, question, ref, window=row.get('interactionWindow'))
             else:
                 visual = await self.describe(ref)
         if ref:
             visual = {**visual, "descriptionFrameReceivedAt": (visual.get("frame") or {}).get("receivedAt"), "frame": ref}
+        history = None
+        if allow_history and not ref and describe_frame and question and self.api_key:
+            history = await self.visual_history.observe(turn_id, question)
         row = self.turns.get(turn_id, row)
         association = self.association(row)
         return {"turnId": turn_id, "speaker": row["speaker"], "audio": row.get("audio"),
                 "observationContext": deepcopy(row.get("observationContext")),
                 "utterances": row.get("utterances", []),
                 "synchronizedFrames": row.get("synchronizedFrames", []), "avAssociation": association,
-                "visual": visual, "timeBasis": "question-time; receivedAt is server receipt, device timestamp is unverified"}
+                "interactionWindow": deepcopy(row.get('interactionWindow')),
+                "visual": visual, "historicalVisual": history,
+                "longEvents": self.events.snapshot(before=row.get('capturedAt', row['timestamp']), limit=6, source_limit=4),
+                "timeBasis": "question-time; receivedAt is server receipt, device timestamp is unverified"}
 
     def association(self, row):
-        profile = self.speakers.profiles.get(row.get("speaker", {}).get("speakerId"), {})
+        profile = self.speakers.profiles.get(self.speakers.canonical(row.get("speaker", {}).get("speakerId")), {})
         person = profile.get("personRef")
         frame_ids = {f["frameId"] for f in row.get("synchronizedFrames", [])}
         if row.get("frame"):
@@ -381,7 +439,23 @@ class SharedScene:
                     "scope": "reference-frame-only; not live face tracking"}
         return row.get("avAssociation")
 
-    def snapshot(self):
+    def snapshot(self, *, limit=100):
+        from itertools import islice
+        ids = list(reversed(list(islice(reversed(self.turns), max(0, limit)))))
+        visible = [{**{k: row[k] for k in ("turnId", "timestamp", "speaker", "audio", "frame", "segment", "utterances", "synchronizedFrames", "interactionWindow") if k in row},
+                    "avAssociation": self.association(row)} for row in (self.turns[key] for key in ids)]
+        speakers = self.speakers.public()
+        counts = {p['speakerId']: 0 for p in speakers}
+        samples = {p['speakerId']: [] for p in speakers}
+        for turn in self.turns.values():
+            for speaker_id in {self.speakers.canonical(s.get("speakerId")) for s in turn["speaker"].get("segments", [])}:
+                if speaker_id in counts:
+                    counts[speaker_id] += 1
+                    if turn.get('audio') and len(samples[speaker_id]) < 2:
+                        samples[speaker_id].append({'turnId': turn['turnId'], 'audio': turn['audio'], 'timestamp': turn['timestamp']})
+        for profile in speakers:
+            profile["turnCount"] = counts[profile["speakerId"]]
+            profile['samples'] = samples[profile['speakerId']]
         return {"camera": "receiving" if self.frames and time.monotonic() - self.frames[-1]["monotonic"] < 5 else "no-fresh-frame",
                 "vision": self.last_vision[1] if self.last_vision else None,
                 "questionVisionPending": [{"turnId": p["turnId"], "frameId": p["frameId"], "status": p["status"],
@@ -394,10 +468,12 @@ class SharedScene:
                                   for p in self.vision_progress.values()],
                 "asr": dict(self.asr),
                 "speakerModel": "available" if MODELS.available() else "unavailable",
-                "speakers": self.speakers.public(), "utterances": [{**row, "avAssociation": self.association(row)} for row in self.turns.values()],
+                "speakers": speakers, "speakerMerges": self.speakers.merge_state(), "utterances": visible, "longEvents": self.events.snapshot(),
+                "totalUtterances": len(self.turns), "utterancesTruncated": len(visible) < len(self.turns),
                 "association": "Names and voice-to-person links require account confirmation; unlinked faces remain unknown"}
 
     async def close(self):
+        await self.events.close()
         tasks = list(self.tasks)
         for task in tasks:
             task.cancel()
