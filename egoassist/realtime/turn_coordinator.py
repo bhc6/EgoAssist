@@ -1,11 +1,16 @@
 from __future__ import annotations
 
+from egoassist.core.source_contract import SourceReference
+
 import asyncio
 import json
 import os
 import time
 from datetime import datetime
 from dataclasses import dataclass
+from copy import deepcopy
+from egoassist.memory.service import MemoryQuery, PreparedMemory
+from egoassist.realtime.router_context import retrieval_text
 from typing import Any
 
 from egoassist.product.answer_jobs import answer_jobs, answer_job_summaries
@@ -51,6 +56,7 @@ class TurnCoordinator:
     grounded_user_instructions: Any
     memory_recovery: Any
     process_transcript: Any
+    memory_service: Any
     queue_reminder: Any
     refresh_harness_context: Any
     registry: Any
@@ -272,7 +278,6 @@ class TurnCoordinator:
             if (explicit and not control_only and self.owner.scene.api_key
                     and not shared_scene.get('visual', {}).get('frame')
                     and self.current_memory_policy()['components']['timeline']['episodic_enabled']):
-                from egoassist.realtime.router_context import retrieval_text
                 await self.turn_progress(turn_id, 'waiting-vision')
                 shared_scene['historicalVisual'] = await self.owner.scene.visual_history.observe(
                     turn_id, retrieval_text(text, semantic))
@@ -281,6 +286,19 @@ class TurnCoordinator:
             or self.owner.epoch != self.connection_epoch
         ):
             raise asyncio.CancelledError
+        policy_at_read = deepcopy(self.current_memory_policy())
+        source_entry = None
+        if not control_only:
+            source_entry = work_ledger.ensure_turn_message(turn_id, text, source="input-audio-transcript")
+        read_clock = self.clock_for_session(self.user_id, self.session_id)
+        if source_entry:
+            read_clock = read_clock.at_source((source_entry.get('metadata') or {}).get('sourceRecordedAt') or source_entry['timestamp'])
+        memory_query = MemoryQuery(self.user_id, self.session_id, text, policy_at_read, read_clock,
+            deepcopy(semantic), retrieval_text(text, semantic),
+            (self.session_id + ':' + source_entry['id'],) if source_entry else (),
+            SourceReference.from_entry(self.user_id, self.session_id, source_entry) if source_entry else None)
+        prepared_memory = (PreparedMemory(memory_query) if control_only else
+                           await self.memory_service.prepare(memory_query))
         _bg_task_queue: list[tuple[self.TaskSlot, str, str, SkillRuntime, dict]] = []
         await self.turn_progress(turn_id, "committing")
         async with self.owner.mutation_lock:
@@ -290,6 +308,13 @@ class TurnCoordinator:
             ):
                 raise asyncio.CancelledError
             turn_generation = self.owner.output_generation
+            current_turn = work_ledger.turns().get(turn_id)
+            if (current_turn is None or current_turn.get('supersededBy')
+                    or current_turn.get('status') in {'completed', 'failed', 'cancelled'}):
+                raise asyncio.CancelledError
+            if source_entry and self.harness.journal.entries_by_id([source_entry['id']]).get(
+                    source_entry['id'], {}).get('type') != 'message':
+                raise asyncio.CancelledError
             work_ledger.set_turn_status(turn_id, "processing")
             from egoassist.realtime.interaction_controller import apply_interaction
 
@@ -394,8 +419,8 @@ class TurnCoordinator:
                         }
                     )
                 return {"control": "stop-speaking", "semanticDecision": semantic}
-            pending_draft_before = self.timeline.pending_draft(
-                user_id=self.user_id, case_id=self.session_id
+            pending_draft_before = self.memory_service.pending_draft(
+                self.user_id, self.session_id
             )
             intent_candidates = normalize_intent_candidates(text, semantic)
             scheduled_intents = []
@@ -552,6 +577,7 @@ class TurnCoordinator:
                     turn_id, text, source="input-audio-transcript"
                 ),
                 persist_runtime_checkpoint=not background_intent,
+                prepared_memory=prepared_memory,
                 episodic_memory=self.current_episodic_memory(),
                 user_scope=self.user_id,
                 semantic_decision=semantic,
@@ -699,8 +725,8 @@ class TurnCoordinator:
                     (result.get("timelineWrite") or {}).get("committedCardIds")
                 )
                 draft_still_pending = (
-                    self.timeline.pending_draft(
-                        user_id=self.user_id, case_id=self.session_id
+                    self.memory_service.pending_draft(
+                        self.user_id, self.session_id
                     )
                     is not None
                 )
@@ -1287,8 +1313,8 @@ class TurnCoordinator:
                         clock=self.clock_for_session(
                             self.user_id, self.session_id
                         ).at_source((source.get("metadata") or {}).get("sourceRecordedAt") or source.get("timestamp")).prompt_payload(),
-                        draft=self.timeline.pending_draft(
-                            user_id=self.user_id, case_id=self.session_id
+                        draft=self.memory_service.pending_draft(
+                            self.user_id, self.session_id
                         ),
                         scene=scene_turn,
                         memory_candidates=semantic.get("sourceMemoryCandidates"),
@@ -1583,8 +1609,8 @@ class TurnCoordinator:
         prior_answers = list(answer_job_summaries(self.harness.journal).values())
         self.semantic_router.set_turn_context(
             clock_context=turn_clock.prompt_payload(),
-            memory_draft=self.timeline.pending_draft(
-                user_id=self.user_id, case_id=self.session_id
+            memory_draft=self.memory_service.pending_draft(
+                self.user_id, self.session_id
             ),
             previous_turn=previous,
             previous_answer=next(

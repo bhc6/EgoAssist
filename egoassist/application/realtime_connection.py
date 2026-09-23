@@ -18,6 +18,7 @@ from egoassist.realtime import (
 from egoassist.realtime.episodes import RealtimeEpisodeMemory
 from egoassist.realtime.media_audit import MediaAuditAccumulator
 from egoassist.realtime.observation_service import ObservationService
+from egoassist.realtime.observation_interaction import ObservationInteraction
 from egoassist.realtime.performance import event_metric
 from egoassist.realtime.tool_model import ToolModel
 from egoassist.realtime.tools import tool_result_succeeded
@@ -54,6 +55,7 @@ class RealtimeConnection:
     perception_context_for_runtime: Any
     persist_tool_audit: Any
     process_transcript: Any
+    memory_service: Any
     product_database: Any
     queue_reminder: Any
     refresh_harness_context: Any
@@ -215,7 +217,7 @@ class RealtimeConnection:
                         ):
                             owner.lanes.reviews.audio_sent(
                                 origin["observationReviewId"],
-                                self.timeline,
+                                self.memory_service,
                                 user_id=user_id,
                                 case_id=session_id,
                                 response_id=payload.get("responseId"),
@@ -239,7 +241,7 @@ class RealtimeConnection:
                 if payload.get("type") == "audio" and origin.get("observationReviewId"):
                     owner.lanes.reviews.audio_sent(
                         origin["observationReviewId"],
-                        self.timeline,
+                        self.memory_service,
                         user_id=user_id,
                         case_id=session_id,
                         response_id=payload.get("responseId"),
@@ -337,77 +339,40 @@ class RealtimeConnection:
             if event_type == "proactive.gate.decision":
                 policy = current_memory_policy()
                 episodic_settings = policy["components"]["timeline"]
-                if episodic_settings["episodic_enabled"]:
-                    active_episodic = current_episodic_memory(policy)
-                    visible = active_episodic.snapshot(
-                        session_id=session_id,
-                        user_scope=user_id,
-                        allow_cross_session=episodic_settings["scope"] == "participant",
-                    )["recent"]
-                    has_scene_anchor = any(
-                        (item["kind"] == "scene" for item in visible)
-                    )
-                    if payload.get("salientChange") or not has_scene_anchor:
-                        episode = active_episodic.remember(
-                            payload.get("sceneSummary", ""),
-                            kind="scene",
-                            source="proactive-visual-gate",
-                            skill=trace_runtime.skill.name
-                            if trace_runtime.skill
-                            else None,
-                            task=trace_runtime.task.spec.id
-                            if trace_runtime.task
-                            else None,
-                            evidence_event_id=entry["id"],
-                            session_id=session_id,
-                            user_scope=user_id,
-                        )
-                        if episode:
-                            self.append_memory_audit(
-                                journal,
-                                "episodic.memory.written",
-                                "realtime-episodic-memory",
-                                {
-                                    "episodeId": episode["id"],
-                                    "kind": "scene",
-                                    "source": "proactive-visual-gate",
-                                    "storageScope": episodic_settings["scope"],
-                                    "evidenceEventId": entry["id"],
-                                },
-                                parent_event_id=entry["id"],
-                            )
-                            server_loop.call_soon_threadsafe(
-                                self.request_timeline_consolidation, owner
-                            )
+                episode = self.memory_service.remember_scene(current_episodic_memory(policy), payload,
+                    policy=policy, source_id=entry['id'], user_id=user_id, session_id=session_id,
+                    skill=trace_runtime.skill.name if trace_runtime.skill else None,
+                    task=trace_runtime.task.spec.id if trace_runtime.task else None)
+                if episode:
+                    self.append_memory_audit(journal, "episodic.memory.written", "realtime-episodic-memory",
+                        {"episodeId": episode['id'], "kind": "scene", "source": "proactive-visual-gate",
+                         "storageScope": episodic_settings['scope'], "evidenceEventId": entry['id']},
+                        parent_event_id=entry['id'])
+                    server_loop.call_soon_threadsafe(self.request_timeline_consolidation, owner)
             return entry
 
-        observation_service = ObservationService(
-            ambient_options=self.ambient_options,
-            ambient_watch_session=self.ambient_watch_session,
-            apply_memory_hint=self.apply_memory_hint,
-            bridge=lambda: bridge,
-            clock_for_session=self.clock_for_session,
-            current_episodic_memory=current_episodic_memory,
-            current_memory_policy=current_memory_policy,
-            interaction_state=interaction_state,
-            journal=journal,
-            model=self.model,
-            owner=owner,
-            perception_context_for_runtime=self.perception_context_for_runtime,
-            product_database=self.product_database,
+        observation_interaction = ObservationInteraction(
+            ambient_options=self.ambient_options, apply_memory_hint=self.apply_memory_hint,
+            bridge=lambda: bridge, clock_for_session=self.clock_for_session,
+            current_episodic_memory=current_episodic_memory, current_memory_policy=current_memory_policy,
+            interaction_state=interaction_state, journal=journal, owner=owner,
             request_timeline_consolidation=self.request_timeline_consolidation,
-            runtime_checkpoint=self.runtime_checkpoint,
-            scoped_state_for_user=self.scoped_state_for_user,
-            session_id=session_id,
-            session_runtime=session_runtime,
-            session_trace=session_trace,
-            timeline=self.timeline,
-            user_id=user_id,
-            ws=ws,
-        )
+            runtime_checkpoint=self.runtime_checkpoint, session_id=session_id, session_runtime=session_runtime,
+            session_trace=session_trace, memory_service=self.memory_service, user_id=user_id)
+        observation_service = ObservationService(
+            ambient_watch_session=self.ambient_watch_session,
+            bridge=lambda: bridge, journal=journal, model=self.model,
+            owner=owner, perception_context_for_runtime=self.perception_context_for_runtime,
+            product_database=self.product_database, session_id=session_id, session_runtime=session_runtime,
+            session_trace=session_trace, memory_service=self.memory_service, user_id=user_id,
+            interaction=observation_interaction)
         session_perception_context = observation_service.session_perception_context
         session_ambient_context = observation_service.session_ambient_context
-        session_perception_result = observation_service.session_perception_result
+
+        async def session_perception_result(captured, raw):
+            from egoassist.application.observation_transport import deliver_observation
+            return await deliver_observation(observation_service, captured, raw, ws=ws,
+                state=lambda: self.scoped_state_for_user(user_id, session_id))
 
         def runtime_event_sink(active_runtime: SkillRuntime):
 
@@ -794,6 +759,7 @@ class RealtimeConnection:
             grounded_user_instructions=self.grounded_user_instructions,
             memory_recovery=self.memory_recovery,
             process_transcript=self.process_transcript,
+            memory_service=self.memory_service,
             queue_reminder=self.queue_reminder,
             refresh_harness_context=self.refresh_harness_context,
             registry=self.registry,

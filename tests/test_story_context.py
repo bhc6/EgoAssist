@@ -47,11 +47,11 @@ def test_invalid_replacement_keeps_explicit_request_but_cannot_write(tmp_path):
     assert result["memoryAtoms"] == []
     assert result["memoryRequestRejected"] is True
     timeline = TimelineMemory(tmp_path / "memory.sqlite3")
-    service = MemoryCommitService(lambda *a, **k: None, {}, None, None, timeline)
+    service = MemoryCommitService(lambda *a, **k: None, None, None, None, timeline)
     write, requested, _, _ = service.commit(
-        active_episodic=None, active_runtime=SimpleNamespace(skill=None, task=None),
+        active_episodic=None, skill=None, task=None,
         clock_context=ClockContext.current("UTC"), episodic_settings={"episodic_enabled": True},
-        harness=None, preference_enabled=True, semantic_decision=result,
+        journal=None, preference_enabled=True, semantic_decision=result,
         semantic_method=result["method"], transcript="Correct my remembered spare key location.",
         transcript_event={"eventId": "source"}, turn_id="turn", user_scope="u")
     assert requested is True

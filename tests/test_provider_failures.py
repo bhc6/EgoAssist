@@ -66,7 +66,7 @@ def test_router_account_circuit_and_retryable_limit(status, code, expected_calls
 def test_memory_recovery_does_not_requeue_permanent_failure(tmp_path):
     async def run():
         journal = SessionJournal(tmp_path / "case.jsonl", session_id="case")
-        worker = MemoryRecovery("test", TimelineMemory(tmp_path / "timeline.db"), lambda *_: {})
+        worker = MemoryRecovery(SemanticTurnRouter("test"), TimelineMemory(tmp_path / "timeline.db"), lambda *_: {})
         failure = ProviderRequestError(400, "Arrearage")
 
         async def classify(*args):

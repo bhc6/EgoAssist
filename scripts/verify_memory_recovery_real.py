@@ -11,6 +11,7 @@ import time
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from egoassist._env import load_env
+from egoassist.realtime.semantic import SemanticTurnRouter
 from egoassist.memory.recovery import MemoryRecovery, recovery_jobs
 from egoassist.memory.temporal import ClockContext
 from egoassist.memory.timeline import TimelineMemory
@@ -26,14 +27,14 @@ async def verify(output):
     journal = SessionJournal(output / "recovery.jsonl", session_id="recovery")
     policy = lambda *args: {"components": {"timeline": {"preference_enabled": True, "episodic_enabled": True}}}
     key = os.environ["QWEN_API_KEY"]
-    original = MemoryRecovery(key, timeline, policy)
+    original = MemoryRecovery(SemanticTurnRouter(key), timeline, policy)
     text = "这件事替我留个记录：今天没有吃过药，绿色实验记录本由周岳保管。"
     clock = ClockContext.current("Asia/Shanghai", now_utc=datetime(2026, 9, 8, 23, tzinfo=timezone.utc))
     source = journal.append("message", {"message": {"role": "user", "content": text}})
     original.submit(journal, user_id="test", turn_id="source-turn", text=text, source_id=source["id"], clock=clock.prompt_payload())
     original.update(journal, recovery_jobs(journal)["source-turn"], status="running")
     await original.close()
-    worker = MemoryRecovery(key, timeline, policy)
+    worker = MemoryRecovery(SemanticTurnRouter(key), timeline, policy)
     worker.recover(journal)
     started = time.perf_counter()
     try:

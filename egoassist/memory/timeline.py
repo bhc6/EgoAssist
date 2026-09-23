@@ -18,6 +18,7 @@ from uuid import uuid4
 from .temporal import ClockContext, query_time_range, resolve_time_semantics
 from .evidence import evidence_network, ground_context, time_matches
 from .grounding import evidence_contract, project_card
+from .metrics import MeasuredConnection
 
 
 class _ClosingConnection:
@@ -243,7 +244,7 @@ class TimelineMemory:
         self._initialize()
 
     def _connect(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(self.path, timeout=10.0)
+        connection = sqlite3.connect(self.path, timeout=10.0, factory=MeasuredConnection)
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA foreign_keys=ON")
         connection.execute("PRAGMA busy_timeout=10000")
@@ -960,6 +961,15 @@ class TimelineMemory:
         with self._lock, self._connect() as connection:
             rows = connection.execute(query, values).fetchall()
         return [self._row_to_card(row) for row in rows]
+
+    def cards_by_ids(self, ids, *, user_id):
+        ids = list(dict.fromkeys(ids))
+        if not ids:
+            return {}
+        with self._lock, self._connect() as connection:
+            rows = connection.execute('SELECT * FROM memory_cards WHERE user_id=? AND id IN (' +
+                ','.join('?' for _ in ids) + ')', [user_id, *ids]).fetchall()
+        return {row['id']: self._row_to_card(row) for row in rows}
 
     def retrieve(
         self,

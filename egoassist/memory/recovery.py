@@ -5,9 +5,9 @@ import time
 
 from egoassist.memory.evidence import ground_context
 from egoassist.memory.temporal import ClockContext, resolve_time_semantics
-from egoassist.realtime.semantic import SemanticTurnRouter
 from egoassist.core.settings import integer, number
 from egoassist.core.events import latest
+from .service import MemoryExtractor
 
 
 def recovery_jobs(journal):
@@ -15,8 +15,8 @@ def recovery_jobs(journal):
 
 
 class MemoryRecovery:
-    def __init__(self, api_key, timeline, policy):
-        self.router = SemanticTurnRouter(api_key, timeout_seconds=number("EGOASSIST_MEMORY_RECOVERY_TIMEOUT", 20))
+    def __init__(self, router: MemoryExtractor, timeline, policy):
+        self.router = router
         self.timeline, self.policy = timeline, policy
         self.journals, self.tasks = {}, {}
         self.attempts = integer("EGOASSIST_MEMORY_RECOVERY_ATTEMPTS", 3, maximum=20)
@@ -49,7 +49,7 @@ class MemoryRecovery:
         if not row or row["status"] != "failed":
             raise ValueError("only failed memory recovery can be retried")
         self.journals[str(journal.path)] = journal
-        self.router._blocked_failure = None
+        self.router.reset_failure()
         self.update(journal, row, status="queued", attempt=0, nextAttemptAt=time.time(), error=None)
 
     async def execute(self, journal, row):

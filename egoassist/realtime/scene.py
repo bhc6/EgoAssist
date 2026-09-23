@@ -21,7 +21,7 @@ from egoassist.prompts import prompt_text
 from .speakers import MODELS, SpeakerRegistry
 from .visual_question import VisualQuestions
 from .visual_history import VisualHistory
-from .long_events import LongEvents
+from egoassist.memory.long_events import LongEvents
 from .interaction_window import BUFFER_SECONDS, BUFFER_BYTES, device_clock, select_frames
 from uuid import uuid4
 from egoassist.core.settings import asr_settings

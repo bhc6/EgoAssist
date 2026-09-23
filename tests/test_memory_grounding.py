@@ -1,3 +1,4 @@
+from egoassist.realtime.semantic import SemanticTurnRouter
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 import sqlite3
@@ -234,7 +235,7 @@ def test_recovery_deduplicates_live_write_using_original_source_not_array_index(
         text = "今天我已经吃过药了"
         original = save(memory, text, source_ids=["source"])
         policy = lambda *args: {"components": {"timeline": {"episodic_enabled": True, "preference_enabled": True}}}
-        worker = MemoryRecovery("", memory, policy)
+        worker = MemoryRecovery(SemanticTurnRouter(""), memory, policy)
         worker.submit(journal, user_id="u", turn_id="turn", text=text, source_id="source", clock=SOURCE.prompt_payload())
         async def classify(*args):
             atom = {"kind": "event", "text": text, "scope": "case", "consent": "observed"}

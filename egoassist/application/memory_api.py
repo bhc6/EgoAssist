@@ -43,6 +43,7 @@ class MemoryEndpoints:
     user_runtimes: Any
     user_tools: Any
     web: Any
+    memory_service: Any = None
 
     async def post_memory_policy(self, request):
         user = request[self.user_key]
@@ -219,6 +220,7 @@ class MemoryEndpoints:
                 },
                 "episodicMemory": episodic_snap,
                 "recentOps": owner.memory_bus.recent(40) if owner.memory_bus else [],
+                "memoryMetrics": self.memory_service.status(user_id, session_id) if self.memory_service else None,
             }
         )
 
@@ -299,10 +301,10 @@ class MemoryEndpoints:
             raise ValueError(
                 "confirmed preference memory is disabled for this experiment case"
             )
-        candidate = active_episodic.snapshot_preference(candidate_scope=session_id).get(
+        candidate = self.memory_service.snapshot_preference(active_episodic, candidate_scope=session_id).get(
             "candidate"
         )
-        active_episodic.resolve_candidate(accepted, candidate_scope=session_id)
+        self.memory_service.resolve_preference(active_episodic, accepted, candidate_scope=session_id)
         if session_id:
             self.append_memory_audit(
                 self.case_journal(user_id, session_id),
@@ -334,7 +336,7 @@ class MemoryEndpoints:
         record = next(
             (
                 item
-                for item in active_episodic.snapshot_preference(
+                for item in self.memory_service.snapshot_preference(active_episodic,
                     candidate_scope=session_id
                 )["records"]
                 if item["id"] == record_id
@@ -343,24 +345,9 @@ class MemoryEndpoints:
         )
         deleted_card = None
         if record is not None:
-            active_episodic.delete_preference(record_id, candidate_scope=session_id)
+            self.memory_service.delete_preference(active_episodic, record_id, candidate_scope=session_id)
         else:
-            eligible = self.timeline.cards(
-                user_id=user_id, scope="participant", statuses=("active", "pending")
-            )
-            if session_id:
-                eligible += self.timeline.cards(
-                    user_id=user_id,
-                    case_id=session_id,
-                    scope="case",
-                    statuses=("active", "pending"),
-                )
-            deleted_card = next(
-                (card for card in eligible if card["id"] == record_id), None
-            )
-            if deleted_card is None:
-                raise ValueError("memory not found")
-            self.timeline.delete(record_id)
+            deleted_card = self.memory_service.delete_card(user_id, session_id, record_id)
         if session_id:
             self.append_memory_audit(
                 self.case_journal(user_id, session_id),

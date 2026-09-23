@@ -23,6 +23,8 @@ from egoassist.application.task_api import TaskEndpoints
 from egoassist.core.settings import number
 from egoassist.memory import ClockContext, TimelineMemory
 from egoassist.memory.commit import MemoryCommitService
+from egoassist.memory.service import MemoryService
+from egoassist.realtime.semantic import SemanticTurnRouter
 from egoassist.memory.insights import InsightGenerator
 from egoassist.memory.recovery import MemoryRecovery
 from egoassist.product import (
@@ -160,18 +162,8 @@ def create_app(
             latency_ms=metadata.get("latency_ms"),
         )
         if episodic and event_type == "proactive.gate.decision":
-            has_scene_anchor = any(
-                item["kind"] == "scene" for item in episodic.snapshot()["recent"]
-            )
-            if payload.get("salientChange") or not has_scene_anchor:
-                episodic.remember(
-                    payload.get("sceneSummary", ""),
-                    kind="scene",
-                    source="proactive-visual-gate",
-                    skill=runtime_context["skill"],
-                    task=runtime_context["task"],
-                    evidence_event_id=event["eventId"],
-                )
+            memory_service.remember_scene(episodic, payload, policy=default_memory_policy(),
+                source_id=event['eventId'], skill=runtime_context['skill'], task=runtime_context['task'])
         return event
 
     runtime = SkillRuntime(registry, active_skill, event_sink=trace_event)
@@ -423,7 +415,7 @@ def create_app(
     insight_executor = InsightJobs(insight_generator, insight_sources)
     answer_executor = AnswerJobs(insight_generator.api_key)
     memory_recovery = MemoryRecovery(
-        insight_generator.api_key,
+        SemanticTurnRouter(insight_generator.api_key, timeout_seconds=number("EGOASSIST_MEMORY_RECOVERY_TIMEOUT", 20)),
         timeline,
         lambda user, session: identity.get_context_session(user, session)[
             "memoryPolicy"
@@ -921,21 +913,7 @@ def create_app(
             while owner.consolidation_requested:
                 owner.consolidation_requested = False
 
-                def consolidate() -> list[dict]:
-                    return [
-                        timeline.promote_to_long(
-                            user_id=owner.user_id,
-                            case_id=owner.session_id,
-                            scope="case",
-                        ),
-                        timeline.promote_to_long(
-                            user_id=owner.user_id,
-                            case_id=None,
-                            scope="participant",
-                        ),
-                    ]
-
-                results = await asyncio.to_thread(consolidate)
+                results = await asyncio.to_thread(memory_service.consolidate, owner.user_id, owner.session_id)
                 for scope, result in zip(("case", "participant"), results):
                     if result.get("status") == "consolidated":
                         append_memory_audit(
@@ -977,25 +955,8 @@ def create_app(
     ) -> dict | None:
         if not tool_result_succeeded(result, is_error=is_error):
             return None
-        result_data = dict(result)
-        text = f"Tool {name} completed: " + json.dumps(
-            result_data,
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-        )
-        card = timeline.remember(
-            text,
-            user_id=owner.user_id,
-            case_id=owner.session_id,
-            scope="case",
-            kind="tool-effect",
-            tier="short",
-            memory_key=f"tool-effect:{name}:{call_id}",
-            source_ids=[source_id] if source_id else [],
-            importance=0.8,
-            metadata={"callId": call_id, "tool": name, "result": result_data},
-        )
+        card = memory_service.remember_tool_effect(user_id=owner.user_id, session_id=owner.session_id,
+            call_id=call_id, name=name, result=result, source_id=source_id)
         if card:
             append_memory_audit(
                 owner.journal,
@@ -1116,31 +1077,9 @@ def create_app(
     ) -> dict:
         active_runtime = target_runtime or runtime
         active_episodic = episodic_memory or episodic
-        if not enabled:
-            return {
-                "method": "disabled-by-memory-policy",
-                "query": {"task": None, "checkpoint": None},
-                "selected": None,
-                "candidates": [],
-            }
-        if active_runtime.task is None:
-            return {
-                "method": "exact-trigger-v1",
-                "query": {"task": None, "checkpoint": None},
-                "selected": None,
-                "candidates": [],
-            }
         task = active_runtime.task
-        spec = task.spec
-        attempts = [
-            active_episodic.retrieve_preference(
-                spec.id, task.current_step.id, emit=emit
-            ),
-            active_episodic.retrieve_preference(
-                spec.title, task.current_step.title, emit=False
-            ),
-        ]
-        return next((item for item in attempts if item["selected"]), attempts[0])
+        triggers = [(task.spec.id, task.current_step.id), (task.spec.title, task.current_step.title)] if task else []
+        return memory_service.preference_retrieval(active_episodic, triggers, enabled=enabled, emit=emit)
 
     def find_memory_hint(
         memory_state: dict | None = None,
@@ -1684,6 +1623,8 @@ def create_app(
             instructions += prompt_text("run_egoassist/grounded_user_instructions.4")
         evidence = result.get("episodicInjection", {}).get("evidence", [])
         packet = result.get("evidencePackage")
+        if result.get('memoryRead', {}).get('status') == 'degraded':
+            instructions += prompt_text('evidence_answer/unavailable')
         if packet:
             from egoassist.product.answer_service import evidence_instructions
             instructions += '\n' + evidence_instructions(packet)
@@ -1840,14 +1781,27 @@ def create_app(
     async def get_index(request):
         return web.FileResponse(WEB_ROOT / "index.html")
 
+    def record_memory_operation(session_id, operation, **payload):
+        owner = case_owners.get(session_id)
+        if owner and owner.memory_bus:
+            owner.memory_bus.record(operation, **payload)
+
     memory_commit = MemoryCommitService(
         append_memory_audit=append_memory_audit,
-        case_owners=case_owners,
+        record_operation=record_memory_operation,
         episodic_for_user=episodic_for_user,
         memory_recovery=memory_recovery,
         timeline=timeline,
     )
 
+    memory_service = MemoryService(timeline, evidence_service, memory_commit,
+        read_timeout=number("EGOASSIST_MEMORY_READ_TIMEOUT", 2, minimum=0.05, maximum=30))
+
+    async def memory_reads_context(_app):
+        yield
+        await evidence_service.close()
+
+    app_memory_reads_context = memory_reads_context
     interaction_service = InteractionService(
         append_memory_audit=append_memory_audit,
         apply_memory_hint=apply_memory_hint,
@@ -1857,8 +1811,7 @@ def create_app(
         episodic_for_user=episodic_for_user,
         find_memory_hint=find_memory_hint,
         live_bridges=live_bridges,
-        memory_commit=memory_commit,
-        evidence_service=evidence_service,
+        memory_service=memory_service,
         memory_retrieval=memory_retrieval,
         registry=registry,
         runtime=runtime,
@@ -2391,6 +2344,8 @@ def create_app(
         runtime_skill_summary=runtime_skill_summary,
         timeline=timeline,
         tools=tools,
+        memory_metrics=memory_service.status,
+        memory_service=memory_service,
     )
     state = _stateprojection.state
 
@@ -2432,6 +2387,7 @@ def create_app(
         insight_executor=insight_executor,
         invalidate_live_sessions=invalidate_live_sessions,
         memory_recovery=memory_recovery,
+        memory_service=memory_service,
         outcome_ledger=outcome_ledger,
         privacy_governance=privacy_governance,
         product_database=product_database,
@@ -2477,6 +2433,7 @@ def create_app(
         outcome_ledger=outcome_ledger,
         persist_tool_audit=persist_tool_audit,
         process_transcript=process_transcript,
+        memory_service=memory_service,
         queue_reminder=queue_reminder,
         registry=registry,
         reminder_runtime=reminder_runtime,
@@ -2564,6 +2521,7 @@ def create_app(
         perception_context_for_runtime=perception_context_for_runtime,
         persist_tool_audit=persist_tool_audit,
         process_transcript=process_transcript,
+        memory_service=memory_service,
         product_database=product_database,
         queue_reminder=queue_reminder,
         refresh_harness_context=refresh_harness_context,
@@ -2595,8 +2553,10 @@ def create_app(
                     api_key=insight_generator.api_key, user_key=user_key,
                     blocked=lambda uid: uid in deleting_insight_users)
         retention.derived_stores = (diary_service,)
+        _stateprojection.diary_status = diary_service.status
 
     from egoassist.application.history_api import mount as mount_history
+    app.cleanup_ctx.append(app_memory_reads_context)
     mount_history(app, identity=identity, user_key=user_key,
                   journal_for=lambda uid, sid: SessionJournal.open_in(user_memory_root / uid / 'sessions', sid),
                   evidence=evidence_service, answers=answer_executor.answer_service)

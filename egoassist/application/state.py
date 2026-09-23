@@ -58,6 +58,9 @@ class StateProjection:
     runtime_skill_summary: Any
     timeline: Any
     tools: Any
+    diary_status: Any = None
+    memory_metrics: Any = None
+    memory_service: Any = None
 
     def state(
         self,
@@ -178,7 +181,7 @@ class StateProjection:
             if user_scope != "local-default"
             else active_episodic
         )
-        memory_state = preference_memory.snapshot_preference(
+        memory_state = self.memory_service.snapshot_preference(preference_memory,
             candidate_scope=visible_session_id
         )
         compiled_context = self.context(active_runtime)
@@ -231,8 +234,8 @@ class StateProjection:
             )
         ):
             owner.lanes.reviews.reconcile(
-                self.timeline.pending_draft(
-                    user_id=user_scope, case_id=visible_session_id
+                self.memory_service.pending_draft(
+                    user_scope, visible_session_id
                 )
             )
         runtime_lanes = (
@@ -250,6 +253,8 @@ class StateProjection:
                     episodic_settings["episodic_enabled"]
                     or preference_settings["preference_enabled"]
                 ),
+                account_diary=self.diary_status(user_scope) if self.diary_status else None,
+                memory_metrics=self.memory_metrics(user_scope, visible_session_id) if self.memory_metrics else None,
             )
             if owner
             else None
@@ -266,7 +271,7 @@ class StateProjection:
             "echoControl": "browser-webrtc-aec",
             "claimBoundary": "Logical channels are distinct; residual acoustic echo is observable but speaker identity is not guaranteed.",
         }
-        episodic_state = active_episodic.snapshot(
+        episodic_state = self.memory_service.snapshot_episode(active_episodic,
             session_id=visible_session_id,
             user_scope=user_scope,
             allow_cross_session=episodic_settings["scope"] == "participant",

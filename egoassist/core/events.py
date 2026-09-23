@@ -4,6 +4,7 @@ JOB_EVENTS = {
     "answer.job": "turnId",
     "insight.job": "jobId",
     "memory.recovery.job": "turnId",
+    "long_event.job": "requestId",
 }
 TRANSCRIPT_EVENTS = {"message", "turn_inbox", "scene.turn", "scene.transcript", "source.event"}
 OBSERVATION_EVENTS = {
@@ -20,7 +21,7 @@ def retention_category(row):
         return "transcript"
     if kind in OBSERVATION_EVENTS:
         return "observation"
-    if kind.startswith("memory."):
+    if kind.startswith("memory.") or kind.startswith("long_event."):
         return "memory"
     if kind in {"runtime_event", "model.prompt", "control_decision"}:
         return "operational"

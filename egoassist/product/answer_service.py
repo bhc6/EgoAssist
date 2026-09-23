@@ -32,7 +32,9 @@ def turn_answer_context(question, result, *, clock, runtime, shared_scene):
     return {'transcript': question, 'retrievalEvidence': result.get('episodicInjection', {}).get('evidence', []),
         'evidencePackage': answer_context(packet) if packet else None, 'clock': clock,
         'runtime': runtime, 'sharedScene': shared_scene, 'timelineWrite': result.get('timelineWrite'),
-        'referenceResult': result.get('referenceResult')}
+        'referenceResult': result.get('referenceResult'),
+        'memoryRead': result.get('memoryRead'),
+        'memoryBoundary': 'Incomplete retrieval is not evidence that an event never happened.'}
 
 
 def validate_answer(value, packet):

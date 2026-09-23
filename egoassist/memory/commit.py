@@ -6,13 +6,13 @@ from typing import Any
 
 from egoassist.memory import resolve_time_semantics
 from egoassist.memory.evidence import ground_context
-from egoassist.realtime import memory_draft_candidate
+from .drafts import memory_draft_candidate
 
 
 @dataclass
 class MemoryCommitService:
     append_memory_audit: Any
-    case_owners: Any
+    record_operation: Any
     episodic_for_user: Any
     memory_recovery: Any
     timeline: Any
@@ -21,10 +21,11 @@ class MemoryCommitService:
         self,
         *,
         active_episodic,
-        active_runtime,
+        skill,
+        task,
         clock_context,
         episodic_settings,
-        harness,
+        journal,
         preference_enabled,
         semantic_decision,
         semantic_method,
@@ -37,7 +38,7 @@ class MemoryCommitService:
         timeline_write = None
         memory_kind = semantic_decision.get("memoryKind")
         memory_consent = semantic_decision.get("memoryConsent")
-        memory_case_id = harness.session_id if harness else "local-default"
+        memory_case_id = journal.session_id if journal else "local-default"
         pending_draft = self.timeline.pending_draft(
             user_id=user_scope, case_id=memory_case_id
         )
@@ -52,9 +53,9 @@ class MemoryCommitService:
                 for error in semantic_decision.get("componentErrors") or []
             )
         )
-        if recovery_pending and harness:
+        if recovery_pending and journal:
             self.memory_recovery.submit(
-                harness.journal,
+                journal,
                 user_id=user_scope,
                 turn_id=turn_id or transcript_event["eventId"],
                 text=transcript,
@@ -159,8 +160,8 @@ class MemoryCommitService:
                     atom.get("text") or transcript,
                     kind=atom_kind,
                     source="semantic-memory-card",
-                    skill=active_runtime.skill.name if active_runtime.skill else None,
-                    task=active_runtime.task.spec.id if active_runtime.task else None,
+                    skill=skill,
+                    task=task,
                     evidence_event_id=transcript_event["eventId"],
                     session_id=memory_case_id,
                     user_scope=user_scope,
@@ -188,20 +189,11 @@ class MemoryCommitService:
                     if episode["id"] not in {card["id"] for card in written_cards}:
                         written_cards.append(episode)
                     consumed_draft = consumed_draft or compatible_draft
-                    _enc_owner = self.case_owners.get(memory_case_id)
-                    if _enc_owner and _enc_owner.memory_bus:
-                        _enc_owner.memory_bus.record(
-                            "encode",
-                            tier="long"
-                            if requested_scope == "participant"
-                            and atom_consent == "explicit"
-                            else "short",
-                            kind=atom_kind,
-                            scope=requested_scope,
+                    if self.record_operation:
+                        self.record_operation(memory_case_id, "encode", tier=episode.get("tier"),
+                            kind=atom_kind, scope=requested_scope,
                             text_preview=str(atom.get("text") or transcript)[:120],
-                            card_id=episode.get("id"),
-                            consent=atom_consent,
-                        )
+                            card_id=episode.get("id"), consent=atom_consent)
                 else:
                     skipped_reasons.append("empty-or-question-like-memory-text")
             if consumed_draft and pending_draft:
@@ -306,7 +298,7 @@ class MemoryCommitService:
                 "reason": "raw-input-retained-memory-recovery-queued",
                 "committedCardIds": [],
             }
-        if harness and timeline_write:
+        if journal and timeline_write:
             memory_write_ms = round(
                 (time.perf_counter() - memory_write_started) * 1000, 3
             )
@@ -318,7 +310,7 @@ class MemoryCommitService:
                 "not-written": "timeline.memory.write.skipped",
             }[timeline_write["action"]]
             self.append_memory_audit(
-                harness,
+                journal,
                 event_type,
                 "timeline-memory",
                 {

@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+from egoassist.core.source_contract import SourceReference
+
 import time
 from dataclasses import dataclass
+from copy import deepcopy
+from egoassist.memory.service import MemoryQuery, PreparedMemory
 from typing import Any
 from uuid import uuid4
 
@@ -31,14 +35,13 @@ class InteractionService:
     episodic_for_user: Any
     find_memory_hint: Any
     live_bridges: Any
-    memory_commit: Any
+    memory_service: Any
     memory_retrieval: Any
     registry: Any
     runtime: Any
     runtime_checkpoint: Any
     runtime_context: Any
     trace_event: Any
-    evidence_service: Any = None
 
     def process_transcript(
         self,
@@ -55,6 +58,7 @@ class InteractionService:
         episodic_memory: RealtimeEpisodeMemory | None = None,
         clock_context: ClockContext | None = None,
         project_retrieval: bool = True,
+        prepared_memory: PreparedMemory | None = None,
     ) -> dict:
         transcript = str(transcript).strip()
         if not transcript:
@@ -93,121 +97,21 @@ class InteractionService:
         skill_control = semantic_decision.get("skillControl")
         selected_by_semantic = semantic_decision.get("selectedSkill")
         retrieval_started = time.perf_counter()
-        episodic_retrieval = None
-        if episodic_settings["episodic_enabled"]:
-            episodic_retrieval = active_episodic.retrieve(
-                transcript,
-                session_id=harness.session_id if harness else None,
-                user_scope=user_scope,
-                allow_cross_session=episodic_settings["scope"] == "participant",
-                referential=semantic_decision.get("memoryQuery") == "referential",
-                clock=clock_context,
-                query_spec=semantic_decision.get("memoryQuerySpec"),
-                project=project_retrieval,
-                ranking_query=retrieval_text(transcript, semantic_decision),
-            )
-            if episodic_retrieval is not None and harness is not None:
-                _bus_owner = self.case_owners.get(harness.session_id)
-                if _bus_owner and _bus_owner.memory_bus:
-                    _cands = episodic_retrieval.get("candidateAudit", episodic_retrieval.get("candidates", []))
-                    _bus_owner.memory_bus.record(
-                        "retrieve",
-                        query_preview=str(episodic_retrieval.get("query", ""))[:120],
-                        candidate_count=len(_cands),
-                        selected_count=sum((1 for c in _cands if c.get("selected"))),
-                        top_score=round(_cands[0].get("score", 0), 4)
-                        if _cands
-                        else None,
-                        method=episodic_retrieval.get("method"),
-                        scope=getattr(active_episodic, "scope", None),
-                    )
-        durable_retrieval = None
-        if (
-            preference_enabled
-            and user_scope != "local-default"
-            and (
-                episodic_retrieval is None
-                or getattr(active_episodic, "scope", None) != "participant"
-            )
-        ):
-            durable_retrieval = self.episodic_for_user(user_scope).retrieve(
-                transcript,
-                session_id=harness.session_id if harness else None,
-                user_scope=user_scope,
-                allow_cross_session=True,
-                referential=semantic_decision.get("memoryQuery") == "referential",
-                clock=clock_context,
-                query_spec=semantic_decision.get("memoryQuerySpec"),
-                project=project_retrieval,
-                ranking_query=retrieval_text(transcript, semantic_decision),
-            )
-        if episodic_retrieval is not None and durable_retrieval is not None:
-            merged_by_id = {
-                item["episodeId"]: item
-                for item in episodic_retrieval.get("candidateAudit", episodic_retrieval.get("candidates", []))
-                + durable_retrieval.get("candidateAudit", durable_retrieval.get("candidates", []))
-            }
-            merged_candidates = sorted(
-                merged_by_id.values(),
-                key=lambda item: (
-                    item.get("score", 0.0),
-                    item.get("record", {}).get("timestamp", ""),
-                ),
-                reverse=True,
-            )
-            minimum_score = max(
-                float(
-                    episodic_retrieval.get("minimumScore")
-                    or DEFAULT_RETRIEVAL_MIN_SCORE
-                ),
-                float(
-                    durable_retrieval.get("minimumScore") or DEFAULT_RETRIEVAL_MIN_SCORE
-                ),
-            )
-            merged_selected = [
-                item
-                for item in merged_candidates
-                if item.get("score", 0.0) >= minimum_score
-            ][:5]
-            selected_ids = {item["episodeId"] for item in merged_selected}
-            for item in merged_candidates:
-                item["selected"] = item["episodeId"] in selected_ids
-                if (
-                    item.get("score")
-                    and (not item["selected"])
-                    and ("outside-top-k" not in item["rejectionReasons"])
-                ):
-                    item["rejectionReasons"].append("outside-top-k")
-            episodic_retrieval = {
-                **episodic_retrieval,
-                "scope": {
-                    **episodic_retrieval["scope"],
-                    "memoryScope": "case+participant",
-                    "allowCrossSession": True,
-                },
-                "candidates": merged_candidates[:20],
-                "candidateAudit": merged_candidates,
-                "selected": merged_selected,
-                "minimumScore": minimum_score,
-                "claimBoundary": "Merged same-case event cards and explicitly durable participant cards.",
-            }
-        elif durable_retrieval is not None:
-            episodic_retrieval = {
-                **durable_retrieval,
-                "scope": {
-                    **durable_retrieval["scope"],
-                    "memoryScope": "participant",
-                    "allowCrossSession": True,
-                },
-                "claimBoundary": "Explicitly durable participant timeline cards; case episodic memory is disabled.",
-            }
+        query = MemoryQuery(user_scope, harness.session_id if harness else None, transcript,
+            active_policy, clock_context, deepcopy(semantic_decision), retrieval_text(transcript, semantic_decision),
+            (harness.session_id + ':' + transcript_entry['id'],) if harness else (),
+            SourceReference.from_entry(user_scope, harness.session_id, transcript_entry) if harness else None)
+        prepared_memory = prepared_memory or self.memory_service.read(query)
+        prepared_memory = self.memory_service.accept(prepared_memory, query, harness.journal if harness else None)
+        episodic_retrieval = prepared_memory.retrieval
+        durable_retrieval = prepared_memory.participant
         if episodic_retrieval is not None:
             turn_episode_injection = active_episodic.mark_injected(
                 episodic_retrieval, project=project_retrieval
             )
         else:
             episodic_retrieval = {
-                "method": "disabled-by-memory-policy",
+                "method": "memory-read-unavailable" if prepared_memory.failures else "disabled-by-memory-policy",
                 "query": transcript,
                 "referential": False,
                 "scope": {
@@ -218,11 +122,11 @@ class InteractionService:
                 "minimumScore": None,
                 "candidates": [],
                 "selected": [],
-                "injection": {"status": "disabled", "episodeIds": [], "evidence": []},
-                "claimBoundary": "Episodic persistence, retrieval, and injection are disabled for this case.",
+                "injection": {"status": "unavailable" if prepared_memory.failures else "disabled", "episodeIds": [], "evidence": []},
+                "claimBoundary": "Memory read unavailable; absence of retrieved evidence does not establish absence of history." if prepared_memory.failures else "Episodic persistence, retrieval, and injection are disabled for this case.",
             }
             turn_episode_injection = {
-                "status": "disabled",
+                "status": "unavailable" if prepared_memory.failures else "disabled",
                 "query": transcript,
                 "episodeIds": [],
                 "evidence": [],
@@ -235,7 +139,7 @@ class InteractionService:
                 {
                     "enabled": bool(
                         episodic_settings["episodic_enabled"]
-                        or durable_retrieval is not None
+                        or durable_retrieval
                     ),
                     "caseMemoryEnabled": episodic_settings["episodic_enabled"],
                     "participantMemoryEnabled": preference_enabled,
@@ -246,7 +150,7 @@ class InteractionService:
                     "scope": episodic_retrieval["scope"],
                     "minimumScore": episodic_retrieval.get("minimumScore"),
                     "retrievalMs": round(
-                        (time.perf_counter() - retrieval_started) * 1000, 3
+                        (prepared_memory.read_ms or 0) + (time.perf_counter() - retrieval_started) * 1000, 3
                     ),
                     "routing": episodic_retrieval.get("routing"),
                     "candidates": [
@@ -489,12 +393,13 @@ class InteractionService:
                         [route_event["eventId"]],
                     )
         timeline_write, memory_requested, memory_kind, memory_consent = (
-            self.memory_commit.commit(
+            self.memory_service.commit(
                 active_episodic=active_episodic,
-                active_runtime=active_runtime,
+                skill=active_runtime.skill.name if active_runtime.skill else None,
+                task=active_runtime.task.spec.id if active_runtime.task else None,
                 clock_context=clock_context,
                 episodic_settings=episodic_settings,
-                harness=harness,
+                journal=harness.journal if harness else None,
                 preference_enabled=preference_enabled,
                 semantic_decision=semantic_decision,
                 semantic_method=semantic_method,
@@ -522,7 +427,7 @@ class InteractionService:
             )
         ):
             step = active_runtime.task.current_step
-            proposal = active_episodic.propose_preference(
+            proposal = self.memory_service.propose_preference(active_episodic,
                 task=active_runtime.task.spec.id,
                 step=step.id,
                 prompt=transcript[:160],
@@ -679,12 +584,15 @@ class InteractionService:
                 "committedCardIds": [],
                 "message": None,
             }
-        evidence_package = None
-        if (self.evidence_service is not None and harness is not None
-                and user_scope != 'local-default' and episodic_settings['episodic_enabled']):
-            evidence_package = self.evidence_service.query(user_scope, harness.session_id, transcript,
-                exclude=(harness.session_id + ':' + transcript_entry['id'],))
-            harness.journal.append('evidence.package', {'turnId': turn_id, 'packet': evidence_package})
+        evidence_package = prepared_memory.evidence
+        if harness:
+            harness.journal.append('memory.read', {'turnId': turn_id,
+                'status': 'degraded' if prepared_memory.failures else 'completed',
+                'failures': prepared_memory.failures, 'readMs': prepared_memory.read_ms})
+            if evidence_package:
+                from egoassist.product.answer_service import source_event_ids
+                harness.journal.append('evidence.package', {'turnId': turn_id, 'packet': evidence_package},
+                    required_event_ids=source_event_ids(harness.journal, evidence_package))
         return {
             "matchedTask": matched_task,
             "runtimeChanged": runtime_changed,
@@ -695,6 +603,7 @@ class InteractionService:
             "episodicInjection": turn_episode_injection,
             "evidencePackage": evidence_package,
             "memoryPolicy": active_policy,
+            "memoryRead": {"status": "degraded" if prepared_memory.failures else "completed", "failures": prepared_memory.failures},
             "routingState": turn_routing,
             "control": speech_control,
             "taskControl": task_control,

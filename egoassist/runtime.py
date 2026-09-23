@@ -55,7 +55,7 @@ class ThreeLaneRuntime:
         })
 
     def snapshot(self, *, observation, scheduler, pending_inputs=0, classifying=0,
-                 consolidating=False, memory_enabled=True):
+                 consolidating=False, memory_enabled=True, account_diary=None, memory_metrics=None):
         def reduce(state, row):
             jobs, phases = state["jobs"], state["phases"]
             kind = row.get("type")
@@ -63,15 +63,27 @@ class ThreeLaneRuntime:
                 phases[row["turnId"]] = row
             if kind == "turn_inbox_state" and row.get("status") in {"completed", "failed", "cancelled"}:
                 phases.pop(row["turnId"], None)
-            if kind in {"memory.recovery.job", "insight.job", "answer.job"}:
-                jobs[(kind, row.get("turnId") or row.get("jobId"))] = row
+            if kind == 'long_event.reset':
+                for key in list(jobs):
+                    if key[0] == 'long_event.job':
+                        del jobs[key]
+            if kind == 'long_event.request':
+                # A new batch request replaces interrupted attempts; they are
+                # not additional queued workers waiting to execute.
+                for key, job in list(jobs.items()):
+                    if key[0] == 'long_event.job' and job['status'] in {'queued', 'running'}:
+                        jobs[key] = {**job, 'status': 'cancelled'}
+            if kind in {"memory.recovery.job", "insight.job", "answer.job", "long_event.job"}:
+                jobs[(kind, row.get("turnId") or row.get("jobId") or row.get('requestId'))] = row
+            if kind == 'memory.read':
+                state['lastRead'] = {key: row.get(key) for key in ('status', 'failures', 'timestamp')}
             if kind == "answer.job" and row.get("status") in {"completed", "failed", "cancelled", "paused"}:
                 phases.pop(row["turnId"], None)
             if kind == "ambient_observation" and row.get("status") == "accepted":
                 previous = state["observation"]
                 if previous is None or str(row.get("frame_captured_at", "")) >= str(previous.get("frame_captured_at", "")):
                     state["observation"] = row
-        projected = self.journal.project("three-lanes", lambda: {"jobs": {}, "phases": {}, "observation": None}, reduce)
+        projected = self.journal.project("three-lanes", lambda: {"jobs": {}, "phases": {}, "observation": None, 'lastRead': None}, reduce)
         jobs, phases, latest_observation = projected["jobs"], projected["phases"], projected["observation"]
         memory_jobs = [row for (kind, _), row in jobs.items() if kind != "answer.job"]
         answer_jobs = [row for (kind, _), row in jobs.items() if kind == "answer.job"]
@@ -101,7 +113,10 @@ class ThreeLaneRuntime:
             },
             "memory": {
                 "enabled": memory_enabled, "jobs": _counts(memory_jobs), "consolidating": consolidating,
-                "activeJobs": [{"id": row.get("jobId") or row.get("turnId"), "kind": row["type"],
+                'scope': 'case', 'lastRead': projected['lastRead'],
+                'accountDiary': deepcopy(account_diary),
+                'metrics': deepcopy(memory_metrics),
+                "activeJobs": [{"id": row.get("jobId") or row.get("turnId") or row.get('requestId'), "kind": row["type"],
                                 "status": row["status"], "phase": row.get("phase"), "updatedAt": row["timestamp"]}
                                for row in memory_jobs if row["status"] in {"queued", "running"}],
             },

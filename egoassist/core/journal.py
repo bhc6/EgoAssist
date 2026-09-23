@@ -292,6 +292,12 @@ class SessionJournal:
                 self._idempotency[idempotency_key] = entry["id"]
             return deepcopy(entry)
 
+    def entries_by_id(self, identifiers):
+        """Read selected dependencies without copying the complete journal."""
+        with self._lock, _file_lock(self.path, create=False):
+            self._refresh()
+            return {key: deepcopy(self._entry_by_id[key]) for key in identifiers if key in self._entry_by_id}
+
     @property
     def leaf_id(self) -> str | None:
         with self._lock, _file_lock(self.path):

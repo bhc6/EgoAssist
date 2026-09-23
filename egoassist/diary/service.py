@@ -1,5 +1,6 @@
 """An independent resumable queue and schedule; never submits runtime actions."""
 import asyncio
+from contextlib import closing
 from datetime import datetime, timedelta
 import logging
 from pathlib import Path
@@ -25,6 +26,26 @@ class DiaryService:
     def store(self, uid):
         if not re.fullmatch(r'[A-Za-z0-9_-]+',uid): raise ValueError('账户标识无效')
         return DiaryStore(self.root/uid)
+
+    def status(self, uid):
+        """Account queue projection; never load diary bodies or create a store."""
+        if not re.fullmatch(r'[A-Za-z0-9_-]+', uid):
+            raise ValueError('invalid account')
+        result = {'scope': 'account', 'enabled': True, 'status': 'available',
+                  'jobs': {}, 'activeJobs': []}
+        path = self.root / uid / 'diary.sqlite3'
+        if not path.exists():
+            return result
+        try:
+            with closing(sqlite3.connect(path.resolve().as_uri() + '?mode=ro', uri=True, timeout=0.1)) as db:
+                db.row_factory = sqlite3.Row
+                result['jobs'] = {row['status']: row['n'] for row in db.execute(
+                    'SELECT status, COUNT(*) AS n FROM entries GROUP BY status')}
+                result['activeJobs'] = [dict(row) for row in db.execute(
+                    "SELECT id,kind,start,status FROM entries WHERE status IN ('queued','running') ORDER BY created LIMIT 16")]
+        except sqlite3.Error:
+            result.update(status='unavailable')
+        return result
 
     def sources(self, uid, period):
         data = collect(self.root/uid,self.timeline_path,uid,period)

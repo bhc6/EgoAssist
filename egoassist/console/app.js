@@ -638,9 +638,13 @@ function renderExecutionLanes() {
   const interaction = scheduler.pending || scheduler.activeResponseIds?.length || lanes.interaction.answers.running ? "回答生成中" :
     pendingTurns || lanes.interaction.classifying || lanes.interaction.preparation?.length ? "问题处理中" : "等待输入";
   const memory = "运行 " + (work.running || 0) + " · 等待 " + (work.queued || 0) + " · 失败 " + (work.failed || 0);
+  const diary = lanes.memory.accountDiary;
+  const diaryWork = diary?.jobs || {};
+  const diarySummary = !diary ? "" : diary.status === "unavailable" ? " · 账户日记状态暂不可用" :
+    " · 账户日记：运行 " + (diaryWork.running || 0) + " / 等待 " + (diaryWork.queued || 0) + " / 失败 " + (diaryWork.failed || 0);
   root.innerHTML = [["现场观察", observation, observedAt ? "已分析画面 " + new Date(observedAt).toLocaleTimeString() : "尚无已分析画面"],
     ["用户交互", interaction, "排队输入 " + pendingTurns + " · 后台排队回答 " + lanes.interaction.answers.queued],
-    ["记忆与报告", memory, lanes.memory.consolidating ? "正在整理记忆索引" : "已完成后台任务 " + (work.completed || 0)]]
+    ["记忆与报告", "当前会话：" + memory, (lanes.memory.consolidating ? "正在整理记忆索引" : "已完成后台任务 " + (work.completed || 0)) + diarySummary]]
     .map(([name, status, detail]) => "<div><b>" + esc(name) + "</b><span>" + esc(status) + "</span><small>" + esc(detail) + "</small></div>")
     .join("");
 }

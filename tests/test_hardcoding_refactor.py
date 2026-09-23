@@ -53,13 +53,13 @@ def test_memory_recovery_restart_is_idempotent_and_preserves_source_clock(tmp_pa
         timeline = TimelineMemory(tmp_path / "timeline.sqlite3")
         journal = SessionJournal(tmp_path / "case.jsonl", session_id="case")
         policy = lambda *args: {"components": {"timeline": {"preference_enabled": True, "episodic_enabled": True}}}
-        worker = MemoryRecovery("", timeline, policy)
+        worker = MemoryRecovery(SemanticTurnRouter(""), timeline, policy)
         clock = ClockContext.current("Asia/Shanghai", now_utc=datetime(2026, 9, 8, 23, tzinfo=timezone.utc))
         text = "记住，今天没有吃过药。"
         worker.submit(journal, user_id="user", turn_id="turn", text=text, source_id="source", clock=clock.prompt_payload())
         row = recovery_jobs(journal)["turn"]
         worker.update(journal, row, status="running")
-        restored = MemoryRecovery("", timeline, policy)
+        restored = MemoryRecovery(SemanticTurnRouter(""), timeline, policy)
         restored.recover(journal)
         assert recovery_jobs(journal)["turn"]["status"] == "queued"
         async def classify(*args):

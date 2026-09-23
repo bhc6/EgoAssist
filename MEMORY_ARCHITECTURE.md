@@ -1,6 +1,6 @@
 # EgoAssist 记忆机制与完整链路
 
-本文按 **2026-09-20 当前工作区源码**核对，包含尚未提交的实现；描述实际调用路径，不把历史设计或实验能力当作默认产品能力。主框架见 [ARCHITECTURE.md](ARCHITECTURE.md)。
+本文按 **2026-09-23 当前工作区源码**核对；描述实际调用路径，不把历史设计或实验能力当作默认产品能力。主框架见 [ARCHITECTURE.md](ARCHITECTURE.md)，本轮拆分见[三链路边界核对](docs/THREE_LANE_BOUNDARIES_2026-09-23.md)。
 
 当前机制可以概括为：**先保留来源，再按需形成结构化记忆；回答时检索来源与卡片，按预算组装上下文；后台完成恢复、事件整理和日记；纠正与删除分别处理来源、派生记录和缓存。** 模型连接是临时的，本地日志和数据库负责持久化。
 
@@ -12,10 +12,10 @@
 | 原文证据索引 | 将部分来源全文切段、FTS 检索、补相邻轮次，生成可复用证据包 | [memory/source_index.py](egoassist/memory/source_index.py)、[evidence_service.py](egoassist/memory/evidence_service.py) | 历史 API 直接使用；实时开启 episodic 时也使用 |
 | Timeline 卡片 | 事实、事件、状态、偏好及观察的结构化视图；范围、时间、状态、纠正和确认 | [memory/timeline.py](egoassist/memory/timeline.py)、[commit.py](egoassist/memory/commit.py) | 在线记忆；与原文索引并行存在 |
 | 模型工作上下文 | 系统/Skill 政策、状态、摘要、近期消息及本轮检索证据 | [realtime/context_harness.py](egoassist/realtime/context_harness.py) | 每次模型会话的预算内投影 |
-| 派生整理 | 长事件、当前建议、个人日记、日/周/月回顾 | [realtime/long_events.py](egoassist/realtime/long_events.py)、[memory/insights.py](egoassist/memory/insights.py)、[diary/](egoassist/diary/) | 有来源引用的后台加工；不能成为独立事实证明 |
+| 派生整理 | 长事件、当前建议、个人日记、日/周/月回顾 | [memory/long_events.py](egoassist/memory/long_events.py)、[memory/insights.py](egoassist/memory/insights.py)、[diary/](egoassist/diary/) | 有来源引用的后台加工；不能成为独立事实证明 |
 | 离线向量记忆 | 视频分段、向量索引、事件合并、来源展开、关键帧定位 | [memory/store.py](egoassist/memory/store.py)、[qa/pipeline.py](egoassist/qa/pipeline.py) | 研究路径；未作为默认实时检索器 |
 
-`RealtimeEpisodeMemory` 和 `PreferenceMemory` 是同一个 Timeline 的业务适配器。`case/participant` 是召回范围，`short/long` 是存储层级，`current` 是检索时派生的近期视图；这些概念不能互换。LiveKit 是媒体传输，Temporal 是提醒工作流，都不是记忆数据库。
+`RealtimeEpisodeMemory` 和 `PreferenceMemory` 是同一个 Timeline 的业务适配器，实现已迁入 `memory/episodes.py` 与 `memory/preferences.py`；旧 `realtime/` 导入路径保留兼容导出。`case/participant` 是召回范围，`short/long` 是存储层级，`current` 是检索时派生的近期视图；这些概念不能互换。LiveKit 是媒体传输，Temporal 是提醒工作流，都不是记忆数据库。
 
 ## 2. 从输入到回答的完整链路
 
@@ -30,7 +30,9 @@ flowchart TD
     REC --> M
     O[采样声画] --> V[ObservationService / 校验]
     V --> J
-    V -->|开启事件记忆且证据有变化| M
+    V --> OI[ObservationInteraction / 任务与澄清决策]
+    OI --> MS[MemoryService / 记忆入口]
+    MS -->|开启事件记忆且证据有变化| M
     H[独立历史导入] --> J
     J --> S[SourceIndex / 全文索引]
     Q[本轮问题与范围] --> S
@@ -46,28 +48,40 @@ flowchart TD
     A -->|交付与请求回执| J
 ```
 
-箭头表示数据依赖，不表示一个统一事务。实时 Timeline 通常先检索已有卡片，再提交本轮记忆；原文证据包在交互处理尾部生成，并排除当前用户消息作为检索来源。原生 `/api/history/*` 不经过实时指令路由。
+箭头表示数据依赖，不表示一个统一事务。前台轮次通过 `MemoryService` 在案例锁外准备 Timeline 与原文证据包，排除当前用户消息；提交时复核选中证据，随后写入本轮记忆。原文包的 `evidence.package` 日志在交互处理尾部追加。原生 `/api/history/*` 不经过实时指令路由。
 
 ### 2.1 用户发言
 
 1. `TurnCoordinator` 先用 `turn_inbox` 保存收到的原始输入，按轮次组织分类与执行。`turn_inbox_state` 表示处理状态，`turn_delivery` 表示回答交付状态，两者分离。
 2. `InteractionService.process_transcript` 取得或写入用户 `message`；若已有来源记录，时钟回到 `sourceRecordedAt` 或原始日志时间，避免排队后改用处理时间解释“昨天”。
 3. `SemanticTurnRouter` 提出 `memoryAtoms`、`memoryDraft`、`memoryQuerySpec`、指令和交互候选。单个 `event` 优先保留整段原话；多事件摘录必须存在于原话。结构化事实的字段和范围会验证，但并无通用的事实蕴含证明器。
-4. `InteractionService` 按配置检索案例卡片，并在允许时补取同账户的 participant 记忆；`MemoryCommitService.commit` 随后处理本轮写入、草稿与纠正，任务偏好另经适配器处理。
-5. 开启 episodic 记忆且有账户案例时，调用 `EvidenceService.query` 生成同案例原文证据包，排除本轮用户消息，并追加 `evidence.package` 日志。
+4. `TurnCoordinator` 在来源消息落盘后调用 `MemoryService.prepare`，按配置检索案例卡片及同账户 participant 记忆；研究文字 API 也在进入案例变更锁之前准备检索。`InteractionService` 复核结果后经 `MemoryService.commit` 调用 `MemoryCommitService` 处理写入、草稿与纠正，任务偏好另经适配器处理。
+5. 开启 episodic 记忆且有账户案例时，同一准备阶段调用 `EvidenceService.query` 生成原文证据包；提交时复核选中来源 hash，追加带来源依赖的 `evidence.package` 日志。直接同步调用 `process_transcript` 的兼容路径仍会同步读取，不能将前台优化推广为全部调用都异步。
 6. `grounded_user_instructions` 将本轮卡片证据和原文证据包注入前台回答；`turn_answer_context` 将问题、证据、时钟、任务状态和声画快照保存给后台补答。
 
 源码入口：[turn_coordinator.py](egoassist/realtime/turn_coordinator.py)、[interaction_service.py](egoassist/realtime/interaction_service.py)、[semantic.py](egoassist/realtime/semantic.py)、[composition.py](egoassist/application/composition.py)、[answer_service.py](egoassist/product/answer_service.py)。
 
 ### 2.2 观察与工具回执
 
-开放观察保存可见证据、疑点、采样时间、来源帧及媒体引用。`ObservationService` 校验授权、采样上下文和模型结构后，记录产品观察和 `ambient_observation`，更新场景并调度长事件整理。观察结果仍是模型对采样的解释。
+开放观察保存可见证据、疑点、采样时间、来源帧及媒体引用。`ObservationService` 校验授权、采样上下文和模型结构后，记录产品观察和 `ambient_observation`，更新场景并发出 `AcceptedObservation`。`ObservationInteraction` 消费它，调用记忆服务、调度长事件并判断是否澄清；任务观察的 `TaskSession.ingest` 与播报判断也归属这个交互消费者。观察结果仍是模型对采样的解释。
 
 开启 episodic 且满足观察条件时，可见证据与上一观察不同才创建 `observation` 卡片；重复可见文字不建新卡，但已接受的原始观察日志仍保留。任务检查、工具回执和任务状态有各自日志及投影；`remember_tool_effect` 可记录工具效果卡片。当前 `SourceIndex` 并不索引每一种工具、任务或审计事件；日记使用更广的来源收集器。
 
 提问的现场快照绑定当时证据。历史帧回看还要求采样时间和提交时间都不晚于问题边界。旧背景和后到观察不能自动变成“提问当时现场”的证明。
 
-### 2.3 历史导入
+观察写卡失败会记录 `memory.write.failed`，已经接受的来源保留；待确认草稿读取失败时不主动提问。观察服务不执行 WebSocket 发送，传输层在服务返回、案例锁释放后推送状态。观察与交互决策仍在一个顺序提交段内，不是独立进程之间的持久消息队列。
+
+### 2.3 检索准备、复核与失败边界
+
+`MemoryQuery` 携带用户、案例、政策、来源时钟、原文、语义条件、排序查询及排除来源，`PreparedMemory` 携带候选、证据包和分路错误。`MemoryService.accept` 要求请求条件一致，按卡片 ID 复核 active 状态和内容；同案例卡片还检查来源存续，原文包按选中来源 hash 检查。不在复核阶段重新执行 SourceIndex 全量同步。非选中候选只保留分数等审计字段，不把准备时的旧正文再次写回日志。
+
+`EGOASSIST_MEMORY_READ_TIMEOUT` 默认 2 秒（允许 0.05–30 秒）。异步读取最多同时跟踪 4 个工作线程，同一账户最多 1 个；忙、维护或超时返回 degraded。Timeline 与来源索引各自报错，成功一路可继续用于回答；整体超时会丢弃本轮尚未完成的包。提示明确说明检索不完整不等于事件未发生。
+
+超时只停止前台等待，不会杀死 Python 工作线程。`EvidenceService` 继续跟踪线程；来源删除、账户维护和应用退出会等待受管读取结束，再失效缓存。来源删除入口也参加这一生命周期。实时提交重新检查连接代次、轮次终态/修订及输入来源，防止等待期间已取消或已删除的工作继续提交。
+
+这些约束不等于数据库级跨链路事务。同步兼容读取、偏好适配、状态快照、日志恢复及部分写入仍可能占用共享资源；Timeline 提交的所有存储故障也并非都能自动重试。跨案例 participant 卡片主要依靠卡片状态和账户删除传播检查，不能把同案例来源复核描述成跨账户/全来源扫描。
+
+### 2.4 历史导入
 
 `POST /api/history/import` 接收 `conversation_id` 和 1–500 条独立事件，每条允许 `id/text/speaker/source_at/timezone/media_refs/supersedes`，文字上限 100,000 字符。验证账户拥有该案例后，直接追加 `source.event`，不执行 Skill、工具，也不要求抽取卡片成功。
 
@@ -233,6 +247,8 @@ API 的 user 角色表示输入通道，不证明说话者就是账户拥有者�
 
 日记单条来源以 3,500 字符拆分，分块约 14,000 字符，汇总批约 18,000 字符。每个模型节点保留内容 hash、来源映射、输出和调用回执，重启可复用已完成节点。默认日记模型为 `qwen3-max`，可用 `EGOASSIST_DIARY_MODEL` 覆盖。
 
+状态页将 `memory.recovery.job`、`insight.job`、`long_event.job` 投影为会话级记忆任务；长事件按 requestId 合并状态，重置时清除旧批次。日记以只读 SQL 统计 `diary.sqlite3` 的任务状态，不读取正文，也不因状态查询创建账户目录；单独显示为账户任务。
+
 日记周期超过 500 万来源字符、达到 500 次模型请求、无法继续合并、来源读错或输出校验失败时停止，不把部分结果伪装成完成。分块全部被处理不等于模型摘要保留全部细节；引用合法也不保证语义正确。
 
 发布前重新核对来源 fingerprint；来源变化则拒绝发布旧内容。读取已归档日记也检查来源，变化时标记 stale 并移除旧正文/来源快照/节点/调用内容。长事件提示附在原始来源上，不重复计为独立证据。
@@ -289,6 +305,7 @@ API 的 user 角色表示输入通道，不证明说话者就是账户拥有者�
 
 | 回归文件 | 主要验证 |
 | --- | --- |
+| [test_lane_isolation.py](tests/test_lane_isolation.py) | 检索超时、维护清理、过期来源、轮次失效、慢客户端及依赖方向 |
 | [test_source_evidence.py](tests/test_source_evidence.py) | 长文尾部、中文召回、幂等来源、案例隔离、快照失效、在途删除 |
 | [test_memory_grounding.py](tests/test_memory_grounding.py)、[test_timeline_memory.py](tests/test_timeline_memory.py) | 来源时间、未知指代、重复发生、纠正、晋升、候选过滤 |
 | [test_memory_policy.py](tests/test_memory_policy.py)、[test_preference_memory.py](tests/test_preference_memory.py) | 开关、偏好确认与召回 |
@@ -297,7 +314,7 @@ API 的 user 角色表示输入通道，不证明说话者就是账户拥有者�
 | [test_retention_recovery.py](tests/test_retention_recovery.py) | 擦除传播、重启不复活及跨案例依赖 |
 | [test_memory_snapshot.py](tests/test_memory_snapshot.py)、[test_retrieval_policy.py](tests/test_retrieval_policy.py) | 离线快照与可选检索政策 |
 
-2026-09-20 文档核对时，上表 12 个测试文件合计 **166 项全部通过**。复现命令（项目根目录，PowerShell）：
+2026-09-23 拆分后的完整回归 **774 项通过**，包含新增的 24 项链路隔离测试，保留 3 条已有 aiohttp 弃用警告；完整命令见[本轮验收](docs/THREE_LANE_BOUNDARIES_2026-09-23.md)。2026-09-20 文档核对时，原有 12 个测试文件合计 **166 项全部通过**。该记忆子集的复现命令（项目根目录，PowerShell）：
 
 ```powershell
 .\.venv\Scripts\python.exe -m pytest -q -p no:cacheprovider tests/test_source_evidence.py tests/test_memory_grounding.py tests/test_timeline_memory.py tests/test_memory_policy.py tests/test_preference_memory.py tests/test_context_harness.py tests/test_memory_snapshot.py tests/test_diary.py tests/test_long_events.py tests/test_retention_recovery.py tests/test_conversation_history.py tests/test_retrieval_policy.py

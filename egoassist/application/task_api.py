@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from egoassist.core.source_contract import SourceReference
+
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
@@ -33,6 +35,7 @@ class TaskEndpoints:
     outcome_ledger: Any
     persist_tool_audit: Any
     process_transcript: Any
+    memory_service: Any
     queue_reminder: Any
     registry: Any
     reminder_runtime: Any
@@ -240,7 +243,9 @@ class TaskEndpoints:
             policy = default_memory_policy()
             active_runtime = self.runtime_for_user(user_id)
             active_episodic = self.episodic_for_user(user_id)
-        transcript = str(payload.get("transcript", ""))
+        transcript = str(payload.get("transcript", "")).strip()
+        if not transcript:
+            raise ValueError('transcript text cannot be empty')
         labels = {
             "speechControl": payload.get("speechControl"),
             "taskControl": payload.get("taskControl"),
@@ -309,12 +314,28 @@ class TaskEndpoints:
             else deterministic_route.get("status", "no-match"),
             "claimBoundary": "Caller-supplied research labels plus deterministic manifest routing; no language model.",
         }
+        from copy import deepcopy
+        from egoassist.memory.service import MemoryQuery
+        source_entry = harness.record_user(transcript, source="research-console") if harness else None
+        read_clock = self.clock_for_session(user_id, session_id) if session_id else ClockContext.current()
+        if source_entry:
+            read_clock = read_clock.at_source(source_entry['timestamp'])
+        prepared_memory = await self.memory_service.prepare(MemoryQuery(user_id, session_id, transcript,
+            deepcopy(policy), read_clock, deepcopy(api_semantic), transcript,
+            (session_id + ':' + source_entry['id'],) if source_entry else (),
+            SourceReference.from_entry(user_id, session_id, source_entry) if source_entry else None))
         if owner:
             async with self.exclusive_case_transition(owner):
+                policy = self.identity.get_context_session(user_id, session_id)['memoryPolicy']
+                active_episodic = self.scoped_episodic_memory(user_id, session_id, policy)
+                if harness.journal.entries_by_id([source_entry['id']]).get(source_entry['id'], {}).get('type') != 'message':
+                    raise self.web.HTTPConflict(text='Input source was deleted during memory preparation')
                 result = self.process_transcript(
                     transcript,
                     harness,
                     active_runtime,
+                    transcript_entry=source_entry,
+                    prepared_memory=prepared_memory,
                     episodic_memory=active_episodic,
                     user_scope=user_id,
                     semantic_decision=api_semantic,
@@ -337,11 +358,13 @@ class TaskEndpoints:
                 transcript,
                 harness,
                 active_runtime,
+                transcript_entry=source_entry,
+                prepared_memory=prepared_memory,
                 episodic_memory=active_episodic,
                 user_scope=user_id,
                 semantic_decision=api_semantic,
                 memory_policy=policy,
-                clock_context=ClockContext.current(),
+                clock_context=read_clock,
             )
         if session_id:
             return self.web.json_response(

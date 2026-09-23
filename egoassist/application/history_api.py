@@ -40,21 +40,22 @@ def mount(app, *, identity, user_key, journal_for, evidence, answers):
         if row is None:
             raise ValueError('unknown source ID')
         erased = erase_expired(journal, {}, source_ids=(row['id'],))
-        evidence.index(user).sync()
         return web.json_response({'deleted': True, 'erasedEventCount': len(erased['sourceIds'])})
 
     @web.middleware
     async def lifecycle(request, handler):
         uid = (request.get(user_key) or {}).get('id')
-        maintenance = uid and request.method == 'POST' and request.path in {'/api/privacy/delete', '/api/memory/delete'}
-        if maintenance:
-            await evidence.pause_user(uid)
+        maintenance = uid and request.method == 'POST' and request.path in {'/api/privacy/delete', '/api/memory/delete', '/api/history/delete'}
         try:
+            if maintenance:
+                await evidence.pause_user(uid)
             return await handler(request)
         finally:
             if maintenance:
-                evidence.invalidate_user(uid)
-                evidence.resume_user(uid)
+                try:
+                    evidence.invalidate_user(uid)
+                finally:
+                    evidence.resume_user(uid)
 
     app.middlewares.append(lifecycle)
     app.add_routes([web.post('/api/history/import', ingest), web.post('/api/history/query', query),
