@@ -144,6 +144,9 @@ class RealtimeConnection:
             ):
                 return
             origin = payload.get("origin") or {}
+            if (origin.get("observationReviewId") and payload.get("type") in {"audio", "assistant_transcript"}
+                    and not observation_speech_allowed(origin)):
+                return
             if not payload.get("replay"):
                 interaction_state.observe(payload)
             if payload.get("responseId") in resumed_response_ids:
@@ -840,7 +843,9 @@ class RealtimeConnection:
                 owner.scene.append_frame(
                     image_value,
                     payload.get("capture"),
-                    describe=not bool(self.ambient_watch_session(owner)),
+                    # Background observation is opt-in. Disabling it must not
+                    # silently start a second automatic vision pipeline.
+                    describe=False,
                 )
                 media_audit.record_video(len(image_value))
                 bridge.append_video(image_value)
@@ -909,10 +914,14 @@ class RealtimeConnection:
             bridge.interaction_managed = True
             bridge.playback_context = interaction_state.playback_context
 
+            def observation_speech_allowed(origin):
+                watch = self.ambient_watch_session(owner)
+                return bool(watch and self.ambient_options(owner)["questionsEnabled"]
+                    and origin.get("contextId") == watch.perception_context_id
+                    and origin.get("generation") == owner.output_generation)
+
             def session_output_permission(origin=None, purpose="conversation"):
-                if (origin or {}).get("observationReviewId") and origin.get(
-                    "generation"
-                ) != owner.output_generation:
+                if (origin or {}).get("observationReviewId") and not observation_speech_allowed(origin):
                     return False
                 return interaction_state.allows(origin, purpose)
 

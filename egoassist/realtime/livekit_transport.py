@@ -54,6 +54,8 @@ class _RoomSession:
     tasks: set[asyncio.Task] = field(default_factory=set)
     output_source: Any | None = None
     output_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    observation_speech_allowed: bool = True
+    output_is_observation: bool = False
 
 
 class LiveKitInteractionTransport:
@@ -207,7 +209,8 @@ class LiveKitInteractionTransport:
             raise RuntimeError(f"LiveKit session is not connected: {session_id}")
         payload = dict(event)
         if payload.get("type") == "audio" and payload.get("audio"):
-            await self._publish_audio(session, str(payload["audio"]))
+            await self._publish_audio(session, str(payload["audio"]),
+                                      observation=bool((payload.get("origin") or {}).get("observationReviewId")))
             return
         if payload.get("type") in {"interrupted", "playback_stop"} and session.output_source is not None:
             session.output_source.clear_queue()
@@ -216,6 +219,16 @@ class LiveKitInteractionTransport:
             reliable=True,
             topic=LIVEKIT_DATA_TOPIC,
         )
+
+    def set_observation_speech_allowed(self, session_id: str, allowed: bool) -> None:
+        """Drop buffered observation speech without stopping a user answer."""
+        session = self._sessions.get(session_id)
+        if session is None:
+            return
+        session.observation_speech_allowed = allowed
+        if not allowed and session.output_is_observation and session.output_source is not None:
+            session.output_source.clear_queue()
+            session.output_is_observation = False
 
     async def _ensure_output_source(self, session: _RoomSession):
         if session.output_source is not None:
@@ -229,11 +242,19 @@ class LiveKitInteractionTransport:
             session.output_source = source
             return source
 
-    async def _publish_audio(self, session: _RoomSession, audio_b64: str) -> None:
+    async def _publish_audio(self, session: _RoomSession, audio_b64: str, *, observation: bool = False) -> None:
+        if observation and not session.observation_speech_allowed:
+            return
         raw = base64.b64decode(audio_b64, validate=True)
         if len(raw) % 2:
             raise ValueError("PCM16 payload must contain complete samples")
         source = await self._ensure_output_source(session)
+        # Authorization can change while the output track is being published.
+        if observation and not session.observation_speech_allowed:
+            return
+        if session.output_is_observation and not observation:
+            source.clear_queue()
+        session.output_is_observation = observation
         frame = rtc.AudioFrame(raw, 24_000, 1, len(raw) // 2)
         await source.capture_frame(frame)
 

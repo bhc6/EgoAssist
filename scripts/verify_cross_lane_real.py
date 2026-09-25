@@ -46,6 +46,10 @@ async def verify(output):
                 sid = await page.evaluate("state.sessionId")
                 report["sessionId"] = sid
                 await page.locator("#ambientGrant").click()
+                await page.locator("#ambientSettings > summary").click()
+                await page.locator("#ambientQuestions").check()
+                await page.locator("#ambientSave").click()
+                await page.wait_for_function("state.ambient.questionsEnabled")
                 await page.locator("#textTurnInput").fill("请把这个事实记入长期记忆：我面前这张桌子的桌布是纯蓝色，没有图案。")
                 await page.locator("#textTurnInput").press("Enter")
                 await page.wait_for_function("state.episodicMemory.timelineViews.participant.recent.some(c=>c.text.includes('蓝色'))", timeout=45000)

@@ -128,3 +128,33 @@ def test_consent_appears_in_export_and_is_deleted_with_the_account(tmp_path, mon
 
     import asyncio
     asyncio.new_event_loop().run_until_complete(scenario())
+
+
+def test_ambient_settings_defaults_and_revision_survive_repeated_control(tmp_path, monkeypatch):
+    import asyncio
+    async def scenario():
+        app=ambient_app(tmp_path,monkeypatch)
+        async with TestClient(TestServer(app)) as client:
+            await register_client(client,'ambient-control')
+            session=(await (await client.post('/api/sessions')).json())['session']['id']
+            original=await (await client.get('/api/state',params={'session':session})).json()
+            assert original['ambient']['questionsEnabled'] is False
+            revisions=[];contexts=[]
+            for _ in range(3):
+                granted=await (await client.post('/api/ambient/consent',json={'granted':True,'sessionId':session})).json()
+                assert granted['state']['ambient']['consented']
+                contexts.append(granted['ambient']['binding']['contextId'])
+                revisions.append(granted['ambient']['controlRevision'])
+                settings=await (await client.post('/api/ambient/settings',json={'sessionId':session,
+                    'intervalSeconds':7,'questionsEnabled':False,'questionCooldownSeconds':120})).json()
+                assert settings['state']['ambient']['intervalSeconds']==7
+                revisions.append(settings['ambient']['controlRevision'])
+                stopped=await (await client.post('/api/ambient/consent',json={'granted':False,'sessionId':session})).json()
+                assert not stopped['state']['ambient']['consented']
+                revisions.append(stopped['ambient']['controlRevision'])
+            assert revisions==sorted(set(revisions)) and len(set(contexts))==3
+            state=await (await client.get('/api/state',params={'session':session})).json()
+            assert state['ambient']['intervalSeconds']==7 and not state['ambient']['consented']
+            invalid=await client.post('/api/ambient/settings',json={'sessionId':session,'intervalSeconds':0,'questionsEnabled':False})
+            assert invalid.status==400
+    asyncio.run(scenario())

@@ -3,6 +3,13 @@
 Date: 2026-09-07
 Status: Accepted; shipped disabled by default
 
+> Historical decision, not the current product specification. As of 2026-09-25,
+> the shipped console supports open observation with explicit account consent,
+> per-session cadence, quiet recording by default, optional clarification, and
+> source-frame evidence. Earlier defaults and the finite-watchlist/no-media
+> assumptions below describe the original focused mode. See
+> [current controls, purpose and stop boundaries](AMBIENT_CONTROLS_2026-09-25.md).
+
 ## Context
 
 [ADR 005](ADR_005_CHECKPOINT_BOUND_PERCEPTION.md) binds every perception frame

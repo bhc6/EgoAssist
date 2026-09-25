@@ -166,6 +166,53 @@ def test_livekit_queue_keeps_explicit_gap_and_latest_event_under_pressure():
     asyncio.run(run())
 
 
+def test_observation_stop_clears_only_observation_audio_and_blocks_delayed_publish():
+    async def run():
+        transport = LiveKitInteractionTransport(settings(), room_factory=FakeRoom)
+        await transport.connect("ambient-case")
+        session = transport._sessions["ambient-case"]
+        source = FakeAudioSource()
+        session.output_source = source
+        pcm = base64.b64encode(b"\x01\x00\xfe\xff").decode("ascii")
+        observation = {"type": "audio", "audio": pcm, "origin": {"observationReviewId": "review"}}
+        user = {"type": "audio", "audio": pcm, "origin": {"turnId": "question"}}
+        await transport.publish("ambient-case", observation)
+        transport.set_observation_speech_allowed("ambient-case", False)
+        assert source.cleared
+        await transport.publish("ambient-case", observation)
+        assert len(source.frames) == 1
+
+        source.cleared = False
+        await transport.publish("ambient-case", user)
+        transport.set_observation_speech_allowed("ambient-case", False)
+        assert len(source.frames) == 2 and not source.cleared
+        transport.set_observation_speech_allowed("ambient-case", True)
+        await transport.publish("ambient-case", observation)
+        await transport.publish("ambient-case", user)
+        assert source.cleared  # A user answer takes over any remaining observation queue.
+        source.cleared = False
+        transport.set_observation_speech_allowed("ambient-case", False)
+        assert not source.cleared
+
+        # Revoke while creation of the output track is awaiting the transport.
+        entered = asyncio.Event()
+        release = asyncio.Event()
+        async def delayed_output(_session):
+            entered.set()
+            await release.wait()
+            return source
+        transport._ensure_output_source = delayed_output
+        transport.set_observation_speech_allowed("ambient-case", True)
+        pending = asyncio.create_task(transport.publish("ambient-case", observation))
+        await entered.wait()
+        transport.set_observation_speech_allowed("ambient-case", False)
+        release.set()
+        await pending
+        assert len(source.frames) == 4
+        await transport.close("ambient-case")
+    asyncio.run(run())
+
+
 def test_livekit_token_api_is_authenticated_and_case_scoped(tmp_path, monkeypatch):
     monkeypatch.setenv("LIVEKIT_URL", settings().url)
     monkeypatch.setenv("LIVEKIT_API_KEY", settings().api_key)

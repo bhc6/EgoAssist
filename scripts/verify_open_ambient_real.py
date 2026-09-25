@@ -69,6 +69,7 @@ async def verify(output):
                 assert any(o["observed"] and o["activityId"] != "take-medication" for o in report["observations"])
                 report["memory"] = await page.evaluate("state.episodicMemory.timelineViews.case.recent")
                 assert any(c.get("kind") == "observation" for c in report["memory"]), report["memory"]
+                await page.locator("#ambientSettings > summary").click()
                 await page.locator("#ambientInterval").fill("7")
                 await page.locator("#ambientQuestions").uncheck()
                 await page.locator("#ambientSave").click()

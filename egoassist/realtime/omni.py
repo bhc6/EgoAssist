@@ -78,7 +78,7 @@ class _ResponseRequest:
     @property
     def correlation(self) -> dict:
         return {key: value for key, value in (self.origin or {}).items()
-                if key in {"turnId", "generation", "sessionId", "intentId", "jobId", "resultId", "background", "observationReviewId"}}
+                if key in {"turnId", "generation", "sessionId", "intentId", "jobId", "resultId", "background", "observationReviewId", "contextId"}}
 
 
 def _is_fake_ip(value: str) -> bool:
@@ -251,6 +251,7 @@ class _OmniPerceptionLane:
         from egoassist.core.settings import perception_settings
         self.settings = perception_settings()
         self._response_starts = {}
+        self._suspended = False
 
     def _new_conversation(self, generation: int):
         lane = self
@@ -339,7 +340,7 @@ class _OmniPerceptionLane:
         async with self._connect_lock:
             if self._blocked_failure is not None:
                 raise self._blocked_failure
-            if self.closed or self.connected:
+            if self.closed or self.connected or self._suspended:
                 return
             self._generation += 1
             generation = self._generation
@@ -349,7 +350,7 @@ class _OmniPerceptionLane:
             if self._blocked_failure is not None:
                 await asyncio.to_thread(conversation.close)
                 raise self._blocked_failure
-            if generation != self._generation or self.closed:
+            if generation != self._generation or self.closed or self._suspended:
                 await asyncio.to_thread(conversation.close)
                 return
             conversation.update_session(
@@ -367,6 +368,7 @@ class _OmniPerceptionLane:
     def request(self, image_b64: str, context: dict[str, Any] | None = None) -> bool:
         if not image_b64 or self.closed or self._blocked_failure is not None:
             return False
+        self._suspended = False
         if self.pending_frame:
             previous = self.pending_frame[1] or {}
             self.trace("perception.frame.coalesced", {"frameId": previous.get("frame_id"),
@@ -380,7 +382,7 @@ class _OmniPerceptionLane:
         return self._dispatch_pending()
 
     def _dispatch_pending(self) -> bool:
-        if not self.connected or self.active or not self.pending_frame or not self.conversation:
+        if self._suspended or not self.connected or self.active or not self.pending_frame or not self.conversation:
             return False
         frame, context = self.pending_frame
         self.pending_frame = None
@@ -457,7 +459,7 @@ class _OmniPerceptionLane:
             self.loop.call_soon_threadsafe(self._dispatch_pending)
 
     def _schedule_reconnect(self, reason: str) -> None:
-        if self.closed or self._blocked_failure is not None or self._reconnect_scheduled or not self.loop.is_running():
+        if self.closed or getattr(self, "_suspended", False) or self._blocked_failure is not None or self._reconnect_scheduled or not self.loop.is_running():
             return
         if not self.active and self.pending_frame is None:
             return
@@ -466,7 +468,7 @@ class _OmniPerceptionLane:
 
     async def _recover(self, reason: str) -> None:
         try:
-            if self.closed:
+            if self.closed or self._suspended or self.pending_frame is None:
                 return
             self.trace("provider.session.reconnecting", {"lane": "perception", "reason": reason})
             old = self.conversation
@@ -486,6 +488,23 @@ class _OmniPerceptionLane:
                 self.trace("provider.session.reconnect_failed", {"lane": "perception", "error": str(exc)})
         finally:
             self._reconnect_scheduled = False
+
+    async def suspend(self) -> None:
+        """Fence callbacks and queued frames immediately; allow later authorized demand."""
+        self._suspended = True
+        self._generation += 1
+        self.active = self.connected = False
+        self.pending_frame = self.active_context = None
+        self._buffer = ""
+        self._request_started = None
+        self._response_starts.clear()
+        conversation, self.conversation = self.conversation, None
+        if conversation:
+            try:
+                await asyncio.wait_for(asyncio.to_thread(conversation.close), timeout=3)
+            except (Exception, asyncio.TimeoutError):
+                # Authorization and callback fences already took effect.
+                self.trace("perception.close.pending", {"reason": "observation-stopped"})
 
     def snapshot(self) -> dict[str, Any]:
         return {
@@ -1732,6 +1751,27 @@ class OmniBrowserBridge:
 
     def set_ambient_context_provider(self, provider) -> None:
         self._ambient_context_provider = provider
+
+    def cancel_observation_questions(self) -> None:
+        """Cancel only observation-origin speech, preserving user answers and tasks."""
+        with self._response_lock:
+            for request in list(self._queued_requests):
+                if (request.origin or {}).get("observationReviewId"):
+                    self._queued_requests.remove(request)
+                    self._return_result_to_inbox(request, "observation-stopped")
+            active_ids = {identifier for identifier, request in self._active_response_requests.items()
+                          if (request.origin or {}).get("observationReviewId")}
+            pending = self._inflight_response
+            cancel_pending = bool(pending and (pending.origin or {}).get("observationReviewId"))
+        if active_ids:
+            self.cancel_response(expected_response_ids=frozenset(active_ids), reason="observation-stopped")
+        elif cancel_pending:
+            self.cancel_response(reason="observation-stopped")
+
+    async def stop_ambient_observation(self) -> None:
+        self.cancel_observation_questions()
+        self.last_ambient_check = 0
+        await self.ambient_perception.suspend()
 
     @staticmethod
     def _provider_tool_declarations(declarations: list[dict[str, Any]]) -> list[dict[str, Any]]:

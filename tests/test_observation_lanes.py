@@ -32,6 +32,52 @@ def test_ambient_continues_while_dialogue_and_task_lane_busy():
     assert bridge._response_pending and bridge.perception.active
 
 
+def test_stopping_ambient_fences_inflight_and_pending_frames_and_allows_restart():
+    from egoassist.realtime.omni import _OmniPerceptionLane
+    async def run():
+        decisions=[];closed=[]
+        lane=_OmniPerceptionLane(api_key='unused',model='unused',voice='unused',loop=asyncio.get_running_loop(),
+            conversation_cls=object,callback_cls=object,modalities=SimpleNamespace(TEXT='text'),
+            on_decision=lambda *args:decisions.append(args),trace=lambda *args,**kw:None)
+        lane.active=lane.connected=True;lane.active_context={'frame_id':'old'}
+        lane.pending_frame=('image',{'frame_id':'pending'})
+        lane.conversation=SimpleNamespace(close=lambda:closed.append(True))
+        generation=lane._generation
+        await lane.suspend()
+        assert not lane.active and not lane.connected and lane.pending_frame is None
+        assert lane._generation>generation and closed and not lane.closed
+        lane._finish('late provider output');assert not decisions
+        lane._reconnect_scheduled=True  # request queues for a subsequent authorized connect
+        lane.request('new-image',{'frame_id':'new'})
+        assert not lane._suspended and lane.pending_frame[1]['frame_id']=='new'
+        await lane.suspend()
+    asyncio.run(run())
+
+
+def test_stopping_observation_questions_does_not_cancel_user_answer():
+    from collections import deque
+    import threading
+    from egoassist.realtime.omni import _ResponseRequest
+    bridge=OmniBrowserBridge.__new__(OmniBrowserBridge)
+    bridge._response_lock=threading.RLock()
+    user=_ResponseRequest('answer',80,1,origin={'turnId':'user'})
+    observation=_ResponseRequest('clarify',40,2,origin={'observationReviewId':'review'})
+    bound=_ResponseRequest('clarify',40,3,origin={'observationReviewId':'review','contextId':'scope'})
+    assert bound.correlation['contextId']=='scope'
+    bridge._queued_requests=deque([observation,user])
+    bridge._active_response_requests={'user-response':user}
+    bridge._inflight_response=user
+    dropped=[];cancelled=[]
+    bridge._return_result_to_inbox=lambda request,reason:dropped.append(request)
+    bridge.cancel_response=lambda **kw:cancelled.append(kw)
+    bridge.cancel_observation_questions()
+    assert list(bridge._queued_requests)==[user] and dropped==[observation] and not cancelled
+    bridge._active_response_requests={'observation-response':observation}
+    bridge._inflight_response=observation
+    bridge.cancel_observation_questions()
+    assert cancelled[0]['expected_response_ids']==frozenset({'observation-response'})
+
+
 def test_observation_snapshot_excludes_future_and_survives_restart(tmp_path):
     journal = SessionJournal(tmp_path / "session.jsonl", session_id="session")
     scene = SharedScene(journal, "")

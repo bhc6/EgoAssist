@@ -50,6 +50,7 @@ let artifactRenderGeneration = 0, artifactRenderTask = null, pendingHumanHelpPre
 let mirrorCamera = localStorage.getItem("egoassist.camera.mirror") !== "false";
 let microphoneEnabled = localStorage.getItem("egoassist.microphone.enabled") !== "false";
 const playbackSources = new Set();
+const observationResponseIds = new Set();
 const AUDIO_BUFFER_HIGH_WATER = 512 * 1024;
 const VIDEO_BUFFER_HIGH_WATER = 128 * 1024;
 let droppedAudioChunks = 0;
@@ -100,6 +101,8 @@ function showLogin() {
   $("#insightJobs").replaceChildren();
   insightTurn = null;
   state = null;
+  ambientState = null; ambientScope = null; ambientPanel.reset();
+  observationResponseIds.clear();
   localSubmittedTurns.clear();
   sessionDrafts.clear();
   toolActivityView.reset(null);
@@ -224,7 +227,7 @@ async function enterConsole(user) {
 function renderPrivacy(payload) {
   if (!payload) return;
   if (payload.ambient) {
-    ambientState = {...(ambientState || {}), ...payload.ambient, ...(state?.ambient || {})};
+    acceptAmbient({...payload.ambient, ...(state?.ambient || {})});
     renderAmbient();
   }
   $("#privacyStatus").textContent = payload.transport?.transportStatus || "已加载";
@@ -555,7 +558,10 @@ function render(next) {
   if (!currentUser || !next || next.sessionId !== selectedSessionId) return;
   if (responseScopes.has(next) && !responseScopes.get(next)()) return;
   state = next;
-  if (state.ambient) ambientState = state.ambient;
+  if (state.ambient) {
+    acceptAmbient(state.ambient); state.ambient = ambientState;
+    if(state.runtimeLanes?.observation)state.runtimeLanes.observation.enabled=Boolean(ambientState.enabled && ambientState.consented);
+  }
   toolActivityView.snapshot(selectedSessionId, state.toolActivity);
   renderSharedScene(state.sharedScene);
   renderPerformance(state.performance);
@@ -652,67 +658,46 @@ function renderObservationReviews() {
   ).join("") + "</details>";
 }
 
-function renderAmbient() {
-  const root = $("#ambientBanner");
-  if (!root) return;
-  const info = ambientState;
-  if (!info || !info.enabled) {
-    root.hidden = true;
-    return;
+const ambientPanel = new AmbientPanel($("#ambientBanner"), {
+  session: () => selectedSessionId,
+  consent: setAmbientConsent,
+  settings: async settings => {
+    const isCurrent = sessionScope();
+    const payload = await post("/api/ambient/settings", {sessionId:selectedSessionId, ...settings});
+    if (!isCurrent()) return;
+    acceptAmbient(payload.ambient || payload.state?.ambient);
+    render(payload.state);
+  },
+  devices: () => {
+    location.hash = "/conversation";
+    showWorkspaceView();
+    $("#cameraPanel").open = true;
+    $("#cameraPanel").scrollIntoView({block:"nearest"});
+    $("#cameraButton").focus({preventScroll:true});
   }
-  root.hidden = false;
-  if (!info.consented) {
-    root.className = "ambient-banner idle";
-    root.innerHTML = "<b>环境观察未开启</b><span>开启后会采样画面，帮助理解现场。</span>" +
-      "<button id='ambientGrant'>授权开启</button>";
-    $("#ambientGrant").onclick = () => setAmbientConsent(true);
-    return;
-  }
-  const watchlist = info.watchlist || {};
-  const latest = info.observation;
-  const rejected = info.audit?.[0]?.status === "rejected" ? info.audit[0] : null;
-  root.className = "ambient-banner live";
-  const status = !info.connected ? "等待连接" : info.processing ? "正在分析 · " + (info.elapsedMs || 0) + " ms" :
-    !info.cameraAt || Date.now() - Date.parse(info.cameraAt) > 10000 ? "等待摄像头画面" : "等待下一次采样";
-  const html = "<b>" + (watchlist.mode === "open" ? "开放环境观察" : esc(watchlist.title || "专项观察")) + " · " + esc(status) + "</b>" +
-    "<span>" + esc(latest?.summary || "尚无观测结果") + "</span>" +
-    (info.taskActive ? "<small>任务观察：" + (!info.connected ? "等待连接" : info.taskLane?.active ? "分析中" : "等待下一帧") + "</small>" : "") +
-    (info.lane?.pendingFrame ? "<small>另有最新采样帧等待分析</small>" : "") +
-    (rejected ? "<span>最近采样未完成：" + esc(rejected.reason) + "</span>" : "") +
-    (latest?.capturedAt ? "<small>画面时间：" + esc(new Date(latest.capturedAt).toLocaleString()) + "</small>" : "") +
-    (latest?.uncertainties?.length ? "<span>待确认：" + esc(latest.uncertainties.join("；")) + "</span>" : "") +
-    (latest?.clarification ? "<span>澄清问题：" + esc(latest.clarification) + "</span>" : "") +
-    renderObservationReviews() +
-    "<details data-disclosure='ambient-evidence'><summary>观测证据</summary>" +
-    (latest?.media?.assetId ? "<a target='_blank' rel='noopener' href='/api/scene/media?session=" + encodeURIComponent(selectedSessionId) +
-      "&amp;asset=" + encodeURIComponent(latest.media.assetId) + "'>查看原始采样帧</a>" : "") +
-    "<pre>" + esc(JSON.stringify(latest || {}, null, 2)) + "</pre></details>" +
-    "<label>采样间隔 <input id='ambientInterval' type='number' min='2' max='120' step='1' value='" + esc(info.intervalSeconds) + "'> 秒</label>" +
-    "<label><input id='ambientQuestions' type='checkbox' " + (info.questionsEnabled ? "checked" : "") + ">主动澄清</label>" +
-    "<label>提问最短间隔 <input id='ambientQuestionCooldown' type='number' min='1' max='3600' step='1' value='" + esc(info.questionCooldownSeconds ?? 90) + "'> 秒</label>" +
-    "<button id='ambientSave' type='button'>应用</button><button id='ambientRevoke' type='button'>停止观察</button>";
-  if (!root.querySelector("#ambientInterval") || !root.contains(document.activeElement)) updateDisclosureHTML(root, html, selectedSessionId);
-  $("#ambientRevoke").onclick = () => setAmbientConsent(false);
-  $("#ambientSave").onclick = async () => {
-    try {
-      const payload = await post("/api/ambient/settings", {sessionId: selectedSessionId,
-        intervalSeconds: Number($("#ambientInterval").value), questionsEnabled: $("#ambientQuestions").checked,
-        questionCooldownSeconds: Number($("#ambientQuestionCooldown").value)});
-      document.activeElement?.blur();
-      render(payload.state);
-      $("#ambientInterval").value = String(payload.state.ambient.intervalSeconds);
-    } catch (error) { $("#duplexState").textContent = error.message; }
-  };
+});
+let ambientScope = null;
+function acceptAmbient(info) {
+  if (!info) return;
+  const scope = currentUser?.id + ":" + selectedSessionId;
+  if (ambientScope !== scope) { ambientScope=scope; ambientState=null; }
+  const sameEpoch = info.controlEpoch && ambientState?.controlEpoch === info.controlEpoch;
+  if (sameEpoch && (info.controlRevision ?? -1) < (ambientState?.controlRevision ?? -1)) return;
+  // Partial provider messages are evidence only, never authoritative control state.
+  if (info.controlRevision == null && ambientState?.consented === false) return;
+  ambientState = {...(ambientState || {}), ...info};
+  if (!ambientState.consented || !ambientState.questionsEnabled) stopObservationPlayback();
 }
-
+function renderAmbient() {
+  ambientPanel.render(ambientState, currentUser?.id + ":" + selectedSessionId, renderObservationReviews());
+}
 async function setAmbientConsent(granted) {
-  try {
-    const payload = await post("/api/ambient/consent", {granted});
-    ambientState = {...(ambientState || {}), ...payload.ambient, intervalSeconds: state?.ambient?.intervalSeconds ?? payload.ambient.intervalSeconds};
-    renderAmbient();
-  } catch (error) {
-    alert(error.message);
-  }
+  const isCurrent = sessionScope();
+  const payload = await post("/api/ambient/consent", {granted, sessionId:selectedSessionId});
+  if (!isCurrent()) return;
+  acceptAmbient(payload.ambient);
+  if (payload.state) render(payload.state);
+  else renderAmbient();
 }
 
 function defaultToolArguments(declaration) {
@@ -1041,6 +1026,7 @@ function playPcm24(base64Audio, responseId) {
   for (let index = 0; index < pcm.length; index++) channel[index] = pcm[index] / 32768;
   const source = audioContext.createBufferSource();
   source.buffer = buffer;
+  source.egoassistResponseId = responseId;
   source.connect(audioContext.destination);
   const now = audioContext.currentTime;
   playbackTime = Math.max(playbackTime, now + 0.03);
@@ -1049,6 +1035,19 @@ function playPcm24(base64Audio, responseId) {
   playbackSources.add(source);
   source.onended = () => playbackSources.delete(source);
   playbackTime += buffer.duration;
+}
+
+function stopObservationPlayback() {
+  if (observationResponseIds.has(captionResponseId)) {
+    livekitAudioElements.forEach(element => { element.muted = true; });
+  }
+  for (const source of [...playbackSources]) {
+    if (!observationResponseIds.has(source.egoassistResponseId)) continue;
+    if(audioContext)playbackAudit.report(audioContext.currentTime,"paused",source.egoassistResponseId);
+    try { source.stop(); } catch (_) {}
+    playbackSources.delete(source);
+  }
+  if (!playbackSources.size) playbackTime = audioContext ? audioContext.currentTime : 0;
 }
 
 function stopPlayback() {
@@ -1120,6 +1119,11 @@ async function connectRealtimeSession(generation, media, retryAttempt) {
   ws.onmessage = event => {
     if (socket !== ws || generation !== connectionGeneration) return;
     const message = JSON.parse(event.data);
+    if (message.origin?.observationReviewId && message.responseId) {
+      observationResponseIds.add(message.responseId);
+      while(observationResponseIds.size>128)observationResponseIds.delete(observationResponseIds.values().next().value);
+      if (["audio","assistant_transcript"].includes(message.type) && (!ambientState?.consented || !ambientState?.questionsEnabled)) return;
+    }
     if (message.type === "state") stateRefreshPendingAt = 0;
     if (["audio", "assistant_transcript"].includes(message.type) && stoppedSpeechResponses.has(message.responseId)) return;
     if (["audio", "assistant_transcript", "response_status"].includes(message.type) &&
@@ -1219,9 +1223,12 @@ async function connectRealtimeSession(generation, media, retryAttempt) {
         renderWorkCenter();
       }
       if (message.status === "interrupted") {
-        assistantText = "";
-        captionResponseId = null;
-        stopPlayback();
+        if (message.origin?.observationReviewId) stopObservationPlayback();
+        else stopPlayback();
+        if (message.responseId === captionResponseId) {
+          assistantText = "";
+          captionResponseId = null;
+        }
         $("#duplexState").textContent = "语音已中断 · 查看问题处理状态";
       } else if (message.status === "completed" && message.responseId === captionResponseId) {
         $("#duplexState").textContent = stream ? "全双工在线 · 正在听" : "文本会话在线";
@@ -1251,7 +1258,9 @@ async function connectRealtimeSession(generation, media, retryAttempt) {
     } else if (message.type === "state") {
       render(message.state);
     } else if (message.type === "ambient") {
-      ambientState = {...(ambientState || {}), ...message.ambient, observation: message.ambient?.observation};
+      acceptAmbient(message.ambient);
+      if (state) { state.ambient=ambientState; if(state.runtimeLanes?.observation)state.runtimeLanes.observation.enabled=Boolean(ambientState.enabled && ambientState.consented); }
+      renderExecutionLanes();
       renderAmbient();
     } else if (message.type === "session_stale") {
       restartAfterClose = true;

@@ -265,6 +265,10 @@ def create_app(
         """The active ambient grant for one account, or None."""
         return product_database.active_consent(user_id, purpose=AMBIENT_CONSENT_PURPOSE)
 
+    ambient_control_revisions: dict[str, int] = {}
+    ambient_control_epoch = uuid4().hex
+    ambient_control_locks: dict[str, asyncio.Lock] = {}
+
     def ambient_options(owner):
         if owner.ambient_options is None:
             saved = next(
@@ -277,7 +281,7 @@ def create_app(
             )
             owner.ambient_options = {
                 "intervalSeconds": ambient_settings["interval_seconds"],
-                "questionsEnabled": True,
+                "questionsEnabled": False,
                 "questionCooldownSeconds": number(
                     "EGOASSIST_AMBIENT_QUESTION_COOLDOWN", 90, maximum=3600
                 ),
@@ -1907,6 +1911,9 @@ def create_app(
             "reason": ambient_settings["reason"],
             "consented": grant is not None,
             "consentId": grant["consent_id"] if grant else None,
+            "controlRevision": ambient_control_revisions.get(user_id, 0),
+            "controlEpoch": ambient_control_epoch,
+            "consentScope": "account",
             "expiresAt": grant.get("expires_at") if grant else None,
             "intervalSeconds": ambient_settings["interval_seconds"],
             "watchlist": watchlist.public_summary() if watchlist is not None else None,
@@ -1942,7 +1949,34 @@ def create_app(
         )
         return snapshot
 
+    async def publish_ambient_control(user_id, session_id=None):
+        """Push authoritative control state to every connected session of the account."""
+        ambient_control_revisions[user_id] = ambient_control_revisions.get(user_id, 0) + 1
+        for owner in list(case_owners.values()):
+            if owner.user_id != user_id:
+                continue
+            payload = {"type": "ambient", "ambient": ambient_snapshot(user_id, owner.session_id)}
+            if livekit_transport is not None:
+                info = payload["ambient"]
+                livekit_transport.set_observation_speech_allowed(
+                    owner.session_id, bool(info.get("consented") and info.get("questionsEnabled")))
+            for ws in list(live_sockets_by_session.get(owner.session_id, ())):
+                if not ws.closed:
+                    try:
+                        await ws.send_json(payload)
+                    except (ConnectionError, RuntimeError):
+                        pass
+        result = {"ambient": ambient_snapshot(user_id, session_id) if session_id else ambient_status(user_id)}
+        if session_id:
+            result["state"] = scoped_state_for_user(user_id, session_id)
+        return web.json_response(result)
+
     async def post_ambient_consent(request):
+        user_id = request[user_key]["id"]
+        async with ambient_control_locks.setdefault(user_id, asyncio.Lock()):
+            return await change_ambient_consent(request)
+
+    async def change_ambient_consent(request):
         """Grant or revoke consent for ambient observation.
 
         Ambient mode observes nothing without a live grant here, and revoking
@@ -1951,21 +1985,25 @@ def create_app(
         """
         user_id = request[user_key]["id"]
         payload = await request.json() if request.can_read_body else {}
+        session_id = str(payload.get("sessionId", "")).strip() or None
+        if session_id:
+            identity.get_context_session(user_id, session_id)
         if payload.get("granted") is True:
             if not ambient_settings["enabled"]:
                 raise ValueError(
                     "ambient observation is not enabled on this deployment"
                 )
             watchlist = ambient_settings["watchlist"]
-            product_database.record_consent_grant(
-                user_id,
-                purpose=AMBIENT_CONSENT_PURPOSE,
-                data_categories=[
-                    "periodically sampled video frames",
-                    "watchlist activity and location labels",
-                ],
-                destination="ambient-observation-model",
-            )
+            if ambient_consent(user_id) is None:
+                product_database.record_consent_grant(
+                    user_id,
+                    purpose=AMBIENT_CONSENT_PURPOSE,
+                    data_categories=[
+                        "periodically sampled video frames",
+                        "watchlist activity and location labels",
+                    ],
+                    destination="ambient-observation-model",
+                )
             trace_event(
                 "ambient.consent.granted",
                 "ambient-policy",
@@ -1978,17 +2016,30 @@ def create_app(
             grant = ambient_consent(user_id)
             if grant is not None:
                 product_database.revoke_consent(grant["consent_id"])
+            stopping = []
             for owner in list(case_owners.values()):
                 if owner.user_id == user_id:
                     owner.ambient = None
+                    if livekit_transport is not None:
+                        livekit_transport.set_observation_speech_allowed(owner.session_id, False)
+                    bridge = owner.bridge
+                    if bridge and hasattr(bridge, "stop_ambient_observation"):
+                        stopping.append(bridge.stop_ambient_observation())
+            if stopping:
+                await asyncio.gather(*stopping)
             trace_event(
                 "ambient.consent.revoked", "ambient-policy", {"userId": user_id}
             )
         else:
             raise ValueError("granted must be true or false")
-        return web.json_response({"ambient": ambient_status(user_id)})
+        return await publish_ambient_control(user_id, session_id)
 
     async def post_ambient_settings(request):
+        user_id = request[user_key]["id"]
+        async with ambient_control_locks.setdefault(user_id, asyncio.Lock()):
+            return await change_ambient_settings(request)
+
+    async def change_ambient_settings(request):
         payload = await request.json()
         user_id = request[user_key]["id"]
         session_id = str(payload.get("sessionId", ""))
@@ -2017,7 +2068,9 @@ def create_app(
             }
             owner.journal.append("ambient.settings", {"settings": settings})
             owner.ambient_options = settings
-        return web.json_response({"state": scoped_state_for_user(user_id, session_id)})
+        if not questions and owner.bridge and hasattr(owner.bridge, "cancel_observation_questions"):
+            owner.bridge.cancel_observation_questions()
+        return await publish_ambient_control(user_id, session_id)
 
     def submit_tool_confirmation(owner, call_id, accepted):
         if not isinstance(accepted, bool):
