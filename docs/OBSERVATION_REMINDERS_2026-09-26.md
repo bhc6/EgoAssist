@@ -51,7 +51,7 @@
 - `outputs/reminders-production-20260926-final/report.json`：8770 本地服务最终复测通过，首个 review 约 2812 ms；相同目标只产生一个提醒音频 response，修改目标不会继承旧目标的已播报状态。这是单次延迟，不是性能基准。
 - `outputs/speaker-live-production-20260926-final/acceptance.json`：合成语音经真实 ASR 与本地声学模型产生档案，显式确认后对话标签更新，刷新仍保留；单段本地声学分析约 62 ms。测试确认的是隔离验收账号的合成声音，不是用户本人身份正确率。
 - `outputs/speaker-history-browser-20260926-r1/report.json`：合成身份数据验证未确认→本人/他人、历史更新、翻页和刷新，桌面/手机无溢出；已有对话记录恢复测试通过。
-- `outputs/ambient-reminders-controls-20260926-final/report.json`：本地服务的保存、失败重试、草稿保留、连续停止/开启、旧状态隔离、分类停播和修改目标停播通过。
+- `outputs/ambient-reminders-controls-20260926-final/acceptance.json`：本地服务的保存、失败重试、草稿保留、连续停止/开启、旧状态隔离、分类停播和修改目标停播通过。
 - `outputs/cross-lane-reminders-20260926-r2/report.json`：真实询问、实际音频创建草稿、用户纠正、记忆修订和重复抑制回归通过。观察快照带输出开关，模型提示明确禁止把求证包装成提醒；后端仍独立校验输出权限。
 - `outputs/reminders-regression-20260926-final/pytest.log`：885 项全量回归通过；最后增加 LiveKit 未发送返回值后，56 项相关回归通过。LiveKit 被控制门拦截的音频不再误记为已发送。另修复历史视觉取消测试的时间夹具：画面时间须严格早于按毫秒保存的问题时间，避免同毫秒截断造成偶发无证据。
 
