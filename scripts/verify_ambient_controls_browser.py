@@ -61,10 +61,27 @@ async def verify(output, real=False, base_url=None):
             await page.wait_for_function('!ambientPanel.busy && document.querySelector("#ambientControlStatus").textContent.includes("设置已保存")')
             state=await snapshot();assert state['ambient']['intervalSeconds']==7 and state['ambient']['questionsEnabled']
             report['draftSurvivesRefreshAndApplies']=True
+            report['independentPlaybackControls'] = await page.evaluate("""() => {
+                const original = ambientState, stopped = [];
+                const fake = id => ({egoassistResponseId:id, stop:()=>stopped.push(id)});
+                const r=fake('test-reminder'), q=fake('test-question'), u=fake('test-user');
+                observationResponseKinds.set('test-reminder','reminder');
+                observationResponseKinds.set('test-question','clarification');
+                playbackSources.add(r);playbackSources.add(q);playbackSources.add(u);
+                acceptAmbient({...ambientState,questionsEnabled:false,remindersEnabled:true,controlRevision:ambientState.controlRevision+1});
+                if (JSON.stringify(stopped)!==JSON.stringify(['test-question'])) throw Error('question switch stopped the wrong output');
+                acceptAmbient({...ambientState,reminderGoal:'changed goal',controlRevision:ambientState.controlRevision+1});
+                if (JSON.stringify(stopped)!==JSON.stringify(['test-question','test-reminder'])) throw Error('goal edit did not cancel old reminder');
+                if (!playbackSources.has(u)) throw Error('user answer was stopped');
+                playbackSources.delete(u);observationResponseKinds.clear();stoppedSpeechResponses.clear();
+                ambientState=original;
+                return true;
+            }""")
             await page.reload();await page.wait_for_function('ambientState?.intervalSeconds===7')
             await page.locator('#ambientSettings > summary').click()
             assert await page.locator('#ambientQuestions').is_checked()
             await page.locator('#ambientQuestions').uncheck()
+            await page.locator('#ambientReminders').uncheck()
             await page.locator('#ambientSave').click()
             await page.wait_for_function('!ambientPanel.busy && !ambientState.questionsEnabled')
             # One failed save must retain the draft and release all controls.

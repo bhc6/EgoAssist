@@ -215,8 +215,8 @@ class RealtimeConnection:
             if livekit_active and self.livekit_transport is not None:
                 if payload.get("type") in {"audio", "interrupted", "playback_stop"}:
                     try:
-                        await self.livekit_transport.publish(session_id, payload)
-                        if payload.get("type") == "audio" and origin.get(
+                        published = await self.livekit_transport.publish(session_id, payload)
+                        if published is not False and payload.get("type") == "audio" and origin.get(
                             "observationReviewId"
                         ):
                             owner.lanes.reviews.audio_sent(
@@ -916,7 +916,21 @@ class RealtimeConnection:
 
             def observation_speech_allowed(origin):
                 watch = self.ambient_watch_session(owner)
-                return bool(watch and self.ambient_options(owner)["questionsEnabled"]
+                options = self.ambient_options(owner)
+                kind = origin.get("observationKind", "clarification")
+                review = owner.lanes.reviews.rows.get(origin.get("observationReviewId"))
+                if not review:
+                    return False
+                if kind == "reminder":
+                    goal = owner.lanes.observation_goal()
+                    if review.get("reminderGoalSourceIds", []) != ([goal["sourceId"]] if goal else []):
+                        return False
+                age = (datetime.now(timezone.utc) - datetime.fromisoformat(review["capturedAt"])).total_seconds() * 1000
+                from egoassist.core.settings import perception_settings
+                # Once speech begins, let it finish; stale queued reminders must not start.
+                if not review.get("sentAt") and age > perception_settings()["liveMaxAgeMs"]:
+                    return False
+                return bool(watch and options["remindersEnabled" if kind == "reminder" else "questionsEnabled"]
                     and origin.get("contextId") == watch.perception_context_id
                     and origin.get("generation") == owner.output_generation)
 

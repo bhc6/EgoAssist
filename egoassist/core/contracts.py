@@ -225,6 +225,14 @@ class ObservationReferenceCheck(ProductContract):
     reason: str = Field(min_length=1, max_length=400)
 
 
+class ObservationNotification(ProductContract):
+    kind: Literal["requested-reminder", "goal-help", "hazard"]
+    message: str = Field(min_length=1, max_length=240)
+    reason: str = Field(min_length=1, max_length=400)
+    source_ids: list[str] = Field(max_length=8)
+    evidence_indices: list[int] = Field(min_length=1, max_length=8)
+
+
 class AmbientObservationHypothesis(ProductContract):
     """A passive observation. Absence is expressed positively, never as an error.
 
@@ -247,6 +255,7 @@ class AmbientObservationHypothesis(ProductContract):
     # Optional reasoning metadata is validated separately from visible evidence.
     reference_check: Any = None
     follow_up_of: str | None = Field(default=None, max_length=80)
+    notification: Any = None
 
 
 class ObservationEvidence(ProductContract):

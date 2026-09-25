@@ -139,6 +139,8 @@ def test_ambient_settings_defaults_and_revision_survive_repeated_control(tmp_pat
             session=(await (await client.post('/api/sessions')).json())['session']['id']
             original=await (await client.get('/api/state',params={'session':session})).json()
             assert original['ambient']['questionsEnabled'] is False
+            assert original['ambient']['remindersEnabled'] is True
+            assert original['ambient']['reminderGoal'] == ''
             revisions=[];contexts=[]
             for _ in range(3):
                 granted=await (await client.post('/api/ambient/consent',json={'granted':True,'sessionId':session})).json()
@@ -157,4 +159,17 @@ def test_ambient_settings_defaults_and_revision_survive_repeated_control(tmp_pat
             assert state['ambient']['intervalSeconds']==7 and not state['ambient']['consented']
             invalid=await client.post('/api/ambient/settings',json={'sessionId':session,'intervalSeconds':0,'questionsEnabled':False})
             assert invalid.status==400
+            for field, value in [('remindersEnabled', 'false'), ('reminderGoal', 'x'*601)]:
+                invalid = await client.post('/api/ambient/settings', json={'sessionId': session,
+                    'intervalSeconds': 7, 'questionsEnabled': False, field: value})
+                assert invalid.status == 400
+            changed = await (await client.post('/api/ambient/settings', json={'sessionId': session,
+                'intervalSeconds': 7, 'questionsEnabled': False, 'remindersEnabled': False,
+                'reminderGoal': '  看到钥匙提醒我收好  '})).json()
+            assert changed['ambient']['reminderGoal'] == '看到钥匙提醒我收好'
+            assert not changed['ambient']['remindersEnabled']
+            compatible = await (await client.post('/api/ambient/settings', json={'sessionId': session,
+                'intervalSeconds': 8, 'questionsEnabled': False})).json()
+            assert compatible['ambient']['reminderGoal'] == '看到钥匙提醒我收好'
+            assert not compatible['ambient']['remindersEnabled']
     asyncio.run(scenario())

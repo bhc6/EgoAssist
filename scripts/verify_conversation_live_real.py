@@ -80,6 +80,19 @@ async def verify(output, base_url=None):
                 report['voiceDeduplicatedAfterPolling']=True
                 await page.wait_for_function("[...document.querySelectorAll('#turnHistory .completed-answer')].some(p=>/81|八十一/.test(p.textContent))",timeout=45000)
                 report['voiceAnswerVisible']=True
+                # Real acoustic pipeline; explicitly label only this isolated synthetic sample.
+                await page.wait_for_function('state.sharedScene.speakers.length>0',timeout=45000)
+                speech = await page.evaluate('id=>state.sharedScene.utterances.find(r=>r.turnId===id)?.speaker',receipt['turnId'])
+                report['speakerAnalysis'] = speech
+                assert speech and speech.get('speakerId'), speech
+                await page.locator('#setupMyVoice').click()
+                await page.locator('#speakerIdentitySelect').select_option(speech['speakerId'])
+                await page.locator('#speakerIdentityName').fill('验收合成声音')
+                await page.locator('#speakerIsWearer').check()
+                await page.locator('#speakerIdentityForm button').click()
+                await page.wait_for_function('id=>document.querySelector(`#turnHistory [data-message-id="user:${id}"]`)?.textContent.includes("本人 · 声音匹配")',arg=receipt['turnId'])
+                report['confirmedSyntheticVoiceVisible'] = True
+                report['speakerIdentityGroundTruth'] = False
                 await page.locator('#textTurnInput').fill('你好')
                 await page.locator('#textTurnSend').click()
                 await page.wait_for_function("historyReceipts.some(e=>e.channel==='explicit_control' && e.text==='你好')",timeout=30000)
@@ -95,6 +108,8 @@ async def verify(output, base_url=None):
                 await page.reload()
                 await page.wait_for_function("document.querySelector('#turnHistory').textContent.includes('你好')")
                 assert await page.locator('#turnHistory [data-message-id="user:'+receipt['turnId']+'"]').count()==1
+                assert '本人 · 声音匹配' in await page.locator('#turnHistory [data-message-id="user:'+receipt['turnId']+'"]').inner_text()
+                assert '你的文字' in await page.locator('#turnHistory [data-message-id="user:'+typed['turnId']+'"]').inner_text()
                 report['reloadPreservesBothInputs']=True
                 for width in (1440,390):
                     await page.set_viewport_size({'width':width,'height':1000})

@@ -78,7 +78,7 @@ class _ResponseRequest:
     @property
     def correlation(self) -> dict:
         return {key: value for key, value in (self.origin or {}).items()
-                if key in {"turnId", "generation", "sessionId", "intentId", "jobId", "resultId", "background", "observationReviewId", "contextId"}}
+                if key in {"turnId", "generation", "sessionId", "intentId", "jobId", "resultId", "background", "observationReviewId", "observationKind", "contextId"}}
 
 
 def _is_fake_ip(value: str) -> bool:
@@ -1761,17 +1761,20 @@ class OmniBrowserBridge:
     def set_ambient_context_provider(self, provider) -> None:
         self._ambient_context_provider = provider
 
-    def cancel_observation_questions(self) -> None:
+    def cancel_observation_questions(self, *, kinds=None) -> None:
         """Cancel only observation-origin speech, preserving user answers and tasks."""
+        def matches(request):
+            origin = (request.origin or {}) if request else {}
+            return origin.get("observationReviewId") and (kinds is None or origin.get("observationKind", "clarification") in kinds)
         with self._response_lock:
             for request in list(self._queued_requests):
-                if (request.origin or {}).get("observationReviewId"):
+                if matches(request):
                     self._queued_requests.remove(request)
                     self._return_result_to_inbox(request, "observation-stopped")
             active_ids = {identifier for identifier, request in self._active_response_requests.items()
-                          if (request.origin or {}).get("observationReviewId")}
+                          if matches(request)}
             pending = self._inflight_response
-            cancel_pending = bool(pending and (pending.origin or {}).get("observationReviewId"))
+            cancel_pending = bool(matches(pending))
         if active_ids:
             self.cancel_response(expected_response_ids=frozenset(active_ids), reason="observation-stopped")
         elif cancel_pending:
@@ -1951,7 +1954,7 @@ class OmniBrowserBridge:
             str(speech["utterance"]),
             priority=priority,
             speech_policy="protected" if reason == "hazard" else "finish-clause",
-            reason=f"task-bound-perception:{reason}",
+            reason=f"{'observation' if (handled.get('origin') or {}).get('observationReviewId') else 'task-bound-perception'}:{reason}",
             purpose="proactive-utterance",
             origin=dict(handled.get("origin") or {}),
         )

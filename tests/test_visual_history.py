@@ -1,6 +1,6 @@
 import asyncio
 from copy import deepcopy
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import pytest
 
 from egoassist.memory import TimelineMemory
@@ -119,8 +119,9 @@ def test_historical_request_cancellation_is_logged_and_propagated(tmp_path):
     journal = SessionJournal(tmp_path/'case.jsonl', session_id='case')
     scene = SharedScene(journal, 'test-key')
     ref = scene._save(b'test-media', '.jpg', 'image/jpeg')
+    # Capture must precede the journal's millisecond-resolution question clock.
     journal.append('ambient_observation', {'status': 'accepted', 'evidence': {
-        'capturedAt': datetime.now(timezone.utc).isoformat(), 'media': ref, 'visibleEvidence': ['table']}})
+        'capturedAt': (datetime.now(timezone.utc)-timedelta(seconds=1)).isoformat(), 'media': ref, 'visibleEvidence': ['table']}})
     scene.capture('q', explicit=True)
     class CancelledRequest:
         async def __aenter__(self): raise asyncio.CancelledError

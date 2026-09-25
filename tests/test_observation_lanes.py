@@ -78,6 +78,26 @@ def test_stopping_observation_questions_does_not_cancel_user_answer():
     assert cancelled[0]['expected_response_ids']==frozenset({'observation-response'})
 
 
+def test_disabling_questions_preserves_reminder_and_user_requests():
+    from collections import deque
+    import threading
+    from egoassist.realtime.omni import _ResponseRequest
+    bridge = OmniBrowserBridge.__new__(OmniBrowserBridge)
+    bridge._response_lock = threading.RLock()
+    reminder = _ResponseRequest('remind', 35, 1, origin={'observationReviewId':'r','observationKind':'reminder'})
+    question = _ResponseRequest('ask', 35, 2, origin={'observationReviewId':'q'})
+    user = _ResponseRequest('answer', 80, 3, origin={'turnId':'u'})
+    bridge._queued_requests = deque([reminder, question, user])
+    bridge._active_response_requests = {'reminder-response':reminder}
+    bridge._inflight_response = reminder
+    dropped, cancelled = [], []
+    bridge._return_result_to_inbox = lambda request, reason: dropped.append(request)
+    bridge.cancel_response = lambda **kw: cancelled.append(kw)
+    bridge.cancel_observation_questions(kinds={'clarification'})
+    assert list(bridge._queued_requests) == [reminder, user] and dropped == [question] and not cancelled
+    assert reminder.correlation['observationKind'] == 'reminder'
+
+
 def test_observation_snapshot_excludes_future_and_survives_restart(tmp_path):
     journal = SessionJournal(tmp_path / "session.jsonl", session_id="session")
     scene = SharedScene(journal, "")

@@ -10,6 +10,52 @@ from egoassist.realtime.work_ledger import CaseWorkLedger
 from run_egoassist import create_app
 
 
+def test_history_speaker_identity_updates_after_confirmation_merge_and_undo(tmp_path):
+    from egoassist.realtime.scene import SharedScene
+    journal = SessionJournal(tmp_path/'speakers.jsonl')
+    ledger = CaseWorkLedger(journal)
+    for sid, vector in [('s1', [1., 0.]), ('s2', [0., 1.])]:
+        journal.append('speaker.profile', {'speakerId': sid, 'embedding': vector,
+            'wearer': False, 'name': None, 'identitySource': 'unknown'})
+    for i, sid in enumerate(('s1', 's2', None)):
+        ledger.capture_turn('你好', source='input-audio-transcript', turn_id='t'+str(i))
+        journal.append('scene.turn', {'turnId': 't'+str(i), 'speaker': {
+            'status': 'single-speaker' if sid else 'unknown', 'speakerId': sid, 'wearer': False}})
+    ledger.capture_turn('文字', source='explicit-control', turn_id='typed')
+    scene = SharedScene(journal, '')
+    def labels():
+        return [r['speakerAttribution']['kind'] for r in conversation_page(journal, scene=scene)['messages']]
+    assert labels() == ['unknown', 'unknown', 'unknown', 'account']
+    scene.speakers.confirm('s1', name='我', wearer=True)
+    scene.speakers.confirm('s2', name='同事', wearer=False)
+    assert labels() == ['self', 'other', 'unknown', 'account']
+    scene.speakers.merge('s2', 's1')
+    assert labels() == ['self', 'self', 'unknown', 'account']
+    scene.speakers.undo_merge(scene.speakers.merges[-1]['id'])
+    assert labels() == ['self', 'other', 'unknown', 'account']
+    restored = SharedScene(SessionJournal(journal.path), '')
+    assert [r['speakerAttribution']['kind'] for r in conversation_page(restored.journal, scene=restored)['messages']] == labels()
+
+
+def test_mixed_speech_history_retains_unknown_overlap_and_per_segment_attribution(tmp_path):
+    from egoassist.realtime.scene import SharedScene
+    journal = SessionJournal(tmp_path/'mixed.jsonl')
+    journal.append('speaker.profile', {'speakerId': 'mine', 'embedding': [1., 0.], 'wearer': True,
+        'name': '我', 'identitySource': 'account-confirmed'})
+    CaseWorkLedger(journal).capture_turn('混合转写', source='input-audio-transcript', turn_id='mixed')
+    segments = [{'startMs': 0, 'endMs': 1200, 'speakerId': 'mine', 'cluster': 0},
+        {'startMs': 1200, 'endMs': 2000, 'speakerId': None, 'cluster': 1, 'method': 'overlapping-speech'}]
+    journal.append('scene.turn', {'turnId': 'mixed', 'speaker': {'status': 'mixed-or-unknown', 'segments': segments},
+        'utterances': [{**segments[0], 'text': '我的话', 'status': 'transcribed'},
+                      {**segments[1], 'text': None, 'status': 'overlapping-speech'}]})
+    scene = SharedScene(journal, '')
+    speaker = conversation_page(journal, scene=scene)['messages'][0]['speakerAttribution']
+    assert speaker['kind'] == 'mixed'
+    assert [s['kind'] for s in speaker['segments']] == ['self', 'unknown']
+    assert speaker['segments'][0]['text'] == '我的话'
+    assert speaker['segments'][1]['label'] == '无法确认 · 同时说话'
+
+
 def test_voice_receipt_uses_persisted_turn_identity_before_routing(tmp_path, monkeypatch):
     from types import SimpleNamespace
     from egoassist.realtime.omni import OmniBrowserBridge

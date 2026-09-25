@@ -16,6 +16,8 @@
 .ambient-panel form label { display:flex; flex-direction:column; gap:6px; font-size:12px; }
 .ambient-panel form .ambient-check { flex-direction:row; align-items:center; padding-bottom:6px; }
 .ambient-panel form input[type=number] { width:120px; }
+.ambient-panel form .ambient-goal { flex:1 1 100%; min-width:0; }
+.ambient-panel form textarea { width:100%; box-sizing:border-box; resize:vertical; font:inherit; padding:8px; border:1px solid var(--line); border-radius:6px; }
 .ambient-panel form button { margin:0; font:inherit; }
 .ambient-panel #ambientLiveStatus { color:#536873; }
 .ambient-panel.authorized #ambientLiveStatus { color:#296f5e; }

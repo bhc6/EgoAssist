@@ -8,6 +8,18 @@
   const latest = document.querySelector('#latestConversation');
   const count = document.querySelector('#conversationCount');
   const error = document.querySelector('#conversationError');
+  function attribution(row) {
+    return row.speakerAttribution || (row.source === 'explicit-control'
+      ? {kind:'account',label:'你的文字'} : {kind:'unknown',label:'无法确认 · 等待声音归属'});
+  }
+  function speakerSegments(row) {
+    const parts = row.speakerAttribution?.segments || [];
+    return parts.length ? "<details class='conversation-speakers'><summary>逐段说话人归属</summary>" + parts.map(part =>
+      "<p><b>" + esc(part.label) + (part.name ? ' · ' + esc(part.name) : '') + "</b> · " +
+      esc((part.startMs / 1000).toFixed(1) + '–' + (part.endMs / 1000).toFixed(1) + ' 秒') + "<br>" +
+      esc(part.text || (part.transcriptStatus === 'overlapping-speech' ? '同时说话，无法可靠分配逐字内容' : '逐段转写尚未完成')) +
+      '</p>').join('') + '</details>' : '';
+  }
   function reset(next) {
     scope = next; epoch++; busy = false; wanted = 50;
     rows = new Map(); live = new Map(); total = 0; cursor = null;
@@ -27,10 +39,12 @@
     const html = messages.map(row => "<div class='turn-history-row' data-message-id='" + esc(row.id) +
       "' data-turn-id='" + esc(row.turnId || '') + "'><small>" +
       esc(row.role === 'assistant' ? (row.source === 'background-text' ? '助手 · 后台补全' : '助手') :
-        row.source === 'input-audio-transcript' ? '现场语音' : '你') + ' · ' +
+        attribution(row).label + (attribution(row).name ? ' · ' + attribution(row).name : '')) + ' · ' +
       esc(row.timestamp ? new Date(row.timestamp).toLocaleString() : '') + ' · ' + esc(labels[row.status] || row.status) +
       "</small><p class='" + (row.role === 'assistant' ? 'completed-answer' : 'user-message') + "' style='white-space:pre-wrap;overflow-wrap:anywhere'>" +
-      esc(row.text) + '</p>' + (row.turnId && state?.workLedger?.turnInbox?.some(turn => turn.turnId === row.turnId) ? "<button type='button' class='inspect-turn' data-inspect-turn='" + esc(row.turnId) +
+      esc(row.text) + '</p>' + (row.role === 'user' ? speakerSegments(row) : '') +
+      (row.speakerAttribution?.kind === 'mixed' ? '<small>以上为整段转写，不能将整段内容归给同一人。</small>' : '') +
+      (row.turnId && state?.workLedger?.turnInbox?.some(turn => turn.turnId === row.turnId) ? "<button type='button' class='inspect-turn' data-inspect-turn='" + esc(row.turnId) +
         "'>查看处理记录</button>" : '') + '</div>').join('');
     if (panel.innerHTML !== html) {
       panel.innerHTML = html;
@@ -54,6 +68,11 @@
     updateLatest();
   });
   latest.onclick = showLatest;
+  document.querySelector('#setupMyVoice').onclick = () => {
+    const section = document.querySelector('#sharedSceneTitle').parentElement;
+    section.open = true;
+    document.querySelector('#speakerIdentityForm').scrollIntoView({block:'center',behavior:'smooth'});
+  };
   // A hidden workspace cannot be scrolled; finish following when it becomes visible.
   new ResizeObserver(() => { if (following && panel.clientHeight) showLatest(); }).observe(panel);
   async function refresh(more = false) {

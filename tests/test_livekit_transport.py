@@ -176,10 +176,10 @@ def test_observation_stop_clears_only_observation_audio_and_blocks_delayed_publi
         pcm = base64.b64encode(b"\x01\x00\xfe\xff").decode("ascii")
         observation = {"type": "audio", "audio": pcm, "origin": {"observationReviewId": "review"}}
         user = {"type": "audio", "audio": pcm, "origin": {"turnId": "question"}}
-        await transport.publish("ambient-case", observation)
+        assert await transport.publish("ambient-case", observation) is True
         transport.set_observation_speech_allowed("ambient-case", False)
         assert source.cleared
-        await transport.publish("ambient-case", observation)
+        assert await transport.publish("ambient-case", observation) is False
         assert len(source.frames) == 1
 
         source.cleared = False
@@ -207,9 +207,34 @@ def test_observation_stop_clears_only_observation_audio_and_blocks_delayed_publi
         await entered.wait()
         transport.set_observation_speech_allowed("ambient-case", False)
         release.set()
-        await pending
+        assert await pending is False
         assert len(source.frames) == 4
         await transport.close("ambient-case")
+    asyncio.run(run())
+
+
+def test_reminder_and_question_output_permissions_are_independent():
+    async def run():
+        transport = LiveKitInteractionTransport(settings(), room_factory=FakeRoom)
+        await transport.connect('kinds')
+        session = transport._sessions['kinds']
+        session.output_source = source = FakeAudioSource()
+        pcm = base64.b64encode(b'\x01\x00').decode()
+        async def publish(kind):
+            await transport.publish('kinds', {'type': 'audio', 'audio': pcm,
+                'origin': {'observationReviewId': 'review', 'observationKind': kind}})
+        transport.set_observation_speech_allowed('kinds', True, kinds={'reminder'})
+        await publish('clarification')
+        await publish('reminder')
+        assert len(source.frames) == 1
+        transport.set_observation_speech_allowed('kinds', True, kinds={'reminder'})
+        assert not source.cleared
+        transport.set_observation_speech_allowed('kinds', True, kinds={'clarification'})
+        assert source.cleared
+        await publish('reminder')
+        await publish('clarification')
+        assert len(source.frames) == 2
+        await transport.close('kinds')
     asyncio.run(run())
 
 

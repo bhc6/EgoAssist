@@ -9,7 +9,7 @@
   <link rel="stylesheet" href="responsive.css?v=20260925-cleanup">
   <link rel="stylesheet" href="memory-controls.css?v=20260925-lanes">
   <link rel="stylesheet" href="lanes.css?v=20260925-lanes">
-  <link rel="stylesheet" href="ambient.css?v=20260925-controls">
+  <link rel="stylesheet" href="ambient.css?v=20260925-reminders">
 </head>
 <body class="auth-required">
   <div id="authGate" class="auth-gate">
@@ -92,6 +92,7 @@
         <h2 class="history-heading">对话记录</h2>
         <p><button id="olderConversation" type="button" hidden>加载更早记录</button> <button id="latestConversation" type="button" hidden>回到最新</button> <small id="conversationCount"></small></p>
         <p id="conversationError" role="status"></p>
+        <p class="conversation-identity-help">语音逐段显示本人、他人或无法确认。<button id="setupMyVoice" type="button">设置我的声音</button></p>
         <div id="turnHistory" aria-label="对话记录，可加载更早消息" tabindex="0"></div>
         <details><summary>最近问题的处理状态</summary><div id="turnWorkHistory"></div></details>
       </aside>
@@ -171,7 +172,8 @@
         <button type="button" data-event-action="rebuild">从原始证据重新整理</button><span id="longEventStatus" role="status"></span></div>
       <div id="longEvents"></div>
     </details>
-    <details data-view="conversation" class="shared-scene-band"><summary id="sharedSceneTitle">现场与说话人管理</summary>
+    <details data-view="conversation" class="shared-scene-band"><summary id="sharedSceneTitle">我的声音与现场说话人</summary>
+      <p>先说一小段话，在下方试听声音片段，选中自己的声音并勾选“这是我的声音”。后续每段语音显示本人、他人或无法确认。只有你明确确认的声音才标为本人或他人；短句、噪声和同时说话可能无法辨认。声音档案仅用于当前会话，不作为身份认证。</p>
       <p id="sharedSceneStatus">等待音视频</p>
       <div class="shared-scene-grid">
         <div id="sharedSceneVisual"></div>
@@ -290,13 +292,13 @@
   <script src="long_events.js?v=20260918"></script>
   <script src="shared_scene.js?v=20260918-speaker-merge"></script>
   <script src="workspace.js?v=20260925-lanes"></script>
-  <script src="lanes.js?v=20260925-lanes"></script>
+  <script src="lanes.js?v=20260925-reminders"></script>
   <script src="memory_view.js?v=20260909"></script>
   <script src="workflow.js?v=20260918-speakers"></script>
   <script src="request.js?v=20260910"></script>
   <script src="tool_activity.js?v=20260910"></script>
-  <script src="ambient.js?v=20260925-controls"></script>
-  <script src="app.js?v=20260925-controls"></script>
-  <script src="conversation_history.js?v=20260925-live-history"></script>
+  <script src="ambient.js?v=20260925-reminders"></script>
+  <script src="app.js?v=20260925-reminders"></script>
+  <script src="conversation_history.js?v=20260926-speaker-attribution"></script>
 </body>
 </html>

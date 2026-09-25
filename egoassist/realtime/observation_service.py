@@ -64,6 +64,11 @@ class ObservationService:
             if self.session_runtime.task
             else None,
         )
+        options = self.interaction.ambient_options(self.owner)
+        context["reference_context"]["outputPolicy"] = {
+            "remindersEnabled": options.get("remindersEnabled", True),
+            "questionsEnabled": options["questionsEnabled"],
+        }
         frame = getattr(self.bridge(), "_latest_perception_frame", None)
         if frame and frame.get("frameId") == frame_id and self.owner.scene.frames:
             import base64

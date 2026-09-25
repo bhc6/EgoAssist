@@ -56,6 +56,8 @@ class _RoomSession:
     output_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     observation_speech_allowed: bool = True
     output_is_observation: bool = False
+    observation_speech_kinds: set[str] = field(default_factory=lambda: {"reminder", "clarification"})
+    output_observation_kind: str | None = None
 
 
 class LiveKitInteractionTransport:
@@ -203,15 +205,15 @@ class LiveKitInteractionTransport:
                 return
             yield event
 
-    async def publish(self, session_id: str, event: Mapping[str, Any]) -> None:
+    async def publish(self, session_id: str, event: Mapping[str, Any]) -> bool:
         session = self._sessions.get(session_id)
         if session is None:
             raise RuntimeError(f"LiveKit session is not connected: {session_id}")
         payload = dict(event)
         if payload.get("type") == "audio" and payload.get("audio"):
-            await self._publish_audio(session, str(payload["audio"]),
-                                      observation=bool((payload.get("origin") or {}).get("observationReviewId")))
-            return
+            return await self._publish_audio(session, str(payload["audio"]),
+                                      observation=bool((payload.get("origin") or {}).get("observationReviewId")),
+                                      kind=(payload.get("origin") or {}).get("observationKind", "clarification"))
         if payload.get("type") in {"interrupted", "playback_stop"} and session.output_source is not None:
             session.output_source.clear_queue()
         await session.room.local_participant.publish_data(
@@ -219,14 +221,16 @@ class LiveKitInteractionTransport:
             reliable=True,
             topic=LIVEKIT_DATA_TOPIC,
         )
+        return True
 
-    def set_observation_speech_allowed(self, session_id: str, allowed: bool) -> None:
+    def set_observation_speech_allowed(self, session_id: str, allowed: bool, *, kinds=None) -> None:
         """Drop buffered observation speech without stopping a user answer."""
         session = self._sessions.get(session_id)
         if session is None:
             return
         session.observation_speech_allowed = allowed
-        if not allowed and session.output_is_observation and session.output_source is not None:
+        session.observation_speech_kinds = set(kinds) if kinds is not None else {"reminder", "clarification"}
+        if (not allowed or session.output_observation_kind not in session.observation_speech_kinds) and session.output_is_observation and session.output_source is not None:
             session.output_source.clear_queue()
             session.output_is_observation = False
 
@@ -242,21 +246,23 @@ class LiveKitInteractionTransport:
             session.output_source = source
             return source
 
-    async def _publish_audio(self, session: _RoomSession, audio_b64: str, *, observation: bool = False) -> None:
-        if observation and not session.observation_speech_allowed:
-            return
+    async def _publish_audio(self, session: _RoomSession, audio_b64: str, *, observation: bool = False, kind="clarification") -> bool:
+        if observation and (not session.observation_speech_allowed or kind not in session.observation_speech_kinds):
+            return False
         raw = base64.b64decode(audio_b64, validate=True)
         if len(raw) % 2:
             raise ValueError("PCM16 payload must contain complete samples")
         source = await self._ensure_output_source(session)
         # Authorization can change while the output track is being published.
-        if observation and not session.observation_speech_allowed:
-            return
+        if observation and (not session.observation_speech_allowed or kind not in session.observation_speech_kinds):
+            return False
         if session.output_is_observation and not observation:
             source.clear_queue()
         session.output_is_observation = observation
+        session.output_observation_kind = kind if observation else None
         frame = rtc.AudioFrame(raw, 24_000, 1, len(raw) // 2)
         await source.capture_frame(frame)
+        return True
 
     async def _consume_audio(self, session_id: str, session: _RoomSession, track, participant_id: str) -> None:
         stream = rtc.AudioStream(track, capacity=100, sample_rate=16_000, num_channels=1, frame_size_ms=20)

@@ -282,6 +282,8 @@ def create_app(
             owner.ambient_options = {
                 "intervalSeconds": ambient_settings["interval_seconds"],
                 "questionsEnabled": False,
+                "remindersEnabled": True,
+                "reminderGoal": "",
                 "questionCooldownSeconds": number(
                     "EGOASSIST_AMBIENT_QUESTION_COOLDOWN", 90, maximum=3600
                 ),
@@ -1959,7 +1961,9 @@ def create_app(
             if livekit_transport is not None:
                 info = payload["ambient"]
                 livekit_transport.set_observation_speech_allowed(
-                    owner.session_id, bool(info.get("consented") and info.get("questionsEnabled")))
+                    owner.session_id, bool(info.get("consented")),
+                    kinds=({"clarification"} if info.get("questionsEnabled") else set()) |
+                          ({"reminder"} if info.get("remindersEnabled") else set()))
             for ws in list(live_sockets_by_session.get(owner.session_id, ())):
                 if not ws.closed:
                     try:
@@ -2047,6 +2051,11 @@ def create_app(
         owner = case_owner(user_id, session_id)
         interval = payload.get("intervalSeconds")
         questions = payload.get("questionsEnabled")
+        previous = ambient_options(owner)
+        reminders = payload.get("remindersEnabled", previous["remindersEnabled"])
+        goal = payload.get("reminderGoal", previous["reminderGoal"])
+        if not isinstance(reminders, bool) or not isinstance(goal, str) or len(goal) > 600:
+            raise ValueError("remindersEnabled must be boolean and reminderGoal at most 600 characters")
         cooldown = payload.get(
             "questionCooldownSeconds", ambient_options(owner)["questionCooldownSeconds"]
         )
@@ -2064,12 +2073,20 @@ def create_app(
             settings = {
                 "intervalSeconds": float(interval),
                 "questionsEnabled": questions,
+                "remindersEnabled": reminders,
+                "reminderGoal": goal.strip(),
                 "questionCooldownSeconds": float(cooldown),
             }
             owner.journal.append("ambient.settings", {"settings": settings})
             owner.ambient_options = settings
-        if not questions and owner.bridge and hasattr(owner.bridge, "cancel_observation_questions"):
-            owner.bridge.cancel_observation_questions()
+        disabled_kinds = ({"clarification"} if not questions else set()) | ({"reminder"} if not reminders else set())
+        if goal.strip() != previous["reminderGoal"]:
+            disabled_kinds.add("reminder")
+        if disabled_kinds and livekit_transport is not None:
+            livekit_transport.set_observation_speech_allowed(
+                session_id, bool(ambient_consent(user_id)), kinds={"reminder", "clarification"} - disabled_kinds)
+        if disabled_kinds and owner.bridge and hasattr(owner.bridge, "cancel_observation_questions"):
+            owner.bridge.cancel_observation_questions(kinds=disabled_kinds)
         return await publish_ambient_control(user_id, session_id)
 
     def submit_tool_confirmation(owner, call_id, accepted):

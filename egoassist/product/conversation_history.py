@@ -1,7 +1,47 @@
 """Read-only conversation history, independent of the bounded live work panel."""
 
 
-def conversation_page(journal, *, before=None, limit=50):
+def speaker_attribution(scene, turn_id, *, audio=True):
+    """Resolve current, explicitly confirmed profile labels without changing evidence."""
+    if not audio:
+        return {'kind': 'account', 'label': '你的文字', 'basis': 'account-input'}
+    turn = scene.turns.get(turn_id, {}) if scene else {}
+    speaker = turn.get('speaker') or {}
+
+    def identify(value):
+        status = value.get('status', speaker.get('status', 'unknown'))
+        sid = value.get('speakerId')
+        registry = scene.speakers if scene else None
+        root = registry.canonical(sid) if registry else None
+        profile = registry.profiles.get(root, {}) if registry else {}
+        unknown = {'kind': 'unknown', 'label': '无法确认', 'basis': value.get('method') or status,
+                   'speakerId': root, 'name': profile.get('name')}
+        if status == 'pending':
+            return {**unknown, 'label': '正在辨认声音'}
+        if status in {'overlapping-speech', 'unavailable'} or value.get('method') == 'overlapping-speech':
+            return {**unknown, 'label': '无法确认 · ' + ('声音分析暂不可用' if status == 'unavailable' else '同时说话')}
+        if not sid or not profile or sid in registry.contaminated:
+            return unknown
+        if profile.get('identitySource') != 'account-confirmed':
+            return unknown
+        kind = 'self' if profile.get('wearer') else 'other'
+        return {'kind': kind, 'label': ('本人' if kind == 'self' else '他人') + ' · 声音匹配',
+                'name': profile.get('name'), 'speakerId': root, 'basis': 'acoustic-match-to-account-confirmed-profile'}
+
+    result = identify(speaker)
+    segments = speaker.get('segments') or []
+    mixed = (speaker.get('clusterCount', 0) > 1 or len({s.get('speakerId') for s in segments}) > 1)
+    if mixed:
+        result = {'kind': 'mixed', 'label': '多人或混合语音', 'basis': speaker.get('status')}
+    utterances = turn.get('utterances') or []
+    if utterances or mixed:
+        result['segments'] = [{**identify(part), 'startMs': part.get('startMs'), 'endMs': part.get('endMs'),
+            'text': part.get('text'), 'transcriptStatus': part.get('status', 'pending')}
+            for part in (utterances or segments)]
+    return result
+
+
+def conversation_page(journal, *, before=None, limit=50, scene=None):
     limit = int(limit)
     if not 1 <= limit <= 200:
         raise ValueError('history limit must be between 1 and 200')
@@ -52,6 +92,10 @@ def conversation_page(journal, *, before=None, limit=50):
         start = max(0, end - limit)
         selected = [{**row, 'turnId': row.get('turnId') or state['responses'].get(row.get('responseId'))}
                     for row in rows[start:end]]
+        for row in selected:
+            if row['role'] == 'user':
+                row['speakerAttribution'] = speaker_attribution(scene, row.get('turnId'),
+                    audio=row.get('source') not in {'explicit-control', 'text', 'account-input'})
         return {'messages': selected, 'total': len(rows),
                 'nextBefore': rows[start]['id'] if start else None}
 

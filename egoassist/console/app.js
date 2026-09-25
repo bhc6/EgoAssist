@@ -50,7 +50,7 @@ let artifactRenderGeneration = 0, artifactRenderTask = null, pendingHumanHelpPre
 let mirrorCamera = localStorage.getItem("egoassist.camera.mirror") !== "false";
 let microphoneEnabled = localStorage.getItem("egoassist.microphone.enabled") !== "false";
 const playbackSources = new Set();
-const observationResponseIds = new Set();
+const observationResponseKinds = new Map();
 const AUDIO_BUFFER_HIGH_WATER = 512 * 1024;
 const VIDEO_BUFFER_HIGH_WATER = 128 * 1024;
 let droppedAudioChunks = 0;
@@ -102,7 +102,7 @@ function showLogin() {
   insightTurn = null;
   state = null;
   ambientState = null; ambientScope = null; ambientPanel.reset();
-  observationResponseIds.clear();
+  observationResponseKinds.clear();
   localSubmittedTurns.clear();
   sessionDrafts.clear();
   toolActivityView.reset(null);
@@ -637,21 +637,25 @@ function renderExecutionLanes() {
 // a camera that watches without a task the user started is only acceptable if the
 // user can see, at a glance, that it is on and what it is watching for.
 function renderObservationReviews() {
-  const reviews = (state?.runtimeLanes?.observation?.reviews || []).filter(row => row.question || row.referenceCheck).slice().reverse();
+  const reviews = (state?.runtimeLanes?.observation?.reviews || []).filter(row => row.question || row.notification || row.rawNotification || row.referenceCheck).slice().reverse();
   if (!reviews.length) return "";
-  const statuses = {recorded:"已记录比对", suppressed:"本次不提问", deferred:"暂缓提问", ready:"等待问题音频", "audio-sent":"音频已发送 · 播放待确认", played:"设备已开始播放", closed:"澄清已结束"};
+  const statuses = {recorded:"已记录比对", suppressed:"本次不播报", deferred:"暂缓播报", ready:"等待播报音频", "audio-sent":"音频已发送 · 播放待确认", played:"设备已开始播放", closed:"信息确认已结束"};
   const reasons = {"invalid-reference-schema":"比对格式不完整，保留原始观察", "unknown-reference":"引用不在本次背景中", "reference-recorded-after-frame":"引用晚于画面时间",
     "same-frame-is-not-independent-evidence":"同一帧的重复分析不能独立佐证", "unknown-visible-evidence":"缺少对应画面证据",
-    "unknown-follow-up":"无法定位此前问题", "already-offered":"同一事项已问过", "stale-frame":"画面已过实时期限",
-    "questions-disabled":"主动澄清已关闭", "output-not-permitted":"当前不允许主动播报", "pending-clarification":"还有问题等待确认",
-    "interaction-busy":"等待当前对话结束", cooldown:"尚在提问间隔内", "no-material-change":"没有值得再问的新变化",
+    "unknown-follow-up":"无法定位此前事项", "already-offered":"同一事项已播报", "stale-frame":"画面已过实时期限",
+    "invalid-notification-schema":"提醒格式不完整", "missing-user-need":"缺少用户需要的依据", "missing-user-request":"缺少提醒请求",
+    "reminders-disabled":"主动提醒已关闭", "reminder-goal-changed":"提醒目标已修改或撤销", "already-queued":"同一事项已在等待播报",
+    "useful-reminder-at-idle":"根据当前需要在空闲时提醒", "delivery-not-confirmed":"上次播报未确认，等待新画面核对",
+    "questions-disabled":"主动询问已关闭", "output-not-permitted":"当前不允许主动播报", "pending-clarification":"还有问题等待确认",
+    "interaction-busy":"等待当前对话结束", cooldown:"尚在主动播报间隔内", "no-material-change":"没有值得再问的新变化",
     "useful-question-at-idle":"空闲时提出有用的问题", "awaiting-device-playback":"等待设备播放回执",
     "device-playback-confirmed":"设备已确认播放", "clarification-no-longer-pending":"待确认事项已处理或过期",
-    "output-interrupted-before-audio":"问题尚未发送便被打断", "no-useful-question":"本次无需提问"};
+    "output-interrupted-before-audio":"播报尚未发送便被打断", "no-useful-question":"本次无需主动播报"};
   const relations = {conflict:"疑似不一致", change:"状态变化", uncertain:"尚不能判定", consistent:"本次相符"};
-  return "<details data-disclosure='observation-reviews'><summary>现场与历史比对 · 主动提问记录</summary>" + reviews.map(row =>
+  return "<details data-disclosure='observation-reviews'><summary>提醒、询问与依据</summary>" + reviews.map(row =>
     "<div class='observation-review'><b>" + esc(statuses[row.status] || row.status) + "</b> · " + esc(reasons[row.reason] || row.reason) +
     (row.question ? "<p>" + esc(row.question) + "</p>" : "") +
+    (row.notification ? "<p>提醒：" + esc(row.notification.message) + "</p><p>此时提醒的原因：" + esc(row.notification.reason) + "</p>" : "") +
     (row.referenceCheck ? "<p>" + esc(relations[row.referenceCheck.relation] || row.referenceCheck.relation) + "：" + esc(row.referenceCheck.reason) + "</p>" : "") +
     "<small>画面时间 " + esc(new Date(row.capturedAt).toLocaleString()) + "</small>" +
     "<details data-disclosure='review-" + esc(row.candidateId) + "'><summary>来源、校验与原始记录</summary><pre>" + esc(JSON.stringify(row, null, 2)) + "</pre></details></div>"
@@ -685,8 +689,12 @@ function acceptAmbient(info) {
   if (sameEpoch && (info.controlRevision ?? -1) < (ambientState?.controlRevision ?? -1)) return;
   // Partial provider messages are evidence only, never authoritative control state.
   if (info.controlRevision == null && ambientState?.consented === false) return;
+  const previousGoal = ambientState?.reminderGoal;
   ambientState = {...(ambientState || {}), ...info};
-  if (!ambientState.consented || !ambientState.questionsEnabled) stopObservationPlayback();
+  const disabled = new Set();
+  if (!observationOutputAllowed('clarification')) disabled.add('clarification');
+  if (!observationOutputAllowed('reminder') || (previousGoal !== undefined && previousGoal !== ambientState.reminderGoal)) disabled.add('reminder');
+  if (disabled.size) stopObservationPlayback(disabled);
 }
 function renderAmbient() {
   ambientPanel.render(ambientState, currentUser?.id + ":" + selectedSessionId, renderObservationReviews());
@@ -1037,12 +1045,17 @@ function playPcm24(base64Audio, responseId) {
   playbackTime += buffer.duration;
 }
 
-function stopObservationPlayback() {
-  if (observationResponseIds.has(captionResponseId)) {
+function observationOutputAllowed(kind) {
+  return Boolean(ambientState?.consented && (kind === 'reminder' ? ambientState.remindersEnabled !== false : ambientState.questionsEnabled));
+}
+function stopObservationPlayback(kinds = new Set(['reminder','clarification'])) {
+  const matches = id => observationResponseKinds.has(id) && kinds.has(observationResponseKinds.get(id));
+  for (const [id, kind] of observationResponseKinds) if (kinds.has(kind)) stoppedSpeechResponses.add(id);
+  if (matches(captionResponseId)) {
     livekitAudioElements.forEach(element => { element.muted = true; });
   }
   for (const source of [...playbackSources]) {
-    if (!observationResponseIds.has(source.egoassistResponseId)) continue;
+    if (!matches(source.egoassistResponseId)) continue;
     if(audioContext)playbackAudit.report(audioContext.currentTime,"paused",source.egoassistResponseId);
     try { source.stop(); } catch (_) {}
     playbackSources.delete(source);
@@ -1120,9 +1133,10 @@ async function connectRealtimeSession(generation, media, retryAttempt) {
     if (socket !== ws || generation !== connectionGeneration) return;
     const message = JSON.parse(event.data);
     if (message.origin?.observationReviewId && message.responseId) {
-      observationResponseIds.add(message.responseId);
-      while(observationResponseIds.size>128)observationResponseIds.delete(observationResponseIds.values().next().value);
-      if (["audio","assistant_transcript"].includes(message.type) && (!ambientState?.consented || !ambientState?.questionsEnabled)) return;
+      const kind = message.origin.observationKind || 'clarification';
+      observationResponseKinds.set(message.responseId, kind);
+      while(observationResponseKinds.size>128)observationResponseKinds.delete(observationResponseKinds.keys().next().value);
+      if (["audio","assistant_transcript"].includes(message.type) && !observationOutputAllowed(kind)) return;
     }
     if (message.type === "state") stateRefreshPendingAt = 0;
     if (["audio", "assistant_transcript"].includes(message.type) && stoppedSpeechResponses.has(message.responseId)) return;
@@ -1223,7 +1237,7 @@ async function connectRealtimeSession(generation, media, retryAttempt) {
         renderWorkCenter();
       }
       if (message.status === "interrupted") {
-        if (message.origin?.observationReviewId) stopObservationPlayback();
+        if (message.origin?.observationReviewId) stopObservationPlayback(new Set([message.origin.observationKind || 'clarification']));
         else stopPlayback();
         if (message.responseId === captionResponseId) {
           assistantText = "";

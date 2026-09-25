@@ -95,7 +95,13 @@ class ObservationInteraction:
             allowed=self.interaction_state.allows({}, "proactive-utterance"),
             pending=pending,
             cooldown=self.ambient_options(self.owner)["questionCooldownSeconds"],
+            reminders_enabled=self.ambient_options(self.owner).get("remindersEnabled", True),
         )
+        if review.get("notification"):
+            goal = self.owner.lanes.observation_goal()
+            current_goals = [goal["sourceId"]] if goal else []
+            if review["reminderGoalSourceIds"] != current_goals:
+                review = self.owner.lanes.reviews.record(review, status="deferred", reason="reminder-goal-changed")
         self.owner.scene.ingest_review(review)
         if review["status"] == "ready":
             speech = {
@@ -103,6 +109,9 @@ class ObservationInteraction:
                     "perception/ambient_question", question=hypothesis.clarification
                 ),
                 "reason": "clarification",
+            } if not review.get("notification") else {
+                "utterance": prompt_text("perception/ambient_notification", message=review["notification"]["message"]),
+                "reason": "observation-reminder",
             }
         return {
             "accepted": True,
@@ -110,6 +119,7 @@ class ObservationInteraction:
             "speech": speech,
             "origin": {
                 "observationReviewId": review["candidateId"],
+                "observationKind": "reminder" if review.get("notification") else "clarification",
                 "generation": self.owner.output_generation,
                 "watchlistId": captured.watchlist_id,
                 "watchlistVersion": captured.watchlist_version,

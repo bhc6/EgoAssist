@@ -240,12 +240,15 @@ def ambient_prompt(context: AmbientFrameContext | Mapping[str, Any]) -> str:
             item["sourceId"] = item.get("referenceId", item["sourceId"])
         for item in references.get("memory", []):
             item["id"] = item.get("referenceId", item["id"])
+        for item in references.get("reminderGoals", []):
+            item["sourceId"] = item.get("referenceId", item["sourceId"])
     return (
         (prompt_text('perception/ambient_open') if value.observation_mode == "open"
          else prompt_text('perception/ambient_prompt.1', v0=NONE_OBSERVED, v1=UNKNOWN_LOCATION))
         + prompt_text('perception/reference_context')
         + prompt_text('perception/ambient_cross_reference')
         + prompt_text('perception/reference_shape')
+        + prompt_text('perception/ambient_notifications')
         + json.dumps(
             {
                 "schema": value.schema_version,
@@ -316,6 +319,7 @@ def parse_ambient_hypothesis(raw: str | Mapping[str, Any], *, open_observation=F
         salient_change=value.get("salient_change", True),
         reference_check=value.get("reference_check"),
         follow_up_of=value.get("follow_up_of"),
+        notification=value.get("notification"),
     )
 
 
@@ -429,6 +433,7 @@ def validate_ambient_result(
             "observationMode": captured.observation_mode,
             "uncertainties": output.uncertainties,
             "clarification": output.clarification,
+            "notification": output.notification,
             "salientChange": output.salient_change,
         },
     )

@@ -9,16 +9,18 @@ class AmbientPanel {
     this.operation = 0;
     this.renderedResult = null;
     root.innerHTML = `<div class="ambient-heading"><b id="ambientTitle">后台环境观察</b><span id="ambientLiveStatus" role="status"></span><button id="ambientGrant" type="button">授权开启</button><button id="ambientRevoke" type="button" hidden>停止后台观察</button></div>
-      <p id="ambientPurpose">按间隔理解画面，为现场问答和日记积累有来源的记录。</p>
+      <p id="ambientPurpose">让助手理解你眼前的情况：回答现场问题、记录有依据的经历，并在与你当前目标相关时提醒。</p>
       <p id="ambientNext" class="ambient-next"></p>
       <div class="ambient-feedback"><span id="ambientControlStatus" role="status" aria-live="polite"></span><button id="ambientOpenDevices" type="button" hidden>打开设备设置</button></div>
       <details id="ambientSettings"><summary>观察方式与设置 <span id="ambientDirty"></span></summary>
-        <p>观察授权适用于本账号的全部会话；以下频率和澄清设置只应用于当前会话。不开麦克风也能观察。</p>
+        <p>授权后按间隔分析摄像头画面。观察授权适用于本账号全部会话；以下设置只应用于当前会话。不开麦克风也能观察。</p>
         <form id="ambientSettingsForm"><label>观察间隔（秒）<input id="ambientInterval" type="number" min="2" max="120" step="1" required></label>
-          <label class="ambient-check"><input id="ambientQuestions" type="checkbox">允许空闲时主动澄清</label>
-          <label>澄清最短间隔（秒）<input id="ambientQuestionCooldown" type="number" min="1" max="3600" step="1" required></label>
+          <label class="ambient-check"><input id="ambientReminders" type="checkbox">需要时主动提醒</label>
+          <label class="ambient-check"><input id="ambientQuestions" type="checkbox">关键信息不确定时先询问</label>
+          <label>主动播报最短间隔（秒）<input id="ambientQuestionCooldown" type="number" min="1" max="3600" step="1" required></label>
+          <label class="ambient-goal">希望观察帮你留意什么（可选）<textarea id="ambientReminderGoal" rows="2" maxlength="600" placeholder="例如：看到钥匙时提醒我收进包里"></textarea></label>
           <button id="ambientSave" type="submit">应用设置</button><button id="ambientDiscard" type="button">撤销未保存修改</button></form>
-        <p>默认安静记录；主动澄清不会自动执行任务或把模型判断当成确认事实。画面按间隔采样，不代表连续看见。</p>
+        <p>默认需要时提醒，不主动询问。开启询问后，仅在不确定的信息会影响当前帮助时问一句，例如“桌角那个是你的钥匙吗？”，不会因普通变化追问。关闭两项即可只记录。目标保存后持续用于本会话观察，清空即撤销；这不是定时提醒。空闲时播报，同一事项不反复提醒。采样可能漏看，不保证识别所有需要。</p>
       </details>
       <details id="ambientResults"><summary>最近观察与依据 <span id="ambientResultTime"></span></summary><p id="ambientLatest"></p><div id="ambientEvidence"></div><div id="ambientReviews"></div></details>`;
     this.$ = selector => root.querySelector(selector);
@@ -32,6 +34,8 @@ class AmbientPanel {
   values(info = {}) {
     this.$('#ambientInterval').value = String(info.intervalSeconds ?? 5);
     this.$('#ambientQuestions').checked = Boolean(info.questionsEnabled);
+    this.$('#ambientReminders').checked = info.remindersEnabled !== false;
+    this.$('#ambientReminderGoal').value = info.reminderGoal || '';
     this.$('#ambientQuestionCooldown').value = String(info.questionCooldownSeconds ?? 90);
   }
   feedback(message, error = false) {
@@ -42,7 +46,7 @@ class AmbientPanel {
     this.$('#ambientGrant').disabled = this.busy;
     this.$('#ambientRevoke').disabled = this.busy;
     for(const node of this.$('#ambientSettingsForm').elements)node.disabled=this.busy;
-    this.$('#ambientQuestionCooldown').disabled = this.busy || !this.$('#ambientQuestions').checked;
+    this.$('#ambientQuestionCooldown').disabled = this.busy || !(this.$('#ambientQuestions').checked || this.$('#ambientReminders').checked);
     this.$('#ambientDiscard').disabled = this.busy || !this.dirty;
     this.$('#ambientDirty').textContent = this.dirty ? '· 未保存' : '';
     this.$('#ambientSave').textContent = this.busy ? '处理中…' : '应用设置';
@@ -66,7 +70,7 @@ class AmbientPanel {
     this.$('#ambientGrant').hidden=consent;this.$('#ambientRevoke').hidden=!consent;
     this.$('#ambientNext').textContent=!consent?'不会自动分析新画面。主动提问和任务内画面核对仍可使用。':
       failure?'观察服务暂不可用，请检查设置与诊断。':!info.connected || !frameFresh?'还没有持续输入画面；打开设备设置、启用摄像头并连接实时会话后开始。':
-      `当前会话约每 ${info.intervalSeconds} 秒分析一帧 · ${info.questionsEnabled?'允许空闲澄清':'安静记录，不主动提问'}。`;
+      `当前会话约每 ${info.intervalSeconds} 秒分析一帧 · ${info.remindersEnabled!==false?'需要时提醒':'提醒已关闭'} · ${info.questionsEnabled?'必要时先询问':'不主动询问'}。`;
     this.$('#ambientOpenDevices').hidden=!consent || Boolean(info.connected && frameFresh);
     if(!this.dirty && !this.busy)this.values(info);
     this.controls();
@@ -90,6 +94,7 @@ class AmbientPanel {
     if(kind==='settings'){
       if(!this.$('#ambientSettingsForm').reportValidity())return;
       settings={intervalSeconds:Number(this.$('#ambientInterval').value),questionsEnabled:this.$('#ambientQuestions').checked,
+        remindersEnabled:this.$('#ambientReminders').checked,reminderGoal:this.$('#ambientReminderGoal').value,
         questionCooldownSeconds:Number(this.$('#ambientQuestionCooldown').value)};
     }
     this.busy=true;this.controls();this.feedback(kind==='settings'?'正在保存设置…':granted?'正在开启观察…':'正在停止后台观察…');

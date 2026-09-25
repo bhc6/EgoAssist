@@ -21,6 +21,17 @@ class ThreeLaneRuntime:
         self.session_id = journal.session_id
         self.reviews = ObservationReviews(journal)
 
+    def observation_goal(self):
+        """Keep the source stable until the user changes or clears the goal."""
+        def reduce(state, row):
+            if row.get("type") != "ambient.settings":
+                return
+            goal = (row.get("settings") or {}).get("reminderGoal", "").strip()
+            if goal != state["text"]:
+                state.update(text=goal, sourceId=row["id"], recordedAt=row["timestamp"])
+        goal = self.journal.project("observation-reminder-goal", lambda: {"text": ""}, reduce)
+        return {**goal, "referenceId": "g1"} if goal["text"] else None
+
     def observation_references(self, timeline, *, task=None):
         limit = integer("EGOASSIST_OBSERVATION_REFERENCE_LIMIT", 4, maximum=32)
         text_limit = integer("EGOASSIST_OBSERVATION_REFERENCE_CHARS", 1000, maximum=16000)
@@ -34,6 +45,7 @@ class ThreeLaneRuntime:
         cards = timeline.cards(user_id=self.user_id, case_id=self.session_id, limit=limit)
         pending = timeline.pending_draft(user_id=self.user_id, case_id=self.session_id)
         self.reviews.reconcile(pending)
+        goal = self.observation_goal()
         return deepcopy({
             "basis": "historical-references-not-current-visual-evidence",
             "limit": limit, "textLimit": text_limit, "totalUserMessages": user_history["count"],
@@ -48,8 +60,9 @@ class ThreeLaneRuntime:
                         "frame": card.get("metadata", {}).get("evidenceContext", {}).get("frame")}
                        for index, card in enumerate(cards)],
             "pendingClarification": pending,
+            "reminderGoals": [goal] if goal else [],
             "questionHistory": [{key: row.get(key) for key in
-                                ("candidateId", "question", "status", "reason", "capturedAt", "sentAt", "follows")}
+                                ("candidateId", "question", "notification", "status", "reason", "capturedAt", "sentAt", "follows")}
                                for row in self.reviews.recent(questions_only=True)],
             "task": {key: task.get(key) for key in ("task", "currentCheckpointId", "completed", "paused")} if task else None,
         })

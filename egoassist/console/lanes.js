@@ -63,7 +63,7 @@ window.LaneView = (() => {
       ...(state?.episodicMemory?.timelineViews?.participant?.recent || []),
       ...(state?.episodicMemory?.timelineViews?.case?.recent || [])];
     const inputTurn = latestTurn?.transcript || latestTurn?.text || latestTurn?.input?.text;
-    const observationHTML = `<p class="lane-purpose">接收采样画面，生成有时间与来源的现场证据。</p>${stages([['接收画面',frameFresh?'done':'wait'],['独立分析',observing?'active':o.processedThrough?'done':'wait'],['现场证据',o.processedThrough?'done':'wait']])}
+    const observationHTML = `<p class="lane-purpose">接收采样画面，生成有时间与来源的现场证据；与用户当前需要相关时，交给交互链路提醒。</p><p>${state?.ambient?.remindersEnabled!==false?'必要提醒已开启':'必要提醒已关闭'} · ${state?.ambient?.questionsEnabled?'关键信息不确定时先询问':'不主动询问'}</p>${stages([['接收画面',frameFresh?'done':'wait'],['独立分析',observing?'active':o.processedThrough?'done':'wait'],['现场证据',o.processedThrough?'done':'wait']])}
       <dl><dt>最近输入</dt><dd>${escape(time(o.cameraAt))}${o.cameraAt && !frameFresh?' · 历史画面':''}</dd><dt>已分析至</dt><dd>${escape(time(o.processedThrough))}</dd><dt>待处理采样</dt><dd>${a.pendingFrame?'有最新帧待分析':'无'}</dd><dt>任务观察</dt><dd>${t.active?'分析中':state?.ambient?.taskActive?'等待采样':'未开启任务观察'}</dd></dl>
       ${observationError?`<p class="lane-error">${escape(observationError.message || observationError.code || '观察提供方暂不可用，请检查设置与诊断。')}</p>`:''}<h3>最近结果</h3><p class="lane-result">${escape(observed?.summary || '尚无已分析的画面；授权观察并启用设备后开始。')}</p>
       <p class="lane-empty">画面按间隔采样，不代表连续观察。</p><a href="#/conversation" data-lane-link="camera">查看设备与观察授权 →</a>`;

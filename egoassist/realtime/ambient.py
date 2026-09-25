@@ -345,6 +345,7 @@ class AmbientWatchSession:
             "visibleEvidence": evidence.get("visibleEvidence", []),
             "uncertainties": evidence.get("uncertainties", []),
             "clarification": evidence.get("clarification"),
+            "notification": evidence.get("notification"),
             "salientChange": evidence.get("salientChange", True),
             "media": evidence.get("media"),
         }

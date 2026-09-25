@@ -144,10 +144,11 @@ class EvidenceEndpoints:
         user_id = request[self.user_key]['id']
         session_id = str(request.query.get('session', '')).strip()
         self.identity.get_context_session(user_id, session_id)
-        journal = self.case_owner(user_id, session_id).journal
+        owner = self.case_owner(user_id, session_id)
+        journal = owner.journal
         try:
             page = conversation_page(journal, before=request.query.get('before'),
-                                     limit=request.query.get('limit', '50'))
+                                     limit=request.query.get('limit', '50'), scene=owner.scene)
         except ValueError as exc:
             raise self.web.HTTPBadRequest(text=str(exc)) from exc
         return self.web.json_response({'sessionId': session_id, **page},
