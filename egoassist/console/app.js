@@ -82,7 +82,7 @@ function setAuthMode(mode) {
   const registering = mode === "register";
   $("#loginMode").classList.toggle("active", !registering);
   $("#registerMode").classList.toggle("active", registering);
-  $("#authTitle").textContent = registering ? "注册参与者账号" : "登录参与者账号";
+  $("#authTitle").textContent = registering ? "注册账号" : "登录账号";
   $("#authSubmit").textContent = registering ? "注册并进入" : "登录";
   $("#authPassword").autocomplete = registering ? "new-password" : "current-password";
   $("#authError").textContent = "";
@@ -601,7 +601,7 @@ function render(next) {
   $("#vision").textContent = task?.observation
     ? task.observation.step + " · accepted · age " + task.observation.frameAgeMs + " ms"
     : latestRejection ? "证据未采纳 · " + latestRejection.reason : stream && state.sharedScene?.camera === "receiving" ? "现场画面接收中" : "";
-  $("#memoryScope").textContent = state.memoryPolicy?.components?.timeline?.enabled ? "TimelineMemory · 已启用" : "TimelineMemory · 已关闭";
+  $("#memoryScope").textContent = state.memoryPolicy?.components?.timeline?.enabled ? "记忆已开启" : "记忆已关闭";
   renderMemoryPolicy(state.memoryPolicy, state.memoryProfiles || []);
   const episodic = state.episodicMemory || {recent: [], retrieval: {candidates: []}};
   renderTimelineCards(episodic);
@@ -685,8 +685,8 @@ function renderAmbient() {
   root.hidden = false;
   if (!info.consented) {
     root.className = "ambient-banner idle";
-    root.innerHTML = "<b>被动观测未授权</b><span>已启用但未获得同意，不会发送任何画面。</span>" +
-      "<button id='ambientGrant'>授权被动观测</button>";
+    root.innerHTML = "<b>环境观察未开启</b><span>开启后会采样画面，帮助理解现场。</span>" +
+      "<button id='ambientGrant'>授权开启</button>";
     $("#ambientGrant").onclick = () => setAmbientConsent(true);
     return;
   }
@@ -834,6 +834,7 @@ async function ensureMedia() {
     $("#cameraEmpty").hidden = true;
     $("#cameraState").textContent = microphoneEnabled ? "摄像头与麦克风在线" : "摄像头在线 · 麦克风已关闭";
     $("#cameraButton").textContent = "关闭设备";
+    $("#cameraPanel").open = true;
     if (socket?.readyState === WebSocket.OPEN) {
       await activateWebSocketMediaFallback();
       startLocalVad(stream);
@@ -1410,6 +1411,8 @@ $("#turnWorkHistory").onclick = $("#turnHistory").onclick = async event => {
   if (inspectButton) {
     inspectedTurnId = inspectButton.dataset.inspectTurn;
     renderTurnWorkflow();
+    location.hash = "/audit";
+    showWorkspaceView();
     $("#turnWorkflowDetails").open = true;
     $("#turnWorkflowDetails").scrollIntoView({block: "nearest"});
     $("#turnWorkflowDetails > summary").focus({preventScroll: true});
@@ -1872,7 +1875,7 @@ $("#memoryRecoveryJobs").onclick = async event => {
 };
 $("#promptAuditDetails").ontoggle = refreshPromptAudit;
 $("#promptTemplatesDetails").ontoggle = refreshPromptAudit;
-setInterval(() => { if ($("#promptAuditDetails").open || $("#promptTemplatesDetails").open) refreshPromptAudit(); maybeSuggest(); }, 3000);
+setInterval(() => { if (location.hash === "#/audit" && ($("#promptAuditDetails").open || $("#promptTemplatesDetails").open)) refreshPromptAudit(); maybeSuggest(); }, 3000);
 
 boot().catch(error => { showLogin(); $("#authError").textContent = error.message; });
 setInterval(async () => {

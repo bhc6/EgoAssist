@@ -212,16 +212,31 @@ async def verify(output, real_turn=False):
                     if (outbox.entries().length) throw Error('deleted user request retained');
                 }''')
                 report['pendingTextSurvivesReload'] = True
-                await page.locator('#turnWorkflowDetails > summary').click()
-                for width in (1440, 390):
-                    await page.set_viewport_size({'width': width, 'height': 1000})
+                await page.locator('a[href="#/conversation"]').click()
+                assert await page.locator('#executionLanes').is_hidden()
+                assert await page.locator('#performanceMetrics').is_hidden()
+                assert await page.locator('#memoryActivity').is_hidden()
+                assert not await page.locator('#cameraPanel').evaluate('(node) => node.open')
+                for width, height in ((1440, 1000), (390, 844)):
+                    await page.set_viewport_size({'width': width, 'height': height})
                     await page.evaluate('scrollTo(0, 0)')
                     await page.screenshot(path=str(output / f'viewport-{width}.png'))
                     await page.screenshot(path=str(output / f'ui-{width}.png'), full_page=True)
                     layout = await page.evaluate('''() => ({width: innerWidth,
                         scrollWidth: document.documentElement.scrollWidth,
-                        workflowVisible: document.querySelector('#liveWorkflow').getBoundingClientRect().height > 0})''')
+                        composerBottom: document.querySelector('#textTurnSend').getBoundingClientRect().bottom,
+                        height: innerHeight})''')
+                    assert layout['composerBottom'] < height, layout
                     report['viewports'].append(layout)
+                await page.locator('#cameraPanel > summary').click()
+                assert await page.locator('#cameraButton').is_visible()
+                await page.locator('#cameraPanel > summary').click()
+                await page.locator('a[href="#/audit"]').click()
+                await page.locator('#turnWorkflowDetails > summary').click()
+                assert await page.locator('#liveWorkflow').is_visible()
+                assert await page.locator('#performanceMetrics').is_visible()
+                report['diagnosticsAccessible'] = True
+                await page.locator('a[href="#/conversation"]').click()
                 await page.locator('#logout').click()
                 await page.locator('#authGate').wait_for(state='visible')
                 await page.locator('#loginMode').click()
@@ -235,7 +250,7 @@ async def verify(output, real_turn=False):
                     await page.wait_for_function("document.querySelector('[data-performance=\"responseFirstAudioMs\"]').textContent.includes('ms')")
                     report['performanceRestoredAfterLogin'] = True
                 report['passed'] = (not report['pageErrors'] and not report['failedRequests']
-                                    and all(v['scrollWidth'] <= v['width'] and v['workflowVisible']
+                                    and all(v['scrollWidth'] <= v['width'] and v['composerBottom'] < v['height']
                                             for v in report['viewports']))
             finally:
                 await browser.close()
