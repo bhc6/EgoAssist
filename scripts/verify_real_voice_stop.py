@@ -136,7 +136,7 @@ async def verify(output, text_only=False, fixture_dir=None):
                                     continue
                                 event["atMs"] = round((time.perf_counter() - started) * 1000, 3)
                                 row["events"].append(event)
-                                if event["type"] == "playback_stop" and event.get("trigger") == "provider-speech-started":
+                                if event["type"] == "playback_stop" and event.get("trigger") == "semantic-floor-change":
                                     row.setdefault("audioSendToPlaybackStopMs", event["atMs"])
                                 if event["type"] == "user_transcript":
                                     row["recognizedText"] = event["text"]

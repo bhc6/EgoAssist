@@ -68,8 +68,9 @@ async def verify(output, local_vad=False):
                         stopEvidence.localStarted = performance.now();
                         const original = localVad.options.onSpeechStart;
                         localVad.options.onSpeechStart = () => {
+                            stopEvidence.localSourcesBefore = playbackSources.size;
                             original();
-                            stopEvidence.localStopMs = performance.now() - stopEvidence.localStarted;
+                            stopEvidence.localDetectedMs = performance.now() - stopEvidence.localStarted;
                             stopEvidence.localPlayingSources = playbackSources.size;
                         };
                     }""", base64.b64encode(pcm).decode())
@@ -87,12 +88,13 @@ async def verify(output, local_vad=False):
                 finally:
                     report["playback"] = await page.evaluate("stopEvidence")
                 report["playback"] = await page.evaluate("stopEvidence")
-                onset = next(e for e in report["playback"]["events"] if e.get("trigger") == "provider-speech-started")
+                onset = next(e for e in report["playback"]["events"] if e.get("trigger") == "semantic-floor-change")
                 assert onset["playingSources"] == 0, onset
                 assert await page.evaluate("playbackSources.size") == 0
                 if local_vad:
-                    assert report["playback"].get("localStopMs") is not None, report["playback"]
-                    assert report["playback"]["localPlayingSources"] == 0
+                    assert report["playback"].get("localDetectedMs") is not None, report["playback"]
+                    assert report["playback"]["localSourcesBefore"] > 0
+                    assert report["playback"]["localPlayingSources"] == report["playback"]["localSourcesBefore"]
                     report["localVad"] = "real-Silero-v5"
                 assert "已停止播报" in await page.locator("#duplexState").text_content()
                 for width in (1440, 390):

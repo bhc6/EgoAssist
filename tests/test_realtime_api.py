@@ -128,7 +128,9 @@ async def _recv(ws):
     """Read ordered protocol messages, ignoring asynchronous memory/turn progress."""
     while True:
         message = await ws.receive_json()
-        if message.get("type") not in {"memory_trace", "interaction_status"}:
+        if message.get("type") == "playback_stop" and message.get("trigger") == "semantic-floor-change":
+            continue
+        if message.get("type") not in {"memory_trace", "interaction_status", "speech_floor"}:
             return message
 
 
@@ -1726,13 +1728,18 @@ def test_new_vad_segment_blocks_old_answer_before_its_transcript_arrives(tmp_pat
             release.set()
             assert (await _recv_wait(ws, timeout=1))["type"] == "state"
             assert instances[0].requests == []
+            # VAD temporarily defers a prepared reply. Once the segment clears,
+            # it must become audible without requiring another user question.
+            instances[0].unresolved_input = False
+            await asyncio.wait_for(instances[0].request_event.wait(), timeout=1)
+            assert len(instances[0].requests) == 1
             await ws.close()
 
         journal = tmp_path / "users" / user["id"] / "sessions" / f"{session_id}.jsonl"
         entries = [json.loads(line) for line in journal.read_text(encoding="utf-8").splitlines()]
         assert any(
-            item.get("type") == "runtime_event"
-            and item.get("eventType") == "response.skipped.unresolved_user_input"
+            item.get("type") == "turn.progress"
+            and item.get("phase") == "waiting-speech-gap"
             for item in entries
         )
 

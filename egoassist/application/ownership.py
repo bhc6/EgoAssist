@@ -250,6 +250,10 @@ class CaseRuntimeOwner:
     transitioning: bool = False
     turn_sequence: int = 0
     latest_input_sequence: int = 0
+    # Input receipt never owns speech. Only a validated semantic decision can
+    # supersede this floor; backchannels and bystanders leave it untouched.
+    speech_floor_sequence: int = 0
+    pending_semantic_sequences: set[int] = field(default_factory=set)
     # Monotonic fence for user-visible foreground output. Background work may
     # outlive this value, but foreground responses and tools may not.
     output_generation: int = 0

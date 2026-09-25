@@ -7,6 +7,7 @@ let livekitRoom = null, livekitAudioElements = [];
 let interactionTransport = "websocket-fallback";
 let playbackTime = 0, assistantText = "";
 let captionResponseId = null, currentTurnId = null;
+let speechGeneration = null;
 const stoppedSpeechResponses = new Set();
 const playbackAudit = new PlaybackAudit(payload => {
   if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify(payload));
@@ -627,7 +628,7 @@ function render(next) {
 }
 
 const interactionPhases = {queued:"请求已保留 · 等待处理名额", classifying:"正在理解你的请求", ready:"理解完成 · 等待按序处理", retrying:"理解请求暂未成功 · 正在重试",
-  "waiting-vision":"正在核对提问时的画面", committing:"正在检索记忆与处理请求", generating:"正在生成回答"};
+  "waiting-vision":"正在核对提问时的画面", "waiting-speech-gap":"回答已准备 · 等你说完", "text-fallback":"语音暂未接上 · 答案保留在记录中", committing:"正在检索记忆与处理请求", generating:"正在生成回答"};
 
 function renderExecutionLanes() {
   window.LaneView.render(state);
@@ -1141,8 +1142,10 @@ async function connectRealtimeSession(generation, media, retryAttempt) {
     if (message.type === "state") stateRefreshPendingAt = 0;
     if (["audio", "assistant_transcript"].includes(message.type) && stoppedSpeechResponses.has(message.responseId)) return;
     if (["audio", "assistant_transcript", "response_status"].includes(message.type) &&
-        message.origin?.turnId && currentTurnId && message.origin.turnId !== currentTurnId && !message.origin.background) return;
-    if (["memory_status", "speech_control"].includes(message.type) && message.turnId && currentTurnId && message.turnId !== currentTurnId) return;
+        speechGeneration != null && message.origin?.generation != null &&
+        message.origin.generation !== speechGeneration && !message.origin.background) return;
+    if (message.type === "speech_control" && speechGeneration != null && message.generation != null && message.generation < speechGeneration) return;
+    if (message.type === "memory_status" && message.turnId && currentTurnId && message.turnId !== currentTurnId) return;
     if (message.type === "connection_progress") {
       connectionStage = message.stage === "context-restore" ? "历史上下文恢复" : "云端实时模型连接";
       $("#duplexState").textContent = message.stage === "context-restore"
@@ -1155,6 +1158,7 @@ async function connectRealtimeSession(generation, media, retryAttempt) {
       }
       ready = true;
       providerReady = true;
+      speechGeneration = null; // A restarted server has a new connection-local fence.
       selectedSessionId = message.contextSessionId || selectedSessionId;
       try {
         const pending = turnOutbox().entries();
@@ -1184,15 +1188,21 @@ async function connectRealtimeSession(generation, media, retryAttempt) {
       currentTurnId = message.turnId;
       livekitAudioElements.forEach(element => { element.muted = false; });
       $("#duplexState").textContent = "正在继续原回答";
+    } else if (message.type === "speech_floor") {
+      if (speechGeneration != null && message.generation < speechGeneration) return;
+      speechGeneration = message.generation;
+      assistantText = "";
+      captionResponseId = null;
     } else if (message.type === "playback_stop") {
+      if (speechGeneration != null && message.generation != null && message.generation < speechGeneration) return;
       if (captionResponseId) stoppedSpeechResponses.add(captionResponseId);
       for (const id of message.responseIds || []) stoppedSpeechResponses.add(id);
       while (stoppedSpeechResponses.size > 128) stoppedSpeechResponses.delete(stoppedSpeechResponses.values().next().value);
       stopPlayback();
       $("#duplexState").textContent = "已停播 · 正在听你说";
     } else if (message.type === "speech_control") {
-      if (message.action !== "resume") stopPlayback();
-      $("#duplexState").textContent = message.action === "resume" ? "正在继续原回答" : message.action === "uncertain" ? "暂不播报 · 等待明确意图" : message.action === "cancel-answer" ? "已取消指定回答 · 正在听" : "已停止播报 · 正在听";
+      if (!["resume", "keep"].includes(message.action)) stopPlayback();
+      $("#duplexState").textContent = message.action === "keep" ? "已听到 · 保持当前回答" : message.action === "wait" ? "先听你说完" : message.action === "resume" ? "正在继续原回答" : message.action === "uncertain" ? "暂不播报 · 等待明确意图" : message.action === "cancel-answer" ? "已取消指定回答 · 正在听" : "已停止播报 · 正在听";
     } else if (message.type === "interaction_status") {
       if (message.turnId && state?.runtimeLanes?.interaction) {
         const lane = state.runtimeLanes.interaction;
@@ -1205,18 +1215,17 @@ async function connectRealtimeSession(generation, media, retryAttempt) {
           (message.queueMs != null ? " · 排队 " + message.queueMs + " ms" : "");
       }
     } else if (message.type === "interrupted") {
+      if (speechGeneration != null && message.generation != null && message.generation !== speechGeneration) return;
       stopPlayback();
       assistantText = "";
       captionResponseId = null;
       $("#duplexState").textContent = "已打断旧响应，正在处理你的请求";
     } else if (message.type === "barge_in_policy") {
-      $("#duplexState").textContent = "已停播 · 正在处理语音交接";
+      $("#duplexState").textContent = message.action === "listening" ? "正在听 · 根据语义决定是否接话" : "正在处理语音交接";
     } else if (message.type === "user_transcript") {
       window.conversationHistoryEvent?.(message);
       if (message.channel === "explicit_control" && currentTurnId && message.turnId !== currentTurnId) return;
       currentTurnId = message.turnId || null;
-      assistantText = "";
-      captionResponseId = null;
       $("#transcript").textContent = (message.channel === "explicit_control" ? "你的文字" : "现场语音 · 说话人待核验") + "：" + message.text + (message.echoRisk === "suspected" ? " · 可能残余回声" : "");
       $("#duplexState").textContent = message.channel === "explicit_control" ? "正在处理文本" : "正在处理现场语音";
     } else if (message.type === "assistant_transcript" && ["conversation", "proactive-utterance"].includes(message.purpose)) {
@@ -1333,6 +1342,7 @@ function disconnectRealtime() {
   playbackAudit.clear();
   stoppedSpeechResponses.clear();
   currentTurnId = null;
+  speechGeneration = null;
   captionResponseId = null;
   assistantText = "";
   connectionGeneration += 1;
@@ -1380,9 +1390,6 @@ $("#textTurnForm").onsubmit = async event => {
     if (!socket || socket.readyState !== WebSocket.OPEN) throw Error("实时会话尚未就绪");
     const pending = {type: "control", transcript, clientRequestId: crypto.randomUUID()};
     currentTurnId = pending.clientRequestId;
-    assistantText = "";
-    captionResponseId = null;
-    stopPlayback();
     localSubmittedTurns.set(currentTurnId, {
       turnId: currentTurnId, text: transcript, sequence: Number.MAX_SAFE_INTEGER,
       status: "pending-send", delivery: {status: "pending-send"}, source: "explicit-control",

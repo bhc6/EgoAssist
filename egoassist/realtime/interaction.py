@@ -15,7 +15,7 @@ def normalize_interaction(value, context, text):
     result = {"audience": "assistant", "action": "reply", "output": "speech", **value}
     if result["audience"] not in {"assistant", "other", "uncertain"}:
         raise ValueError("invalid interaction audience")
-    if result["action"] not in {"reply", "listen", "resume", "cancel", "pause", "uncertain"}:
+    if result["action"] not in {"reply", "listen", "resume", "cancel", "pause", "uncertain", "keep", "wait"}:
         raise ValueError("invalid interaction action")
     if result["output"] not in {"speech", "text", "silent"}:
         raise ValueError("invalid interaction output")
@@ -74,6 +74,8 @@ class InteractionState:
                 "sourceTurnId": permission.get("turnId"), "playback": self.playback_context()}
 
     def apply(self, control, turn_id, *, timestamp=None):
+        if control.get("action") == "keep" or control["audience"] != "assistant":
+            return
         quiet = control.get("quiet")
         if quiet:
             seconds = quiet.get("seconds")
@@ -91,6 +93,8 @@ class InteractionState:
             state = self.snapshot()
             if not state["quiet"] or state["allowReplies"] or (quiet or {}).get("mode") == "clear":
                 self.grants.add(turn_id)
+        if control.get("action") == "wait":
+            self.pause()
 
     def allows(self, origin=None, purpose="conversation"):
         if self.paused:

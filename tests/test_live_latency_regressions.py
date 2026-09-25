@@ -47,7 +47,7 @@ def test_recovered_text_turn_keeps_its_channel(tmp_path):
         coordinator = object.__new__(TurnCoordinator)
         owner = SimpleNamespace(turn_queue=asyncio.Queue(4), turn_worker=asyncio.current_task(),
             socket_token=token, epoch=1, queued_turn_ids=set(), classification_tasks=set(),
-            turn_sequence=0, latest_input_sequence=0)
+            turn_sequence=0, latest_input_sequence=0, pending_semantic_sequences=set())
         coordinator.owner, coordinator.socket_token, coordinator.connection_epoch = owner, token, 1
         async def classify(*args): return {'status': 'classified'}
         coordinator.classify_persisted_turn = classify

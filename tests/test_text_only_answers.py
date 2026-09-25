@@ -130,7 +130,7 @@ def test_resume_without_audio_cache_preserves_text_channel(tmp_path, original_so
     request = Mock()
     asyncio.run(apply_interaction(
         {"interaction": {"audience": "assistant", "action": "resume", "output": "speech", "targetTurnId": "original"}},
-        "resume", 2, owner=SimpleNamespace(latest_input_sequence=2, output_generation=2),
+        "resume", 2, owner=SimpleNamespace(latest_input_sequence=2, output_generation=2, speech_floor_sequence=1),
         interaction_state=InteractionState(journal), harness=ContextHarness(journal),
         answer_executor=Mock(), user_id="user", bridge=Mock(), ws=SimpleNamespace(send_json=AsyncMock()),
         emit=AsyncMock(), muted_response_ids=set(), resumed_response_ids={}, request_bridge_response=request,

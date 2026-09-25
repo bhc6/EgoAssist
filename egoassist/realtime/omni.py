@@ -1038,6 +1038,7 @@ class OmniBrowserBridge:
             if segment_id in contexts:
                 row = contexts[segment_id]
                 row["audioEndMs"] = payload.get("audio_end_ms")
+                row["stoppedAtMonotonic"] = time.monotonic()
                 if item_id and row.get("providerItemId") != item_id:
                     row["startProviderItemId"] = row.get("providerItemId")
                     row["providerItemId"] = item_id
@@ -1084,12 +1085,26 @@ class OmniBrowserBridge:
 
     def has_unresolved_user_input(self) -> bool:
         """Return true from VAD start until transcription or an audited drop."""
-
+        expired = []
         with self._media_lock:
-            return bool(
+            # Lost/unalignable ASR callbacks must not mute the whole session.
+            # Only stopped intervals expire; never time out active human speech.
+            pending = getattr(self, "_pending_input_segments", ())
+            contexts = getattr(self, "_input_segment_contexts", {})
+            now = time.monotonic()
+            for segment_id in list(pending):
+                stopped = contexts.get(segment_id, {}).get("stoppedAtMonotonic")
+                if stopped is not None and now - stopped >= 30:
+                    pending.remove(segment_id)
+                    contexts.pop(segment_id, None)
+                    expired.append(segment_id)
+            unresolved = bool(
                 getattr(self, "_input_speech_active", False)
                 or getattr(self, "_pending_input_segments", ())
             )
+        for segment_id in expired:
+            self._trace("input.segment.dropped", {"segmentId": segment_id, "reason": "stopped-asr-deadline"})
+        return unresolved
 
     def append_audio(self, audio_b64: str) -> bool:
         if not audio_b64 or getattr(self, "_blocked_failure", None) is not None:
@@ -1268,6 +1283,9 @@ class OmniBrowserBridge:
 
     def handle_user_speech_started(self, *, trigger: str = "provider-speech-started") -> str:
         """Apply an explicit barge-in policy while continuing microphone capture."""
+        if getattr(self, "interaction_managed", False):
+            self._trace("speech.activity.observed", {"trigger": trigger, "policy": "semantic-floor"})
+            return "listening"
         started = time.perf_counter()
         with self._response_lock:
             response_ids = list(self._active_response_ids)
@@ -1276,8 +1294,6 @@ class OmniBrowserBridge:
         self._schedule({"type": "playback_stop", "trigger": trigger, "responseIds": response_ids})
         self._trace("playback.stop.requested", {"trigger": trigger,
                     "dispatchMs": round((time.perf_counter() - started) * 1000, 3)})
-        if getattr(self, "interaction_managed", False):
-            return "paused"
         with self._response_lock:
             response_keys = set(self._active_response_ids)
             if self._response_pending and not response_keys:

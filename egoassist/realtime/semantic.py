@@ -166,6 +166,8 @@ class SemanticTurnRouter:
         memory_candidates: list[dict] | None = None,
         memory_vocabulary: list[dict] | None = None,
         active_task: dict | None = None,
+        input_channel: str | None = None,
+        recent_interactions: list[dict] | None = None,
     ) -> None:
         self._turn_context.set({
             "clock": dict(clock_context or {}) or None,
@@ -180,6 +182,8 @@ class SemanticTurnRouter:
             "memoryCandidates": list(memory_candidates or []),
             "memoryVocabulary": list(memory_vocabulary or []),
             "activeTask": active_task,
+            "inputChannel": input_channel,
+            "recentInteractions": list(recent_interactions or []),
         })
 
     # ── Main classifier ─────────────────────────────────────────────────────
@@ -327,7 +331,7 @@ class SemanticTurnRouter:
             if interaction:
                 parsed["revision"] = None
                 speech_control = "none"
-                if interaction["action"] in {"listen", "resume", "uncertain", "cancel", "pause"}:
+                if interaction["action"] in {"listen", "resume", "uncertain", "cancel", "pause", "keep", "wait"}:
                     task_control = "none"
                     skill = "none"
                     if not parsed.get("intents"):

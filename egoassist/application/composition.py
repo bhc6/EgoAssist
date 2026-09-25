@@ -1486,6 +1486,7 @@ def create_app(
         prepared = tuple(owner.prepared_scenes.values())
         owner.prepared_scenes.clear()
         owner.applied_controls.clear()
+        owner.pending_semantic_sequences.clear()
         for task in prepared:
             if not task.done():
                 task.cancel()

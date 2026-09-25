@@ -32,7 +32,8 @@ def test_factory_selects_explicit_backend(monkeypatch):
 
 
 @pytest.mark.parametrize("route,action,output", [("reply", "reply", "speech"), ("stop", "listen", "silent"),
-                                                ("other", "listen", "silent"), ("uncertain", "uncertain", "silent")])
+                                                ("other", "listen", "silent"), ("uncertain", "uncertain", "silent"),
+                                                ("keep", "keep", "silent"), ("wait", "wait", "silent")])
 def test_fast_route_uses_only_decisions_and_normalizes(route, action, output):
     async def run():
         router = DecisionsTurnRouter("qwen", decisions_key="openrouter")

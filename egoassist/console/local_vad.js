@@ -15,9 +15,8 @@ async function startLocalVad(mediaStream) {
       },
       onSpeechStart: () => {
         if (generation !== localVadGeneration) return;
-        stopPlayback();
         if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify({type: "speech_activity"}));
-        $("#duplexState").textContent = "已本地停播 · 正在听";
+        $("#duplexState").textContent = "正在听 · 根据语义决定是否接话";
       }
     });
     if (generation !== localVadGeneration) { instance.destroy(); return; }
@@ -27,7 +26,7 @@ async function startLocalVad(mediaStream) {
     if (generation !== localVadGeneration) return;
     document.documentElement.dataset.localVad = "unavailable";
     document.documentElement.dataset.localVadError = String(error);
-    $("#duplexState").textContent = "本地语音检测不可用 · 使用云端停播";
+    $("#duplexState").textContent = "本地语音检测不可用 · 使用云端语义交接";
     console.warn("Local VAD unavailable", error);
   }
 }

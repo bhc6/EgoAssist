@@ -80,26 +80,11 @@ class TurnCoordinator:
     user_id: Any
     ws: Any
 
-    def mark_interrupted_turns(self, ledger):
-        from egoassist.core.events import latest
-        for delivery in latest(self.harness.journal, "turn_delivery", "turnId").values():
-            if delivery.get("status") in {"received", "responding"}:
-                ledger.set_turn_delivery(
-                    delivery["turnId"], "interrupted", reason="newer-user-turn"
-                )
-                self.answer_executor.interrupt(self.harness.journal, delivery["turnId"])
-
     def _do_enqueue_transcript(self, text: str, segment=None) -> dict:
         """Enqueue one complete (already-accumulated) utterance."""
         self.owner.turn_sequence += 1
         self.owner.latest_input_sequence = self.owner.turn_sequence
-        self.owner.output_generation += 1
-        self.interaction_state.pause()
         ledger = self.owner.work_ledger or CaseWorkLedger(self.harness.journal)
-        self.mark_interrupted_turns(ledger)
-        ledger.suspend_before_sequence(
-            self.owner.turn_sequence, reason="newer-user-turn"
-        )
         captured = ledger.capture_turn(
             text, source="input-audio-transcript", sequence=self.owner.turn_sequence
         )
@@ -154,8 +139,12 @@ class TurnCoordinator:
                 self.classify_persisted_turn(turn_id, str(turn["text"])),
                 name=f"egoassist-turn-classifier:{turn_id}",
             )
+            self.owner.pending_semantic_sequences.add(sequence)
             self.owner.classification_tasks.add(semantic_task)
-            semantic_task.add_done_callback(self.owner.classification_tasks.discard)
+            def classified(task, sequence=sequence):
+                self.owner.classification_tasks.discard(task)
+                self.owner.pending_semantic_sequences.discard(sequence)
+            semantic_task.add_done_callback(classified)
             self.owner.queued_turn_ids.add(turn_id)
             queue.put_nowait(
                 {
@@ -265,6 +254,8 @@ class TurnCoordinator:
                 "pause",
                 "cancel",
                 "uncertain",
+                "keep",
+                "wait",
             } or semantic.get("speechControl")
             scene_task = self.owner.prepared_scenes.pop(turn_id, None)
             if scene_task is None:
@@ -322,7 +313,6 @@ class TurnCoordinator:
                 or self.owner.epoch != self.connection_epoch
             ):
                 raise asyncio.CancelledError
-            turn_generation = self.owner.output_generation
             current_turn = work_ledger.turns().get(turn_id)
             if (current_turn is None or current_turn.get('supersededBy')
                     or current_turn.get('status') in {'completed', 'failed', 'cancelled'}):
@@ -349,6 +339,7 @@ class TurnCoordinator:
                 resumed_response_ids=self.resumed_response_ids,
                 request_bridge_response=self.request_bridge_response,
             )
+            turn_generation = self.owner.output_generation
             if handled and (not semantic.get("revision")):
                 self.turn_state.routing = {
                     **self.turn_state.routing,
@@ -365,7 +356,7 @@ class TurnCoordinator:
                 work_ledger.set_turn_delivery(
                     turn_id, "completed", channel="speech-control"
                 )
-                if turn_sequence == self.owner.latest_input_sequence and (
+                if turn_sequence == self.owner.speech_floor_sequence and (
                     not self.ws.closed
                 ):
                     await self.ws.send_json(
@@ -415,7 +406,7 @@ class TurnCoordinator:
                 work_ledger.set_turn_delivery(
                     turn_id, "completed", channel="speech-control"
                 )
-                if turn_sequence == self.owner.latest_input_sequence and (
+                if turn_sequence == self.owner.speech_floor_sequence and (
                     not self.ws.closed
                 ):
                     await self.ws.send_json(
@@ -843,7 +834,7 @@ class TurnCoordinator:
                     and (not processing_runtime.task)
                     and (not semantic.get("taskControl"))
                     else None,
-                    deferred=turn_sequence < self.owner.latest_input_sequence,
+                    deferred=turn_sequence < self.owner.speech_floor_sequence,
                 )
             work_ledger.set_turn_status(turn_id, "completed")
             _bg_task_queue: list[
@@ -1017,8 +1008,9 @@ class TurnCoordinator:
             self.request_timeline_consolidation(self.owner)
         if not self.ws.closed:
             await self.ws.send_json({"type": "state", "state": state_payload})
-            if explicit:
-                await self.ws.send_json({"type": "interrupted"})
+            if explicit and turn_sequence == self.owner.speech_floor_sequence:
+                await self.ws.send_json({"type": "interrupted", "turnId": turn_id,
+                                         "generation": turn_generation})
         memory_response = result.get("memoryResponse") or {}
         server_memory_reply = (
             memory_response.get("message") if memory_response.get("requested") else None
@@ -1029,7 +1021,7 @@ class TurnCoordinator:
             and (self.owner.socket_token is self.socket_token)
             and (self.owner.epoch == self.connection_epoch)
             and (self.owner.output_generation == turn_generation)
-            and (turn_sequence == self.owner.latest_input_sequence)
+            and (turn_sequence == self.owner.speech_floor_sequence)
         ):
             response_id = f"memory-policy-{self.connection_epoch}-{turn_sequence}"
             self.harness.journal.append_message(
@@ -1078,7 +1070,7 @@ class TurnCoordinator:
         ):
             if primary_instruction:
                 self.answer_executor.interrupt(self.harness.journal, turn_id)
-            if turn_sequence < self.owner.latest_input_sequence:
+            if turn_sequence < self.owner.speech_floor_sequence:
                 self.session_trace(
                     "response.skipped.stale_user_turn",
                     "case-turn-worker",
@@ -1095,19 +1087,13 @@ class TurnCoordinator:
             and (self.owner.socket_token is self.socket_token)
             and (self.owner.epoch == self.connection_epoch)
             and (not self.ws.closed)
-            and (turn_sequence == self.owner.latest_input_sequence)
-            and (
-                not (
-                    hasattr(self.bridge(), "has_unresolved_user_input")
-                    and self.bridge().has_unresolved_user_input()
-                )
-            )
+            and (turn_sequence == self.owner.speech_floor_sequence)
         ):
             selection = self.turn_policy(self.session_runtime).select(
                 result["decision"]
             )
             await self.turn_progress(turn_id, "generating")
-            await self.admit_foreground_response(
+            await self.schedule_foreground_response(
                 turn_id=turn_id,
                 turn_sequence=turn_sequence,
                 generation=response_generation,
@@ -1156,30 +1142,13 @@ class TurnCoordinator:
                 )
         elif (
             result.get("control") != "stop-speaking"
-            and turn_sequence < self.owner.latest_input_sequence
+            and turn_sequence < self.owner.speech_floor_sequence
         ):
             work_ledger.set_turn_delivery(
                 turn_id, "interrupted", reason="newer-user-turn"
             )
             self.session_trace(
                 "response.skipped.stale_user_turn",
-                "case-turn-worker",
-                {
-                    "turnSequence": turn_sequence,
-                    "latestInputSequence": self.owner.latest_input_sequence,
-                },
-            )
-        elif (
-            result.get("control") != "stop-speaking"
-            and hasattr(self.bridge(), "has_unresolved_user_input")
-            and self.bridge().has_unresolved_user_input()
-        ):
-            work_ledger.set_turn_delivery(
-                turn_id, "interrupted", reason="unresolved-user-input"
-            )
-            self.answer_executor.interrupt(self.harness.journal, turn_id)
-            self.session_trace(
-                "response.skipped.unresolved_user_input",
                 "case-turn-worker",
                 {
                     "turnSequence": turn_sequence,
@@ -1204,6 +1173,51 @@ class TurnCoordinator:
                 "input": text,
             },
         )
+
+    def input_pending(self, sequence):
+        bridge = self.bridge()
+        return (any(value > sequence for value in self.owner.pending_semantic_sequences)
+                or (hasattr(bridge, "has_unresolved_user_input") and bridge.has_unresolved_user_input()))
+
+    async def schedule_foreground_response(self, **request):
+        """Keep a reply across a short overlapping utterance without blocking FIFO.
+
+        Classification can keep the floor (backchannel), or invalidate this waiter
+        (new question/stop). A bounded timeout leaves an auditable text fallback.
+        """
+        if not self.input_pending(request["turn_sequence"]):
+            if await self.admit_foreground_response(**request):
+                return True
+            if not self.input_pending(request["turn_sequence"]):
+                return False
+        turn_id = request["turn_id"]
+        await self.turn_progress(turn_id, "waiting-speech-gap")
+        async def wait_for_gap():
+            deadline = time.monotonic() + 8.0
+            reason = "speech-gap-timeout"
+            while time.monotonic() < deadline:
+                if (self.owner.socket_token is not self.socket_token or self.owner.epoch != self.connection_epoch
+                        or self.ws.closed):
+                    return
+                if (request["generation"] != self.owner.output_generation
+                        or request["turn_sequence"] != self.owner.speech_floor_sequence):
+                    reason = "semantic-floor-change"
+                    break
+                if not self.input_pending(request["turn_sequence"]):
+                    if await self.admit_foreground_response(**request):
+                        return
+                    reason = "output-not-admitted"
+                    break
+                await asyncio.sleep(0.04)
+            (self.owner.work_ledger or CaseWorkLedger(self.harness.journal)).set_turn_delivery(
+                turn_id, "interrupted", reason=reason)
+            self.answer_executor.interrupt(self.harness.journal, turn_id)
+            self.harness.journal.append("interaction.reply_deferred", {"turnId": turn_id, "reason": reason})
+            await self.turn_progress(turn_id, "text-fallback", reason=reason)
+        task = asyncio.create_task(wait_for_gap(), name=f"egoassist-speech-gap:{turn_id}")
+        self.owner.classification_tasks.add(task)
+        task.add_done_callback(self.owner.classification_tasks.discard)
+        return False
 
     async def admit_foreground_response(
         self,
@@ -1240,7 +1254,7 @@ class TurnCoordinator:
                     },
                 )
                 return False
-            if turn_sequence != self.owner.latest_input_sequence:
+            if turn_sequence != self.owner.speech_floor_sequence:
                 self.session_trace(
                     "response.skipped.stale_user_turn",
                     "output-admission-gate",
@@ -1251,21 +1265,22 @@ class TurnCoordinator:
                     },
                 )
                 return False
+            if output_mode == "audio" and (self.input_pending(turn_sequence)
+                    or not self.interaction_state.allows({"turnId": turn_id}, purpose)):
+                return False
             accepted_origin = {**origin, "generation": generation, "turnId": turn_id}
-            return bool(
-                self.request_bridge_response(
-                    self.bridge(),
-                    instructions,
-                    priority=priority,
-                    interrupt=interrupt,
-                    speech_policy=speech_policy,
-                    reason=reason,
-                    max_protection_ms=max_protection_ms,
-                    output_mode=output_mode,
-                    purpose=purpose,
-                    origin=accepted_origin,
-                )
+            dispatched = self.request_bridge_response(
+                self.bridge(), instructions, priority=priority, interrupt=interrupt,
+                speech_policy=speech_policy, reason=reason, max_protection_ms=max_protection_ms,
+                output_mode=output_mode, purpose=purpose, origin=accepted_origin,
             )
+            if dispatched is not False:
+                return True  # Legacy bridges return None after accepting.
+            bridge = self.bridge()
+            snapshot = bridge.scheduler_snapshot() if hasattr(bridge, "scheduler_snapshot") else {}
+            return any((row.get("origin") or {}).get("turnId") == turn_id
+                       and (row.get("origin") or {}).get("generation") == generation
+                       for row in snapshot.get("queued") or [])
 
     async def classify_with_retry_budget(self, text: str, turn_id: str) -> dict:
         started = time.perf_counter()
@@ -1365,6 +1380,8 @@ class TurnCoordinator:
                 "pause",
                 "cancel",
                 "uncertain",
+                "keep",
+                "wait",
             } or semantic.get("speechControl")
             if control_only and scene_task is not None:
                 scene_task.cancel()
@@ -1376,22 +1393,30 @@ class TurnCoordinator:
             from egoassist.realtime.interaction_controller import (
                 apply_interaction,
                 is_output_control,
+                select_speech_floor,
             )
 
             control_target = (semantic.get("interaction") or {}).get("targetTurnId")
             target_available = not control_target or control_target in answer_jobs(
                 self.harness.journal
             )
+            if semantic.get("status") == "classified" and target_available:
+                async with self.owner.mutation_lock:
+                    if self.owner.socket_token is self.socket_token and self.owner.epoch == self.connection_epoch:
+                        await select_speech_floor(semantic, turn_id, turn["sequence"],
+                            owner=self.owner, interaction_state=self.interaction_state,
+                            harness=self.harness, answer_executor=self.answer_executor,
+                            bridge=self.bridge(), emit=self.emit)
             if (
                 semantic.get("status") == "classified" and is_output_control(semantic)
                 and target_available
-                and (turn.get("sequence") == self.owner.latest_input_sequence)
+                and (turn.get("sequence") >= self.owner.speech_floor_sequence)
             ):
                 async with self.owner.mutation_lock:
                     if (
                         self.owner.socket_token is self.socket_token
                         and self.owner.epoch == self.connection_epoch
-                        and (turn.get("sequence") == self.owner.latest_input_sequence)
+                        and (turn.get("sequence") >= self.owner.speech_floor_sequence)
                     ):
                         handled, control = await apply_interaction(
                             semantic,
@@ -1699,6 +1724,11 @@ class TurnCoordinator:
             memory_candidates=memory_candidates,
             memory_vocabulary=vocabulary,
             active_task=project_task(task),
+            input_channel=turns.get(str(turn_id), {}).get("source"),
+            recent_interactions=[{"turnId": row.get("turnId"), "text": row.get("input"),
+                "interaction": (row.get("decision") or {}).get("interaction")}
+                for row in self.harness.journal.entries(types={"control_decision"}, tail=8)
+                if int(turns.get(row.get("turnId"), {}).get("sequence") or 0) < current_sequence][-4:],
         )
         preparation_ms = round((time.perf_counter() - preparation_started) * 1000, 1)
         result = await self.semantic_router.classify(text, catalog)

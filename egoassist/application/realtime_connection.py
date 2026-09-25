@@ -792,7 +792,6 @@ class RealtimeConnection:
         _do_enqueue_transcript = turns._do_enqueue_transcript
         _run_background_intent = turns._run_background_intent
         enqueue_persisted_turn = turns.enqueue_persisted_turn
-        mark_interrupted_turns = turns.mark_interrupted_turns
         turn_worker_loop = turns.turn_worker_loop
 
         _turn_accumulator = TurnAccumulator(
@@ -1108,6 +1107,8 @@ class RealtimeConnection:
                                     playedSamples=row["playedSamples"],
                                 )
                 elif kind == "vad_misfire":
+                    if getattr(bridge, "interaction_managed", False):
+                        continue  # VAD never stopped playback in semantic mode.
                     generation = owner.output_generation
 
                     async def recover_misfire(expected_generation=generation):
@@ -1163,7 +1164,6 @@ class RealtimeConnection:
                     owner.classification_tasks.add(task)
                     task.add_done_callback(owner.classification_tasks.discard)
                 elif kind == "speech_activity":
-                    interaction_state.pause()
                     if hasattr(bridge, "handle_user_speech_started"):
                         bridge.handle_user_speech_started(trigger="device-vad")
                 elif kind == "control":
@@ -1213,12 +1213,6 @@ class RealtimeConnection:
                         raise RuntimeError("case turn worker is not available")
                     owner.turn_sequence += 1
                     owner.latest_input_sequence = owner.turn_sequence
-                    owner.output_generation += 1
-                    interaction_state.pause()
-                    mark_interrupted_turns(ledger)
-                    ledger.suspend_before_sequence(
-                        owner.turn_sequence, reason="newer-explicit-control"
-                    )
                     captured = ledger.capture_turn(
                         transcript,
                         source="explicit-control",
