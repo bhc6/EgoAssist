@@ -681,17 +681,26 @@ class OmniBrowserBridge:
                         bridge._schedule({"type": "barge_in_policy", "action": barge_action})
                     attribution = bridge.attribute_input_transcript(transcript)
                     bridge._trace("audio.transcript.attributed", attribution)
-                    bridge._schedule({
+                    transcript_event = {
                         "type": "user_transcript",
                         "speaker": "unknown",
                         "channel": "input_audio_transcription",
                         "echoRisk": attribution["echoRisk"],
                         "text": transcript,
-                    })
+                    }
                     evidence_handler = getattr(bridge, "on_transcript_evidence", None)
                     if evidence_handler:
-                        bridge._schedule_callback(evidence_handler, transcript, segment)
+                        def accept_transcript():
+                            captured = evidence_handler(transcript, segment)
+                            if isinstance(captured, dict) and captured.get("turnId"):
+                                transcript_event.update(turnId=captured["turnId"],
+                                    timestamp=captured.get("timestamp"), persisted=True)
+                            bridge._schedule(transcript_event)
+                        # Publish the canonical journal identity after capture, before
+                        # waiting on routing or answers. Never deduplicate by wording.
+                        bridge._schedule_callback(accept_transcript)
                     else:
+                        bridge._schedule(transcript_event)
                         bridge._schedule_callback(bridge.on_transcript, transcript)
                 elif event_type in {"response.audio_transcript.delta", "response.audio_transcript.done"}:
                     bridge.route_provider_output(event_type, response)

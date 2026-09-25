@@ -89,7 +89,7 @@ class TurnCoordinator:
                 )
                 self.answer_executor.interrupt(self.harness.journal, delivery["turnId"])
 
-    def _do_enqueue_transcript(self, text: str, segment=None) -> None:
+    def _do_enqueue_transcript(self, text: str, segment=None) -> dict:
         """Enqueue one complete (already-accumulated) utterance."""
         self.owner.turn_sequence += 1
         self.owner.latest_input_sequence = self.owner.turn_sequence
@@ -107,6 +107,7 @@ class TurnCoordinator:
             self.owner.scene.capture(captured["turnId"], segment=segment)
         ledger.set_turn_delivery(captured["turnId"], "received")
         self.enqueue_persisted_turn(captured)
+        return captured
 
     def refill_turn_queue(self) -> None:
         queue = self.owner.turn_queue

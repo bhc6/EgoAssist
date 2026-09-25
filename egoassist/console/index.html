@@ -90,7 +90,7 @@
           <article id="assistantCaption"><span>助手回复</span><p>可以直接输入，无需开启设备。</p></article>
         </div>
         <h2 class="history-heading">对话记录</h2>
-        <p><button id="olderConversation" type="button" hidden>加载更早记录</button> <small id="conversationCount"></small></p>
+        <p><button id="olderConversation" type="button" hidden>加载更早记录</button> <button id="latestConversation" type="button" hidden>回到最新</button> <small id="conversationCount"></small></p>
         <p id="conversationError" role="status"></p>
         <div id="turnHistory" aria-label="对话记录，可加载更早消息" tabindex="0"></div>
         <details><summary>最近问题的处理状态</summary><div id="turnWorkHistory"></div></details>
@@ -297,6 +297,6 @@
   <script src="tool_activity.js?v=20260910"></script>
   <script src="ambient.js?v=20260925-controls"></script>
   <script src="app.js?v=20260925-controls"></script>
-  <script src="conversation_history.js?v=20260918"></script>
+  <script src="conversation_history.js?v=20260925-live-history"></script>
 </body>
 </html>

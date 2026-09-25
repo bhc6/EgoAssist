@@ -10,6 +10,48 @@ from egoassist.realtime.work_ledger import CaseWorkLedger
 from run_egoassist import create_app
 
 
+def test_voice_receipt_uses_persisted_turn_identity_before_routing(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from egoassist.realtime.omni import OmniBrowserBridge
+    from egoassist.realtime.turn_coordinator import TurnCoordinator
+    monkeypatch.setenv('EGOASSIST_REALTIME_BACKEND', 'omni')
+
+    async def run():
+        journal = SessionJournal(tmp_path/'voice.jsonl')
+        ledger = CaseWorkLedger(journal)
+        coordinator = TurnCoordinator.__new__(TurnCoordinator)
+        coordinator.owner = SimpleNamespace(turn_sequence=0, latest_input_sequence=0,
+            output_generation=0, work_ledger=ledger, scene=SimpleNamespace(capture=lambda *a,**k:None))
+        coordinator.harness = SimpleNamespace(journal=journal)
+        coordinator.interaction_state = SimpleNamespace(pause=lambda:None)
+        coordinator.mark_interrupted_turns = lambda _ledger:None
+        queued = []
+        coordinator.enqueue_persisted_turn = queued.append
+        emitted = []
+        async def emit(event):
+            if event['type']=='user_transcript':
+                saved = conversation_page(journal)['messages']
+                assert any(row['id']=='user:'+event['turnId'] for row in saved)
+                emitted.append(event)
+        bridge = OmniBrowserBridge('unused','unused','Ethan','test',emit,lambda _:None)
+        bridge.on_transcript_evidence = lambda text,segment: coordinator._do_enqueue_transcript(text,segment=segment)
+        bridge.handle_user_speech_started = lambda **kwargs:None
+        bridge._input_segment_transcribed = lambda *args:{}
+        callback = bridge._Callback(bridge._dialogue_generation)
+        # Identical spoken words are distinct turns, not text-based duplicates.
+        for _ in range(2):
+            callback.on_event({'type':'conversation.item.input_audio_transcription.completed','transcript':'你好'})
+        async with asyncio.timeout(2):
+            while len(emitted)<2:
+                await asyncio.sleep(.001)
+        assert len(queued)==2 and len({e['turnId'] for e in emitted})==2
+        assert all(e['persisted'] and e['timestamp'] and e['text']=='你好' for e in emitted)
+        assert [e['turnId'] for e in emitted]==[r['turnId'] for r in queued]
+        assert conversation_page(SessionJournal(journal.path))['total']==2
+        await bridge.close()
+    asyncio.run(run())
+
+
 def test_history_keeps_all_turns_partial_and_standalone_answers_across_restart(tmp_path):
     path = tmp_path / 'history.jsonl'
     journal = SessionJournal(path)

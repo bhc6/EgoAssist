@@ -2,21 +2,28 @@
 (() => {
   let scope = null, rows = new Map(), live = new Map(), total = 0, cursor = null;
   let busy = false, epoch = 0, wanted = 50;
+  let following = true, unseen = new Set(), displayed = new Set();
   const panel = document.querySelector('#turnHistory');
   const older = document.querySelector('#olderConversation');
+  const latest = document.querySelector('#latestConversation');
   const count = document.querySelector('#conversationCount');
   const error = document.querySelector('#conversationError');
   function reset(next) {
     scope = next; epoch++; busy = false; wanted = 50;
     rows = new Map(); live = new Map(); total = 0; cursor = null;
+    following = true; unseen = new Set(); displayed = new Set(); latest.hidden = true;
     panel.replaceChildren(); count.textContent = ''; error.textContent = ''; older.hidden = true;
   }
   function draw(prepend = false) {
-    const follow = panel.scrollHeight - panel.scrollTop - panel.clientHeight < 48;
     const top = panel.scrollTop, height = panel.scrollHeight;
     const labels = {interrupted: '已中断 · 已生成片段，不代表全部播出', streaming: '正在生成',
       generated: '已生成 · 等待保存记录', received: '已接收 · 等待加载记录', completed: '已保存'};
     const messages = [...rows.values(), ...[...live.values()].filter(row => !rows.has(row.id))];
+    if (!following && !prepend) for (const row of messages) {
+      if (!displayed.has(row.id)) unseen.add(row.id);
+    }
+    displayed = new Set(messages.map(row => row.id));
+    for (const id of unseen) if (!displayed.has(id)) unseen.delete(id);
     const html = messages.map(row => "<div class='turn-history-row' data-message-id='" + esc(row.id) +
       "' data-turn-id='" + esc(row.turnId || '') + "'><small>" +
       esc(row.role === 'assistant' ? (row.source === 'background-text' ? '助手 · 后台补全' : '助手') :
@@ -27,11 +34,28 @@
         "'>查看处理记录</button>" : '') + '</div>').join('');
     if (panel.innerHTML !== html) {
       panel.innerHTML = html;
-      panel.scrollTop = prepend ? top + panel.scrollHeight - height : follow ? panel.scrollHeight : top;
+      panel.scrollTop = prepend ? top + panel.scrollHeight - height : following ? panel.scrollHeight : top;
     }
     count.textContent = '已加载 ' + rows.size + ' / ' + total + ' 条已保存消息' + (live.size ? ' · 有实时内容' : '');
     older.hidden = !cursor; older.disabled = busy;
+    updateLatest();
   }
+  function updateLatest() {
+    latest.hidden = following;
+    latest.textContent = unseen.size ? unseen.size + ' 条新消息 · 回到最新' : '回到最新';
+  }
+  function showLatest() {
+    following = true; unseen.clear(); panel.scrollTop = panel.scrollHeight; updateLatest();
+  }
+  panel.addEventListener('scroll', () => {
+    if (!panel.getClientRects().length) return;
+    following = panel.scrollHeight - panel.scrollTop - panel.clientHeight < 48;
+    if (following) unseen.clear();
+    updateLatest();
+  });
+  latest.onclick = showLatest;
+  // A hidden workspace cannot be scrolled; finish following when it becomes visible.
+  new ResizeObserver(() => { if (following && panel.clientHeight) showLatest(); }).observe(panel);
   async function refresh(more = false) {
     const next = currentUser && selectedSessionId ? currentUser.id + '/' + selectedSessionId : null;
     if (scope !== next) reset(next);
@@ -68,9 +92,12 @@
     if (scope !== next) reset(next);
     if (!scope) return;
     if (message.type === 'user_transcript' && message.turnId) {
+      if (message.channel === 'explicit_control') showLatest();
       const id = 'user:' + message.turnId;
-      live.set(id, {id, role: 'user', turnId: message.turnId, text: message.text, status: 'received',
-        source: message.channel === 'explicit_control' ? 'explicit-control' : 'input-audio-transcript', timestamp: new Date().toISOString()});
+      live.set(id, {id, role: 'user', turnId: message.turnId, text: message.text,
+        status: message.persisted ? 'completed' : 'received',
+        source: message.channel === 'explicit_control' ? 'explicit-control' : 'input-audio-transcript',
+        timestamp: message.timestamp || new Date().toISOString()});
       draw();
     } else if (message.type === 'assistant_transcript' && message.responseId && ['conversation', 'proactive-utterance'].includes(message.purpose)) {
       const id = 'assistant:' + message.responseId, previous = live.get(id);

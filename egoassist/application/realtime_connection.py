@@ -813,7 +813,7 @@ class RealtimeConnection:
                         **segment,
                         "generation": f"{connection_epoch}:{segment.get('generation')}",
                     }
-                _do_enqueue_transcript(str(text).strip(), segment=segment)
+                return _do_enqueue_transcript(str(text).strip(), segment=segment)
 
         def proactive_interval_for() -> float:
             """Task checks have their own cadence, independent of ambient sampling."""
