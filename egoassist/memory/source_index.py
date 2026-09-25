@@ -118,7 +118,7 @@ class SourceIndex:
             if not valid:
                 db.execute('DELETE FROM snapshots WHERE id=?', (row['id'],))
 
-    def search(self, question, session, *, limit=12, budget=24000, exclude=()):
+    def search(self, question, session, *, limit=12, budget=24000, exclude=(), recent_budget=8000, recent_limit=8):
         started = time.perf_counter()
         self.sync()
         terms = tokens(question)[:64]
@@ -157,8 +157,8 @@ class SourceIndex:
                 for adjacent in db.execute('SELECT * FROM events WHERE session=? AND seq BETWEEN ? AND ? ORDER BY seq', (session, row['seq']-1, row['seq']+1)):
                     if adjacent['id'] != row['id']:
                         add(adjacent, 0, min(1800, len(json.loads(adjacent['body'])['text'])), 'adjacent-turn')
-            recent, remaining = [], 8000
-            for row in db.execute('SELECT * FROM events WHERE session=? ORDER BY seq DESC LIMIT 8', (session,)):
+            recent, remaining = [], recent_budget
+            for row in db.execute('SELECT * FROM events WHERE session=? ORDER BY seq DESC LIMIT ?', (session, recent_limit)):
                 if row['id'] in exclude:
                     continue
                 source = json.loads(row['body']); text = source['text'][:min(1800, remaining)]
@@ -173,6 +173,7 @@ class SourceIndex:
                 'coverage': {'sourceEvents': corpus, 'matchingPassages': total, 'candidatePassages': len(matches),
                     'candidateLimit': 256, 'candidateTruncated': total > len(matches), 'selectedPassages': len(selected),
                     'characters': used, 'characterBudget': budget, 'scope': 'case', 'extractionRequired': False,
+                    'anchorLimit': limit, 'recentCharacterBudget': recent_budget, 'recentLimit': recent_limit,
                     'vector': 'not-enabled', 'expansion': 'one-neighbor-per-side'},
                 'audit': audit, 'missingInformation': ['Lexical retrieval is not a completeness guarantee; unexamined evidence may exist.'],
                 'retrievalMs': round((time.perf_counter()-started)*1000, 3)}

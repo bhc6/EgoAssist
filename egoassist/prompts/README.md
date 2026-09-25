@@ -5,6 +5,8 @@
 | 文件 | 用途 |
 | --- | --- |
 | `router_protocol.json` | 单次语义路由，记忆写入/查询候选、Skill 和任务控制 |
+| `decisions_research.json` | OpenRouter Decisions 离线实验：说话对象、声音/任务控制、记忆意图和提醒请求；不接管实时动作 |
+| `decisions_router.json` | JEV 优先路由：有限分类、保存范围、Skill/答案目标和独立控制复核；复杂内容按需交给 Qwen 提取，见 [实测](../../docs/JEV_FIRST_ROUTER_2026-09-25.md) |
 | `interaction.json` | 对话对象、输出权限、取消核验、原答续播与播放证据约束 |
 | `answer_completion.json` | 原问题后台文字补答，不重复工具操作 |
 | `run_egoassist.json` | 每轮回复的证据、执行回执、任务和范围约束 |

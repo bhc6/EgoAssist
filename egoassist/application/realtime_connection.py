@@ -16,6 +16,7 @@ from egoassist.realtime import (
     livekit_capability,
 )
 from egoassist.realtime.episodes import RealtimeEpisodeMemory
+from egoassist.realtime.decisions_router import DECISIONS_SESSION, create_turn_router
 from egoassist.realtime.media_audit import MediaAuditAccumulator
 from egoassist.realtime.observation_service import ObservationService
 from egoassist.realtime.observation_interaction import ObservationInteraction
@@ -263,7 +264,9 @@ class RealtimeConnection:
                 "evidence": [],
             }
             session_media_configuration: dict = {"audio": {}, "video": {}}
-            semantic_router = SemanticTurnRouter(api_key)
+            shared_http = request.app.get(DECISIONS_SESSION)
+            semantic_router = create_turn_router(api_key, **({"decisions_session": shared_http}
+                if shared_http is not None else {}))
             if owner.memory_bus:
                 owner.memory_bus.set_ws_emitter(emit, asyncio.get_event_loop())
             initial_context = harness.build(self.harness_layers(session_runtime))

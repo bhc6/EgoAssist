@@ -46,6 +46,15 @@ def compact_audit_payload(kind: str, payload: dict) -> dict:
             decision["sourceSceneAvailable"] = True
             value["decision"] = decision
         metrics = dict(decision.get("requestMetrics") or {})
+        if isinstance(metrics.get("decisions"), dict):
+            audit = dict(metrics["decisions"])
+            audit.pop("request", None)
+            audit.pop("rawResponse", None)
+            audit.pop("structuredRawOutput", None)
+            audit["fullRequestAvailable"] = True
+            metrics["decisions"] = audit
+            decision["requestMetrics"] = metrics
+            value["decision"] = decision
         if "messages" in metrics:
             metrics.pop("messages")
             metrics["messagesAvailable"] = True
@@ -54,6 +63,8 @@ def compact_audit_payload(kind: str, payload: dict) -> dict:
         if isinstance(metrics.get("cancellationCheck"), dict):
             check = dict(metrics["cancellationCheck"])
             check.pop("messages", None)
+            check.pop("request", None)
+            check.pop("rawResponse", None)
             check["messagesAvailable"] = True
             metrics["cancellationCheck"] = check
             decision["requestMetrics"] = metrics
@@ -61,6 +72,8 @@ def compact_audit_payload(kind: str, payload: dict) -> dict:
         if isinstance(metrics.get("taskControlCheck"), dict):
             check = dict(metrics["taskControlCheck"])
             check.pop("messages", None)
+            check.pop("request", None)
+            check.pop("rawResponse", None)
             check["messagesAvailable"] = True
             metrics["taskControlCheck"] = check
             decision["requestMetrics"] = metrics

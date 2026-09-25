@@ -270,7 +270,7 @@ def create_app(
             saved = next(
                 (
                     e["settings"]
-                    for e in reversed(owner.journal.entries())
+                    for e in reversed(owner.journal.entries(types={"ambient.settings"}, tail=1))
                     if e.get("type") == "ambient.settings"
                 ),
                 {},
@@ -307,7 +307,7 @@ def create_app(
         previous = next(
             (
                 e
-                for e in reversed(owner.journal.entries())
+                for e in reversed(owner.journal.entries(types={"ambient_observation"}))
                 if e.get("type") == "ambient_observation"
                 and e.get("status") == "accepted"
             ),
@@ -686,7 +686,7 @@ def create_app(
         checkpoint = checkpoint_override or next(
             (
                 entry.get("state")
-                for entry in reversed(journal.entries())
+                for entry in reversed(journal.entries(types={"state_checkpoint"}, tail=1))
                 if entry.get("type") == "state_checkpoint"
             ),
             None,
@@ -824,7 +824,7 @@ def create_app(
         active_runtime = session_runtime_from(journal, seed)
         audit = [
             dict(entry["audit"])
-            for entry in journal.entries()
+            for entry in journal.entries(types={"tool_audit"})
             if entry.get("type") == "tool_audit"
             and isinstance(entry.get("audit"), dict)
         ]
@@ -891,7 +891,7 @@ def create_app(
         return next(
             (
                 dict(entry["routing"])
-                for entry in reversed(journal.entries())
+                for entry in reversed(journal.entries(types={"routing_decision"}))
                 if entry.get("type") == "routing_decision"
                 and isinstance(entry.get("routing"), dict)
             ),
@@ -2027,7 +2027,7 @@ def create_app(
         if any(
             e.get("callId") == call_id
             and e.get("type") in {"tool_result", "tool_execution"}
-            for e in owner.journal.entries()
+            for e in owner.journal.entries(types={"tool_result", "tool_execution"})
         ):
             return
         if call_id not in owner.journal.pending_tool_confirmations():
@@ -2556,6 +2556,8 @@ def create_app(
         _stateprojection.diary_status = diary_service.status
 
     from egoassist.application.history_api import mount as mount_history
+    from egoassist.realtime.decisions_router import decisions_http_context
+    app.cleanup_ctx.append(decisions_http_context)
     app.cleanup_ctx.append(app_memory_reads_context)
     mount_history(app, identity=identity, user_key=user_key,
                   journal_for=lambda uid, sid: SessionJournal.open_in(user_memory_root / uid / 'sessions', sid),

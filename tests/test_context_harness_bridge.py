@@ -77,6 +77,27 @@ def harness_at(path):
     )
 
 
+def test_text_replay_includes_shared_timestamp_policy_once(tmp_path):
+    from types import SimpleNamespace
+    from egoassist.memory.grounding import HISTORY_STATEMENT_POLICY
+    harness = harness_at(tmp_path / 'text.jsonl')
+    harness.record_user('Yesterday I finished.', source='test')
+    bridge = make_bridge(harness)
+    conversation = Conversation()
+    conversation.item_ids = set()
+    conversation.model = 'test-text'
+    bridge._text_conversation = conversation
+    request = SimpleNamespace(sequence=1, purpose='conversation', output_mode='text',
+                              instructions='Answer current question.', origin={})
+    bridge._inflight_response = request
+    bridge._start_text_response(request)
+    assert conversation.sessions[-1]['instructions'].count(HISTORY_STATEMENT_POLICY) == 1
+    text = conversation.items[0]['content'][0]['text']
+    assert text.startswith('[recordedAt=') and 'Yesterday I finished.' in text
+    assert 'relative dates and pronouns' not in text
+    assert conversation.responses[-1]['instructions'] == request.instructions
+
+
 @pytest.mark.parametrize("mode", ["batch", "budget", "identity-reuse", "timeout", "cancel", "close-executing", "receipted", "no-tools", "proactive"])
 def test_async_tool_loop_lifecycle(tmp_path, monkeypatch, mode):
     if mode == "budget":

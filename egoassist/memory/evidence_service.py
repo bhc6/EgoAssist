@@ -56,11 +56,11 @@ class EvidenceService:
             row['indexed'] = True
         return {'events': accepted, 'status': 'indexed'}
 
-    def query(self, user, session, question, *, exclude=(), snapshot_id=None):
+    def query(self, user, session, question, *, exclude=(), snapshot_id=None, **search_options):
         if not isinstance(question, str) or not 1 <= len(question.strip()) <= 10000:
             raise ValueError('question must contain 1 to 10000 characters')
         index = self.index(user)
-        return index.snapshot(snapshot_id, session, question) if snapshot_id else index.search(question, session, exclude=exclude)
+        return index.snapshot(snapshot_id, session, question) if snapshot_id else index.search(question, session, exclude=exclude, **search_options)
 
     async def run_read(self, user, read, *, timeout):
         if self.closed or user in self.paused or len(self.readers) >= 4 or user in self.readers.values():

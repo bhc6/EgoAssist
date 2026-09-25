@@ -170,7 +170,7 @@ async def verify(output, real_turn=False):
                     await page.reload()
                     await page.locator('#authGate').wait_for(state='hidden')
                     await page.wait_for_function('id => state?.workLedger?.turnInbox.some(t => t.turnId === id && t.answer?.status === "completed")', arg=old_turn, timeout=45000)
-                    answer_row = page.locator('[data-turn-id="' + old_turn + '"]')
+                    answer_row = page.locator('#turnWorkHistory [data-turn-id="' + old_turn + '"]')
                     assert '56' in await answer_row.locator('.completed-answer').text_content()
                     report['automaticAnswerAfterReload'] = await page.evaluate('id => state.workLedger.turnInbox.find(t => t.turnId === id).answer', old_turn)
                     assert report['automaticAnswerAfterReload']['providerRequestId']
@@ -181,7 +181,8 @@ async def verify(output, real_turn=False):
                     await page.wait_for_function('id => currentTurnId === id && captionResponseId && state.performance.metrics.responseFirstAudioMs?.responseId === captionResponseId', arg=cancelled_turn, timeout=45000)
                     await page.locator('#textTurnInput').fill('另外一个独立问题：三乘三是多少？')
                     await page.locator('#textTurnSend').click()
-                    await page.locator('[data-answer-action="cancel"][data-answer-turn="' + cancelled_turn + '"]').click(timeout=15000)
+                    await page.locator('#turnWorkHistory').evaluate('(node) => { node.closest("details").open = true; }')
+                    await page.locator('#turnWorkHistory [data-answer-action="cancel"][data-answer-turn="' + cancelled_turn + '"]').click(timeout=15000)
                     await page.reload()
                     await page.locator('#authGate').wait_for(state='hidden')
                     await page.wait_for_function('id => state?.workLedger?.turnInbox.some(t => t.turnId === id && t.answer?.status === "cancelled")', arg=cancelled_turn, timeout=15000)

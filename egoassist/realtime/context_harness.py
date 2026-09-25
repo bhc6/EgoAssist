@@ -80,6 +80,7 @@ class ContextHarness:
         self.on_compact = on_compact
         self._lock = threading.RLock()
         self._last_manifest: dict[str, Any] = {}
+        self._replay_layers = ()
 
     @property
     def session_id(self) -> str:
@@ -376,6 +377,8 @@ class ContextHarness:
 
     def build(self, layers: Iterable[ContextLayer | Mapping[str, Any]]) -> dict[str, Any]:
         with self._lock:
+            layers = tuple(layers)
+            self._replay_layers = layers
             normalized = sorted(
                 self._normalize_layers(layers),
                 key=lambda item: (not item.required, -item.priority, item.name),
@@ -471,8 +474,10 @@ class ContextHarness:
             self._last_manifest = manifest
             return {"system": system_text, "messages": messages, "manifest": manifest}
 
-    def provider_replay_items(self) -> list[dict[str, Any]]:
-        messages, _ = self._context_messages()
+    def provider_replay_items(self, *, compact_timestamps: bool = False) -> list[dict[str, Any]]:
+        # Replay the budgeted view, not the unbounded raw projection. A large
+        # retained message can survive compaction while build excludes it.
+        messages = self.build(self._replay_layers)["messages"]
         items = []
         for message in messages:
             role = message["role"]
@@ -481,7 +486,8 @@ class ContextHarness:
                 "id": "item_" + uuid4().hex,
                 "type": "message",
                 "role": role,
-                "content": [{"type": content_type, "text": dated_statement(message["content"], message.get("recordedAt"))}],
+                "content": [{"type": content_type, "text": dated_statement(
+                    message["content"], message.get("recordedAt"), compact=compact_timestamps)}],
             })
         return items
 

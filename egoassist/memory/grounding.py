@@ -87,7 +87,17 @@ def project_card(card: dict[str, Any]) -> dict[str, Any]:
     return card
 
 
-def dated_statement(text: str, timestamp: str | None) -> str:
+HISTORY_STATEMENT_POLICY = (
+    "Each replayed message is a historical statement labeled with its original recordedAt. "
+    "Relative dates and pronouns belong to that source turn, not the current turn. "
+    "If its original local date or referent cannot be determined, keep it unknown."
+)
+
+
+def dated_statement(text: str, timestamp: str | None, *, compact: bool = False) -> str:
+    if compact:
+        # Caller must supply HISTORY_STATEMENT_POLICY once as system context.
+        return f"[recordedAt={timestamp or 'unknown time'}]\n" + text
     return (f"[Historical statement recorded at {timestamp or 'unknown time'}; "
             "relative dates and pronouns belong to this source turn, not the current turn. "
             "If its original local date or referent cannot be determined, keep it unknown.]\n" + text)

@@ -3,6 +3,7 @@ import argparse
 import asyncio
 import base64
 import json
+import os
 from pathlib import Path
 import sys
 
@@ -72,12 +73,19 @@ async def verify(output, local_vad=False):
                             stopEvidence.localPlayingSources = playbackSources.size;
                         };
                     }""", base64.b64encode(pcm).decode())
-                data = pcm + bytes(32000)
+                # A real microphone keeps streaming silence. The fixture must
+                # exceed the configured provider endpointing window as well.
+                silence_ms = max(2000, int(os.getenv("EGOASSIST_SPEECH_END_SILENCE_MS", "1200")) + 1000)
+                report["fixtureTailSilenceMs"] = silence_ms
+                data = pcm + bytes(silence_ms * 32)
                 for offset in range(0, len(data), 3200):
                     await page.evaluate("audio => socket.send(JSON.stringify({type:'audio', audio}))",
                                         base64.b64encode(data[offset:offset + 3200]).decode())
                     await asyncio.sleep(0.1)
-                await page.wait_for_function("stopEvidence.events.some(e => e.type === 'speech_control')", timeout=30000)
+                try:
+                    await page.wait_for_function("stopEvidence.events.some(e => e.type === 'speech_control')", timeout=30000)
+                finally:
+                    report["playback"] = await page.evaluate("stopEvidence")
                 report["playback"] = await page.evaluate("stopEvidence")
                 onset = next(e for e in report["playback"]["events"] if e.get("trigger") == "provider-speech-started")
                 assert onset["playingSources"] == 0, onset

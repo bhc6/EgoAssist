@@ -23,8 +23,29 @@ def answer_context(packet):
     return context
 
 
+def provider_evidence_context(packet):
+    """Keep source meaning and citations; omit storage/index bookkeeping on wire."""
+    context = answer_context(packet)
+    internal = {'journalEventId', 'sourceHash', 'extractionStatus',
+                'vectorStatus', 'timeAnnotationVersion'}
+    boundaries = []
+    for key in ('sources', 'conversation'):
+        rows = []
+        for source in context[key]:
+            value = {k: v for k, v in source.items() if k not in internal}
+            boundary = value.pop('timeExpressionBoundary', None)
+            if boundary and boundary not in boundaries:
+                boundaries.append(boundary)
+            rows.append(value)
+        context[key] = rows
+    if boundaries:
+        context['timeExpressionBoundaries'] = boundaries
+    return context
+
+
 def evidence_instructions(packet):
-    return prompt_text('evidence_answer/boundary') + '\nEVIDENCE_PACKAGE_JSON:\n' + json.dumps(answer_context(packet), ensure_ascii=False)
+    return prompt_text('evidence_answer/boundary') + '\nEVIDENCE_PACKAGE_JSON:\n' + json.dumps(
+        provider_evidence_context(packet), ensure_ascii=False, separators=(',', ':'))
 
 
 def turn_answer_context(question, result, *, clock, runtime, shared_scene):

@@ -281,9 +281,9 @@ class CaseWorkLedger:
             "intentId": str(intent_id), "status": status, "detail": dict(detail or {}),
         })
 
-    def intents(self) -> dict[str, dict[str, Any]]:
+    def intents(self, *, limit=None) -> dict[str, dict[str, Any]]:
         values = _latest_by_id(
-            self.journal, "intent_envelope", "intent_state", "intentId",
+            self.journal, "intent_envelope", "intent_state", "intentId", limit=limit,
         )
         for item in values.values():
             initial_turn = str(item.get("turnId", ""))
@@ -444,8 +444,8 @@ class CaseWorkLedger:
             "jobId": str(job_id), "status": status, "detail": dict(detail or {}),
         })
 
-    def jobs(self) -> dict[str, dict[str, Any]]:
-        return _latest_by_id(self.journal, "job_ledger", "job_state", "jobId")
+    def jobs(self, *, limit=None) -> dict[str, dict[str, Any]]:
+        return _latest_by_id(self.journal, "job_ledger", "job_state", "jobId", limit=limit)
 
     def cancel_job(self, job_id: str, *, reason: str = "explicit-user-cancel") -> dict[str, Any]:
         job = self.jobs().get(str(job_id))
@@ -551,9 +551,9 @@ class CaseWorkLedger:
             return result
         return self.set_result_status(result_id, "discarded", detail={"reason": str(reason)})
 
-    def results(self) -> dict[str, dict[str, Any]]:
+    def results(self, *, limit=None) -> dict[str, dict[str, Any]]:
         return _latest_by_id(
-            self.journal, "result_inbox", "result_delivery", "resultId",
+            self.journal, "result_inbox", "result_delivery", "resultId", limit=limit,
         )
 
     def pending_results(self) -> list[dict[str, Any]]:
@@ -597,7 +597,7 @@ class CaseWorkLedger:
                 recovered += 1
         return recovered
 
-    def snapshot(self, *, limit=None) -> dict[str, Any]:
+    def snapshot(self, *, limit=None, work_limit=None) -> dict[str, Any]:
         turns = self.turns(limit=limit)
         def initial():
             return {name: {} for name in ("answers", "deliveries", "completed_text", "decisions", "responses", "response_turns")}
@@ -663,10 +663,10 @@ class CaseWorkLedger:
             "turnInbox": [{**turn, "delivery": deliveries.get(turn["turnId"]), "answer": answers.get(turn["turnId"]),
                            "semantic": decisions.get(turn["turnId"])}
                           for turn in turns.values()],
-            "intents": list(self.intents().values()),
+            "intents": list(self.intents(limit=work_limit).values()),
             "foregroundIntentId": self.foreground_intent_id(),
-            "jobs": list(self.jobs().values()),
-            "resultInbox": list(self.results().values()),
+            "jobs": list(self.jobs(limit=work_limit).values()),
+            "resultInbox": list(self.results(limit=work_limit).values()),
         }
 
     def set_turn_delivery(self, turn_id: str, status: str, **details) -> dict:

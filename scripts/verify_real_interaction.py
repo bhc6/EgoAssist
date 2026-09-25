@@ -62,7 +62,10 @@ async def verify(output):
                 await until(lambda e: e.get("type") == "audio" and e.get("origin", {}).get("turnId") == original)
                 if case in {"text-continuation", "speech-resume"}:
                     control = await send("别念出来，继续整理好后放到屏幕上。")
-                    await until(lambda e: e.get("type") == "speech_control" and e.get("turnId") == control)
+                    event = await until(lambda e: e.get("type") == "speech_control" and e.get("turnId") == control)
+                    assert event.get("interaction", {}).get("action") == "resume", event
+                    assert event["interaction"].get("targetTurnId") == original, event
+                    assert event["interaction"].get("output") == "text", event
                     async with asyncio.timeout(60):
                         while True:
                             state = await (await client.get("/api/state", params={"session": sid})).json()
@@ -88,7 +91,9 @@ async def verify(output):
                     newer = await send("另外一个独立问题，请详细解释光合作用，至少讲二十句话。")
                     await until(lambda e: e.get("type") == "audio" and e.get("origin", {}).get("turnId") == newer)
                     control = await send("七乘八和乘法原理那个旧问题我不需要答案了，请取消那个答案。光合作用的问题要保留，但先别念。")
-                    await until(lambda e: e.get("type") == "speech_control" and e.get("turnId") == control)
+                    event = await until(lambda e: e.get("type") == "speech_control" and e.get("turnId") == control)
+                    assert event.get("action") == "cancel-answer", event
+                    assert event.get("interaction", {}).get("targetTurnId") == original, event
                     state = await (await client.get("/api/state", params={"session": sid})).json()
                     answers = {t["turnId"]: t.get("answer") for t in state["workLedger"]["turnInbox"]}
                     assert answers[original]["status"] == "cancelled", answers

@@ -53,14 +53,14 @@ class InteractionState:
 
     def __init__(self, journal):
         self.journal = journal
-        saved = [r for r in journal.entries() if r.get("type") == "interaction.permission"]
+        saved = journal.entries(types={"interaction.permission"}, tail=1)
         self.permission = dict(saved[-1]) if saved else {}
-        holds = [r for r in journal.entries() if r.get("type") == "interaction.hold"]
+        holds = journal.entries(types={"interaction.hold"}, tail=1)
         self.paused = bool(holds and holds[-1].get("paused"))
         self.grants = set()
         self.responses = {}
         self.selected_response = None
-        history = [r for r in journal.entries() if r.get("type") == "interaction.playback"]
+        history = journal.entries(types={"interaction.playback"}, tail=1)
         self.last_progress = dict(history[-1]) if history else None
         self.max_samples = int(float(os.getenv("EGOASSIST_PLAYBACK_CACHE_SECONDS", "90")) * 24000)
 

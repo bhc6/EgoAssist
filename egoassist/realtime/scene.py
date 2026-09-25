@@ -49,7 +49,7 @@ class SharedScene:
         self.audio_device_clock = deque(maxlen=2400)
         self.speakers = SpeakerRegistry(journal)
         self.events = LongEvents(journal, api_key)
-        self.turns = {r["turnId"]: r for r in journal.entries() if r.get("type") == "scene.turn"}
+        self.turns = {r["turnId"]: r for r in journal.entries(types={"scene.turn"})}
         self.last_vision = None
         self.observations = deque(maxlen=64)
         self.vision_task = None
@@ -65,7 +65,7 @@ class SharedScene:
         self._http = None
         self.asr = asr_settings()
         self.transcription_limit = asyncio.Semaphore(self.asr["concurrency"])
-        for row in journal.entries():
+        for row in journal.entries(types={"ambient_observation", "observation.review", "scene.result"}):
             if row.get("type") == "ambient_observation" and row.get("status") == "accepted":
                 self.ingest_observation(row)
             if row.get("type") == "observation.review":

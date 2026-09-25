@@ -5,6 +5,16 @@ import gc
 import shutil
 from uuid import uuid4
 
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def isolated_turn_router_backend(monkeypatch):
+    # App tests replace SemanticTurnRouter with deterministic responses. An
+    # earlier test may load the developer's .env; never let its live provider
+    # selection change those test doubles. Backend tests override explicitly.
+    monkeypatch.setenv("EGOASSIST_TURN_ROUTER_BACKEND", "qwen")
+
 
 def pytest_configure(config):
     if config.option.basetemp is None:

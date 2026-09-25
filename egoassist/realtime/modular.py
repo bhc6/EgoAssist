@@ -21,6 +21,8 @@ import aiohttp
 
 from egoassist.core.settings import integer, number
 
+TTS_URL = "wss://dashscope.aliyuncs.com/api-ws/v1/realtime"
+
 
 class Modalities:
     AUDIO = "audio"
@@ -45,6 +47,7 @@ def settings():
         "maxAudioSeconds": integer("EGOASSIST_MODULAR_MAX_AUDIO_SECONDS", 20, minimum=1, maximum=30),
         "asrQueue": integer("EGOASSIST_MODULAR_ASR_QUEUE", 4, maximum=16),
         "historyChars": integer("EGOASSIST_MODULAR_HISTORY_CHARS", 48000, minimum=1024, maximum=256000),
+        "ttsPrefetch": bool(integer("EGOASSIST_TTS_PREFETCH", 1, minimum=0, maximum=1)),
     }
 
 
@@ -163,7 +166,8 @@ class ModularProvider:
     async def text_stream(self, messages):
         started = time.perf_counter()
         result = {"stage": "text", "model": self.config["textModel"], "apiCalls": 1, "cacheHits": 0, "cost": None,
-                  "firstTokenMs": None}
+                  "firstTokenMs": None, "inputMessages": len(messages),
+                  "inputCharacters": sum(len(message_text(row.get("content"))) for row in messages)}
         terminal = False
         body = {"model": self.config["textModel"], "input": {"messages": messages}, "parameters": {
             "result_format": "message", "temperature": 0, "enable_thinking": False,
@@ -212,24 +216,38 @@ class ModularProvider:
                   "connectMs": None, "sessionReadyMs": None, "firstTextSentMs": None,
                   "textFinishedMs": None, "firstTextToAudioMs": None}
         producer = None
+        ready = asyncio.Event()
+        ws = None
+        result["textPrefetch"] = self.config.get("ttsPrefetch", True)
+
+        async def send(kind, **payload):
+            await ws.send_json({"event_id": uuid4().hex, "type": kind, **payload})
+
+        async def produce():
+            # Start the admitted answer while TTS connects. At most one chunk
+            # waits locally, and no text is submitted before session.updated.
+            async with aclosing(text_iterator):
+                async for text in text_iterator:
+                    if result.get("firstTextReadyMs") is None:
+                        result["firstTextReadyMs"] = (time.perf_counter() - started) * 1000
+                    await ready.wait()
+                    await send("input_text_buffer.append", text=text)
+                    if result["firstTextSentMs"] is None:
+                        result["firstTextSentMs"] = (time.perf_counter() - started) * 1000
+                await ready.wait()
+                await send("session.finish")
+                result["textFinishedMs"] = (time.perf_counter() - started) * 1000
+
         try:
             async with asyncio.timeout(self.config["timeout"]):
+                if result["textPrefetch"]:
+                    producer = asyncio.create_task(produce())
                 async with self.http().ws_connect(
-                    "wss://dashscope.aliyuncs.com/api-ws/v1/realtime",
+                    TTS_URL,
                     params={"model": self.config["ttsModel"]}, heartbeat=15, max_msg_size=4 * 1024 * 1024) as ws:
                     result["connectMs"] = (time.perf_counter() - started) * 1000
-                    async def send(kind, **payload):
-                        await ws.send_json({"event_id": uuid4().hex, "type": kind, **payload})
                     await send("session.update", session={"voice": self.config["voice"], "mode": "server_commit",
                                                           "response_format": "pcm", "sample_rate": 24000})
-                    async def produce():
-                        async with aclosing(text_iterator):
-                            async for text in text_iterator:
-                                await send("input_text_buffer.append", text=text)
-                                if result["firstTextSentMs"] is None:
-                                    result["firstTextSentMs"] = (time.perf_counter() - started) * 1000
-                            await send("session.finish")
-                            result["textFinishedMs"] = (time.perf_counter() - started) * 1000
                     # Wait for session.updated before submitting text. Propagate a
                     # producer failure immediately instead of waiting on the socket.
                     finished = False
@@ -251,9 +269,11 @@ class ModularProvider:
                             raise ConnectionError("TTS socket closed before session.finished")
                         payload = json.loads(event.data)
                         kind = payload.get("type")
-                        if kind == "session.updated" and producer is None:
+                        if kind == "session.updated" and not ready.is_set():
                             result["sessionReadyMs"] = (time.perf_counter() - started) * 1000
-                            producer = asyncio.create_task(produce())
+                            ready.set()
+                            if producer is None:
+                                producer = asyncio.create_task(produce())
                         elif kind == "response.audio.delta":
                             audio = base64.b64decode(payload["delta"], validate=True)
                             if len(audio) % 2:
@@ -279,8 +299,9 @@ class ModularProvider:
             result.update(status="cancelled" if isinstance(exc, asyncio.CancelledError) else "failed", error=type(exc).__name__)
             raise
         finally:
-            if producer and not producer.done():
-                producer.cancel()
+            if producer:
+                if not producer.done():
+                    producer.cancel()
                 await asyncio.gather(producer, return_exceptions=True)
             self.audit({**result, "latencyMs": (time.perf_counter() - started) * 1000})
 

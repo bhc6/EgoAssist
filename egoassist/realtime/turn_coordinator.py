@@ -81,13 +81,13 @@ class TurnCoordinator:
     ws: Any
 
     def mark_interrupted_turns(self, ledger):
-        for turn in ledger.snapshot()["turnInbox"]:
-            delivery = turn.get("delivery") or {}
+        from egoassist.core.events import latest
+        for delivery in latest(self.harness.journal, "turn_delivery", "turnId").values():
             if delivery.get("status") in {"received", "responding"}:
                 ledger.set_turn_delivery(
-                    turn["turnId"], "interrupted", reason="newer-user-turn"
+                    delivery["turnId"], "interrupted", reason="newer-user-turn"
                 )
-                self.answer_executor.interrupt(self.harness.journal, turn["turnId"])
+                self.answer_executor.interrupt(self.harness.journal, delivery["turnId"])
 
     def _do_enqueue_transcript(self, text: str, segment=None) -> None:
         """Enqueue one complete (already-accumulated) utterance."""
@@ -159,7 +159,7 @@ class TurnCoordinator:
             queue.put_nowait(
                 {
                     "text": str(turn["text"]),
-                    "explicit": bool(explicit),
+                    "explicit": turn.get("source") == "explicit-control" or bool(explicit),
                     "future": future,
                     "turnSequence": sequence,
                     "turnId": turn_id,
@@ -236,6 +236,9 @@ class TurnCoordinator:
             )
             return {}
         work_ledger = self.owner.work_ledger or CaseWorkLedger(self.harness.journal)
+        # Recovery/refill may race the socket enqueue. The durable channel is
+        # authoritative even if this item was enqueued by the recovery worker.
+        explicit = explicit or work_ledger.turns().get(turn_id, {}).get("source") == "explicit-control"
         scene_task = None
         try:
             semantic = (
@@ -243,6 +246,16 @@ class TurnCoordinator:
                 if semantic_task is not None
                 else await self.classify_persisted_turn(turn_id, text)
             )
+            if semantic.get("status") in {"unavailable", "invalid"}:
+                scene_task = self.owner.prepared_scenes.pop(turn_id, None)
+                self.resolve_semantic_turn(text, {}, semantic, turn_id)
+                work_ledger.set_turn_status(turn_id, "failed", detail={"reason": "routing-unavailable"})
+                work_ledger.set_turn_delivery(turn_id, "failed", reason="routing-unavailable")
+                await self.turn_progress(turn_id, "failed", reason="routing-unavailable")
+                if not self.ws.closed:
+                    await self.ws.send_json({"type": "error", "turnId": turn_id,
+                        "message": "这条输入已保存，但理解服务暂时没有响应，本轮未执行操作。请重试。"})
+                return {"status": "failed", "semanticDecision": semantic}
             applied = self.owner.applied_controls.pop(turn_id, None)
             if applied is not None:
                 return {"control": applied, "semanticDecision": semantic}
@@ -277,6 +290,7 @@ class TurnCoordinator:
             shared_scene["speaker"] = self.owner.scene.turns[turn_id]["speaker"]
             if (explicit and not control_only and self.owner.scene.api_key
                     and not shared_scene.get('visual', {}).get('frame')
+                    and (semantic.get('memoryQuery') or semantic.get('memoryQuerySpec'))
                     and self.current_memory_policy()['components']['timeline']['episodic_enabled']):
                 await self.turn_progress(turn_id, 'waiting-vision')
                 shared_scene['historicalVisual'] = await self.owner.scene.visual_history.observe(
@@ -578,6 +592,7 @@ class TurnCoordinator:
                 ),
                 persist_runtime_checkpoint=not background_intent,
                 prepared_memory=prepared_memory,
+                retrieval_semantic=memory_query.semantic,
                 episodic_memory=self.current_episodic_memory(),
                 user_scope=self.user_id,
                 semantic_decision=semantic,
@@ -807,6 +822,14 @@ class TurnCoordinator:
                     result,
                     self.session_runtime,
                 )
+                # Scene and source packets are already in grounded instructions.
+                # Keep the remaining turn evidence request-scoped as well; it
+                # must not disappear when persistent context injection is skipped.
+                request_context = {key: value for key, value in shared_answer_context.items()
+                    if key not in {"sharedScene", "evidencePackage", "transcript"}}
+                primary_instruction += '\n<current_turn_context trust="untrusted-data">\n' + json.dumps(
+                    request_context, ensure_ascii=False
+                ) + '\n</current_turn_context>'
                 self.answer_executor.register(
                     self.user_id,
                     self.harness.journal,
@@ -1243,6 +1266,28 @@ class TurnCoordinator:
                 )
             )
 
+    async def classify_with_retry_budget(self, text: str, turn_id: str) -> dict:
+        started = time.perf_counter()
+        semantic = await self.classify_semantic_turn(text, turn_id)
+        remaining = self.semantic_router.timeout_seconds - (time.perf_counter() - started)
+        if (semantic.get("status") not in {"unavailable", "invalid"}
+                or not semantic.get("retryable", True) or remaining <= 0.05):
+            return semantic
+        # An inner provider deadline may expire before the router's total
+        # deadline. Retry classification only within that remaining budget.
+        self.harness.journal.append("interaction.classification_retry",
+            {"turnId": turn_id, "decision": semantic, "remainingMs": round(remaining * 1000, 1)})
+        if not self.ws.closed:
+            await self.turn_progress(turn_id, "retrying")
+        remaining = self.semantic_router.timeout_seconds - (time.perf_counter() - started)
+        if remaining > 0:
+            try:
+                return await asyncio.wait_for(self.classify_semantic_turn(text, turn_id), remaining)
+            except TimeoutError:
+                self.harness.journal.append("interaction.classification_retry_exhausted",
+                    {"turnId": turn_id, "totalMs": round((time.perf_counter() - started) * 1000, 1)})
+        return {**semantic, "timedOut": True, "retryBudgetExhausted": True}
+
     async def classify_persisted_turn(self, turn_id: str, text: str) -> dict:
         ledger = self.owner.work_ledger or CaseWorkLedger(self.harness.journal)
         queued_at = time.perf_counter()
@@ -1273,15 +1318,7 @@ class TurnCoordinator:
                 self.owner.scene.resolve_speaker(turn_id)
             )
             try:
-                semantic = await self.classify_semantic_turn(text, turn_id)
-                if semantic.get("status") in {"unavailable", "invalid"} and semantic.get("retryable", True):
-                    self.harness.journal.append(
-                        "interaction.classification_retry",
-                        {"turnId": turn_id, "decision": semantic},
-                    )
-                    if not self.ws.closed:
-                        await self.turn_progress(turn_id, "retrying")
-                    semantic = await self.classify_semantic_turn(text, turn_id)
+                semantic = await self.classify_with_retry_budget(text, turn_id)
                 if (semantic.get("providerError") or {}).get("accountBlocked"):
                     await self.emit({"type": "provider_unavailable", "lane": "router",
                                      "reason": semantic["providerError"]["message"], "retryable": False})
@@ -1345,7 +1382,7 @@ class TurnCoordinator:
                 self.harness.journal
             )
             if (
-                is_output_control(semantic)
+                semantic.get("status") == "classified" and is_output_control(semantic)
                 and target_available
                 and (turn.get("sequence") == self.owner.latest_input_sequence)
             ):

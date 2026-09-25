@@ -104,7 +104,7 @@ class StateProjection:
                 )
             product_projection = self.projection_cache[str(journal_path)][2]
         work_ledger_snapshot = (
-            CaseWorkLedger(harness_override.journal).snapshot(limit=100)
+            CaseWorkLedger(harness_override.journal).snapshot(limit=100, work_limit=20)
             if harness_override
             else {
                 "turnInbox": [],

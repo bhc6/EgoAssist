@@ -337,7 +337,7 @@ class SessionJournal:
             self._refresh()
             return len(self._entries)
 
-    def read_since(self, cursor=None):
+    def read_since(self, cursor=None, *, types=None):
         """Return only new rows; an atomic rewrite invalidates every old cursor."""
         with self._lock, _file_lock(self.path):
             self._refresh()
@@ -354,7 +354,10 @@ class SessionJournal:
                 len(self._entries),
                 self._entries[-1]["id"] if self._entries else None,
             )
-            return next_cursor, deepcopy(self._entries[offset:]), reset
+            rows = self._entries[offset:]
+            if types is not None:
+                rows = [row for row in rows if row.get("type") in types]
+            return next_cursor, deepcopy(rows), reset
 
     def project(self, name, initial, reduce, *, select=None):
         """Cache a derived read model on the journal, never on a disposable caller."""

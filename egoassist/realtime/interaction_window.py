@@ -27,6 +27,24 @@ def interaction_vision_model(frame_count):
 def answer_scene_context(scene):
     """Project evidence for answering; full media and provider audit stay in the journal."""
     result = deepcopy(scene)
+    # The event browser retains full phases/sources. Foreground answers get a
+    # bounded projection, with omissions explicit and original citations kept.
+    events = result.get('longEvents')
+    if isinstance(events, dict):
+        available = events.get('events', [])
+        events['events'] = available[:2]
+        events['truncated'] = bool(events.get('truncated') or len(available) > 2)
+        events.pop('job', None)
+        for event in events['events']:
+            sources = event.get('sources', [])
+            event['sources'] = [{k:v for k,v in s.items() if k in {
+                'sourceId','text','at','recordedAt','kind','attribution','uncertainties','textTruncated'
+            }} for s in sources[-2:]]
+            event['sourceIds'] = [s['sourceId'] for s in event['sources']]
+            event['sourcesTruncated'] = bool(event.get('sourcesTruncated') or len(sources) > 2)
+            phases = event.get('phases', [])
+            event['phases'] = phases[-4:]
+            event['phasesTruncated'] = len(phases) > 4 or event.get('totalPhases',0) > 4
     if not result.get('interactionWindow'):
         return result
 

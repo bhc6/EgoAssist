@@ -199,8 +199,12 @@ class MemoryService:
         if (request.session_id and request.user_id != 'local-default'
                 and request.policy['components']['timeline']['episodic_enabled']):
             try:
+                from egoassist.core.settings import integer
                 result.evidence = self.evidence.query(request.user_id, request.session_id,
-                    request.text, exclude=request.exclude)
+                    request.text, exclude=request.exclude,
+                    budget=integer('EGOASSIST_LIVE_EVIDENCE_CHARS', 6000, minimum=1000, maximum=24000),
+                    recent_budget=integer('EGOASSIST_LIVE_RECENT_CHARS', 2000, minimum=500, maximum=8000),
+                    limit=6, recent_limit=4)
             except Exception as exc:
                 result.failures['sources'] = type(exc).__name__
         result.read_ms = round((time.perf_counter() - started) * 1000, 3)

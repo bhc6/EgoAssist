@@ -11,7 +11,7 @@ class ObservationReviews:
         self.rows = {}
         self.offered = {}
         self.last_sent_at = None
-        for row in journal.entries():
+        for row in journal.entries(types={"observation.review"}):
             if row.get("type") == "observation.review":
                 self.rows[row["candidateId"]] = row
                 self._index_offered(row)

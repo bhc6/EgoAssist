@@ -74,7 +74,12 @@ class ThreeLaneRuntime:
                     if key[0] == 'long_event.job' and job['status'] in {'queued', 'running'}:
                         jobs[key] = {**job, 'status': 'cancelled'}
             if kind in {"memory.recovery.job", "insight.job", "answer.job", "long_event.job"}:
-                jobs[(kind, row.get("turnId") or row.get("jobId") or row.get('requestId'))] = row
+                # Lane status never consumes prompts, media, or prepared answers.
+                # Select before the journal's defensive copy, not afterwards.
+                jobs[(kind, row.get("turnId") or row.get("jobId") or row.get('requestId'))] = {
+                    key: row[key] for key in ("type", "turnId", "jobId", "requestId", "status", "phase", "timestamp")
+                    if key in row
+                }
             if kind == 'memory.read':
                 state['lastRead'] = {key: row.get(key) for key in ('status', 'failures', 'timestamp')}
             if kind == "answer.job" and row.get("status") in {"completed", "failed", "cancelled", "paused"}:

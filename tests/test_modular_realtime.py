@@ -283,3 +283,73 @@ def test_text_sse_failures_propagate_and_are_audited(failure):
                 assert audit[-1]["status"] == "failed"
             finally: await provider.close()
     asyncio.run(run())
+
+
+@pytest.mark.parametrize("cancel", [False, True])
+def test_tts_prefetch_is_bounded_waits_for_handshake_and_cancels(monkeypatch, cancel):
+    from aiohttp import web
+    from aiohttp.test_utils import TestServer
+
+    async def run():
+        token_started, stream_closed, allow_ready = asyncio.Event(), asyncio.Event(), asyncio.Event()
+        produced, sent, audio, audit = [], [], [], []
+
+        async def tokens():
+            try:
+                for token in ("first", "second"):
+                    produced.append(token)
+                    token_started.set()
+                    yield token
+            finally:
+                stream_closed.set()
+
+        async def tts(request):
+            ws = web.WebSocketResponse()
+            await ws.prepare(request)
+            assert (await ws.receive_json())["type"] == "session.update"
+            await allow_ready.wait()
+            if cancel:
+                await ws.close()
+                return ws
+            await ws.send_json({"type": "session.updated"})
+            while True:
+                event = await ws.receive_json()
+                sent.append(event)
+                if event["type"] == "session.finish":
+                    break
+            await ws.send_json({"type": "response.audio.delta", "delta": base64.b64encode(bytes(4)).decode()})
+            await ws.send_json({"type": "session.finished"})
+            await ws.close()
+            return ws
+
+        app = web.Application()
+        app.router.add_get("/tts", tts)
+        async with TestServer(app) as server:
+            monkeypatch.setattr("egoassist.realtime.modular.TTS_URL", str(server.make_url("/tts")))
+            provider = ModularProvider("test", {**settings(), "ttsPrefetch": True}, audit.append)
+            task = asyncio.create_task(provider.speak_stream(tokens(), audio.append))
+            try:
+                await asyncio.wait_for(token_started.wait(), 2)
+                await asyncio.sleep(.03)
+                assert produced == ["first"] and not sent and not audio
+                if cancel:
+                    task.cancel()
+                    with pytest.raises(asyncio.CancelledError):
+                        await task
+                    assert stream_closed.is_set()
+                    assert audit[-1]["status"] == "cancelled"
+                    assert not audio
+                else:
+                    allow_ready.set()
+                    await asyncio.wait_for(task, 2)
+                    assert [e["text"] for e in sent if e["type"] == "input_text_buffer.append"] == ["first", "second"]
+                    assert len(audio) == 1 and stream_closed.is_set()
+                    assert audit[-1]["firstTextReadyMs"] < audit[-1]["sessionReadyMs"]
+                    assert audit[-1]["status"] == "completed"
+            finally:
+                allow_ready.set()
+                if not task.done():
+                    task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+                await provider.close()
+    asyncio.run(run())

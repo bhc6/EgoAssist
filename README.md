@@ -1,6 +1,6 @@
 # EgoAssist
 
-面向智能眼镜助手的本地软件 Demo 和记忆研究项目。浏览器提供文本、麦克风和摄像头入口，Python 服务管理案例与持久状态，Qwen 提供语义理解、实时回答和报告生成。
+面向智能眼镜助手的本地软件 Demo 和记忆研究项目。浏览器提供文本、麦克风和摄像头入口，Python 服务管理案例与持久状态。JEV 可承担有限路由与控制判断，Qwen 提供复杂提取、实时回答和报告生成。
 
 ## 核心
 
@@ -25,6 +25,8 @@ if (-not (Test-Path .env)) { Copy-Item .env.example .env }
 ```
 
 在 `.env` 填写 `QWEN_API_KEY` 或 `DASHSCOPE_API_KEY`，需要对应模型权限以及 DashScope HTTPS/WebSocket 网络访问。不要提交密钥。
+
+本工作区正式使用 JEV 优先路由：另配 `OPENROUTER_API_KEY`，并设置 `EGOASSIST_TURN_ROUTER_BACKEND=openrouter-decisions`。JEV 连接复用、TTS 准备并行及长会话上下文精简默认启用；只配置 Qwen 的新安装仍可使用模板中的 `qwen` 路由。启用结果与限制见[长会话优化及正式启用记录](docs/LONG_SESSION_OPTIMIZATION_2026-09-25.md)。
 
 ```powershell
 .\.venv\Scripts\python.exe .\run_egoassist.py --open

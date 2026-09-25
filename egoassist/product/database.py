@@ -346,10 +346,16 @@ class ProductDatabase:
         key = (str(source.path.resolve()), source.session_id, str(user_id))
         with self._projection_lock:
             cursor, previous = self._journal_projections.get(key, (None, {"turns": 0, "intents": 0, "jobs": 0, "results": 0}))
-            next_cursor, entries, reset = source.read_since(cursor)
+            next_cursor, entries, reset = source.read_since(cursor, types={
+                "turn_inbox", "turn_inbox_state", "intent_envelope", "intent_state",
+                "job_ledger", "job_state", "result_inbox", "result_delivery", "retention.deleted",
+            })
             if reset:
                 previous = {"turns": 0, "intents": 0, "jobs": 0, "results": 0}
             if cursor and not reset and not entries:
+                # Filtered media rows need no database write, but must not be
+                # scanned again on every projection poll.
+                self._journal_projections[key] = (next_cursor, previous)
                 return dict(previous)
             if cursor is None or reset:
                 self.create_schema()

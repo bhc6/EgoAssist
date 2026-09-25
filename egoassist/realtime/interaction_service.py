@@ -59,6 +59,7 @@ class InteractionService:
         clock_context: ClockContext | None = None,
         project_retrieval: bool = True,
         prepared_memory: PreparedMemory | None = None,
+        retrieval_semantic: dict | None = None,
     ) -> dict:
         transcript = str(transcript).strip()
         if not transcript:
@@ -97,8 +98,9 @@ class InteractionService:
         skill_control = semantic_decision.get("skillControl")
         selected_by_semantic = semantic_decision.get("selectedSkill")
         retrieval_started = time.perf_counter()
+        read_semantic = semantic_decision if retrieval_semantic is None else retrieval_semantic
         query = MemoryQuery(user_scope, harness.session_id if harness else None, transcript,
-            active_policy, clock_context, deepcopy(semantic_decision), retrieval_text(transcript, semantic_decision),
+            active_policy, clock_context, deepcopy(read_semantic), retrieval_text(transcript, read_semantic),
             (harness.session_id + ':' + transcript_entry['id'],) if harness else (),
             SourceReference.from_entry(user_scope, harness.session_id, transcript_entry) if harness else None)
         prepared_memory = prepared_memory or self.memory_service.read(query)

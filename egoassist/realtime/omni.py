@@ -1783,6 +1783,14 @@ class OmniBrowserBridge:
 
     def inject_context_data(self, label: str, value: Any) -> bool:
         """Append low-trust structured data without elevating it to instructions."""
+        if label == "current_turn_context":
+            # Grounded response instructions already carry this turn's evidence.
+            # Persisting the same evidence as conversation items every turn
+            # accumulates stale scenes in the live socket outside harness budgets.
+            self._trace("context.data.request_scoped", {"label": label,
+                "turnId": value.get("turnId") if isinstance(value, dict) else None,
+                "claimBoundary": "Evidence is supplied in per-response instructions, not appended to persistent conversation."})
+            return True
         if not self.connected or not self.conversation:
             return False
         text = (
@@ -2153,11 +2161,13 @@ class OmniBrowserBridge:
             )
             self._text_conversation = conversation
             conversation.connect()
-        conversation.update_session(enable_input_audio_transcription=True, instructions=self.instructions)
+        from egoassist.memory.grounding import HISTORY_STATEMENT_POLICY
+        conversation.update_session(enable_input_audio_transcription=True,
+                                    instructions=self.instructions + "\n" + HISTORY_STATEMENT_POLICY)
         conversation.items.clear()
         conversation.item_ids.clear()
         if self._context_harness is not None:
-            for item in self._context_harness.provider_replay_items():
+            for item in self._context_harness.provider_replay_items(compact_timestamps=True):
                 conversation.create_item(item)
         self._response_conversation = conversation
         self._trace("response.dispatched", {

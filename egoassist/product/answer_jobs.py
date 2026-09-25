@@ -132,11 +132,13 @@ class AnswerJobs:
                         self.transition(journal, row, status="queued", reason="foreground-deadline")
                 # Give corrections a bounded grace period, including after a disconnect.
                 unsettled = self._unsettled(turns)
-                for row in rows.values():
-                    key = (str(journal.path), row["turnId"])
+                # Refresh once after transitions. Copying the entire historical
+                # answer map once PER old answer blocked the event loop for
+                # seconds every 250 ms in long sessions (quadratic work).
+                for current in answer_jobs(journal).values():
+                    key = (str(journal.path), current["turnId"])
                     if len(self.tasks) >= self.concurrency:
                         break
-                    current = answer_jobs(journal).get(row["turnId"], {})
                     if current.get("status") != "queued" or key in self.tasks:
                         continue
                     queued_age = (datetime.now(timezone.utc) - datetime.fromisoformat(current["timestamp"])).total_seconds()
