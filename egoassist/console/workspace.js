@@ -1,12 +1,15 @@
 /* Navigation keeps the media connection and background job polling alive. */
 function showWorkspaceView() {
-  const requested = location.hash.slice(2) || "conversation";
-  const view = ["conversation", "reports", "tasks", "audit"].includes(requested) ? requested : "conversation";
+  const [requested, lane] = (location.hash.slice(2) || "conversation").split("/");
+  const view = ["conversation", "reports", "tasks", "audit", "lanes"].includes(requested) ? requested : "conversation";
   document.querySelectorAll("[data-view]").forEach(node => { node.hidden = node.dataset.view !== view; });
   document.querySelectorAll(".workspace-nav a").forEach(link => {
     if (link.hash === "#/" + view) link.setAttribute("aria-current", "page");
     else link.removeAttribute("aria-current");
   });
+  if (view === "lanes" && ["observation", "interaction", "memory"].includes(lane)) {
+    requestAnimationFrame(() => document.getElementById("lane-" + lane)?.scrollIntoView({block: "nearest"}));
+  }
 }
 addEventListener("hashchange", showWorkspaceView);
 showWorkspaceView();

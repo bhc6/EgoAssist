@@ -7,7 +7,8 @@
   <link rel="icon" href="data:,">
   <link rel="stylesheet" href="styles.css">
   <link rel="stylesheet" href="responsive.css?v=20260925-cleanup">
-  <link rel="stylesheet" href="memory-controls.css?v=20260925-cleanup">
+  <link rel="stylesheet" href="memory-controls.css?v=20260925-lanes">
+  <link rel="stylesheet" href="lanes.css?v=20260925-lanes">
 </head>
 <body class="auth-required">
   <div id="authGate" class="auth-gate">
@@ -29,6 +30,7 @@
     <nav class="workspace-nav" aria-label="主导航">
       <a href="#/conversation" aria-current="page">对话与记忆</a>
       <a href="diary.html" target="_blank" rel="noopener">个人日记</a>
+      <a href="#/lanes">三链路</a>
       <a href="#/tasks">任务</a>
       <a href="#/reports">当前建议</a>
       <a href="#/audit">设置与诊断</a>
@@ -46,6 +48,11 @@
     <section class="session-strip">
       <div><span>实时连接</span><b id="duplexState">未连接</b></div>
       <div><span>语音播报</span><b id="outputPermission">可播报</b></div>
+    </section>
+
+    <section class="lane-overview" aria-labelledby="laneOverviewTitle">
+      <div class="lane-overview-heading"><b id="laneOverviewTitle">三链路实时状态</b><a href="#/lanes">查看流转与结果 →</a></div>
+      <div id="executionLanes" class="lane-summary" aria-label="观察、交互、记忆独立状态"></div>
     </section>
 
     <!-- Ambient observation runs without a user-initiated task, so it is shown
@@ -185,9 +192,16 @@
       <div id="sharedUtterances" class="shared-utterances"></div>
     </details>
 
+    <section data-view="lanes" hidden class="lane-workspace" aria-labelledby="laneWorkspaceTitle">
+      <div class="panel-head"><div><h1 id="laneWorkspaceTitle">三条链路，各自推进</h1><p>观察理解现场，交互回应请求，记忆保存并整理证据。</p></div><span id="laneSnapshotStatus" role="status"></span></div>
+      <div class="lane-inputs"><b>输入与共享依据</b><span>采样画面 → 观察</span><span>文字 / 语音 → 交互</span><span>原话 / 观察证据 / 执行结果 → 记忆</span></div>
+      <p class="lane-explanation">三条链路按需读取历史与现场证据，独立排队、独立完成。下方每列是本链路的处理流程，不表示三条链路依次执行。</p>
+      <div id="laneDetails" class="lane-detail-grid"></div>
+      <div class="lane-exchange"><b>链路之间如何协作</b><p>观察证据供交互核对现场；交互按需检索记忆；原话、观察和执行结果成为记忆依据。个人日记在账户范围读取三链路记录，单独排队整理。</p><a href="diary.html" target="_blank" rel="noopener">打开个人日记 →</a></div>
+    </section>
+
     <div data-view="audit" hidden>
     <h1 class="view-title">设置与诊断</h1>
-    <section id="executionLanes" class="execution-lanes" aria-label="观察、交互与后台记忆"></section>
     <section class="performance-band" aria-label="实时性能审计">
       <div class="performance-heading"><b>实时性能</b><span id="performanceWindow">暂无测量</span></div>
       <div id="performanceMetrics" class="performance-metrics"></div>
@@ -274,12 +288,13 @@
   <script src="local_vad.js?v=20260909"></script>
   <script src="long_events.js?v=20260918"></script>
   <script src="shared_scene.js?v=20260918-speaker-merge"></script>
-  <script src="workspace.js?v=20260925-cleanup"></script>
+  <script src="workspace.js?v=20260925-lanes"></script>
+  <script src="lanes.js?v=20260925-lanes"></script>
   <script src="memory_view.js?v=20260909"></script>
   <script src="workflow.js?v=20260918-speakers"></script>
   <script src="request.js?v=20260910"></script>
   <script src="tool_activity.js?v=20260910"></script>
-  <script src="app.js?v=20260925-cleanup"></script>
+  <script src="app.js?v=20260925-lanes"></script>
   <script src="conversation_history.js?v=20260918"></script>
 </body>
 </html>

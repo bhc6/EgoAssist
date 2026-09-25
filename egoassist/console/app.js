@@ -624,29 +624,7 @@ const interactionPhases = {queued:"请求已保留 · 等待处理名额", class
   "waiting-vision":"正在核对提问时的画面", committing:"正在检索记忆与处理请求", generating:"正在生成回答"};
 
 function renderExecutionLanes() {
-  const root = $("#executionLanes");
-  if (!root) return;
-  const lanes = state?.runtimeLanes;
-  if (!lanes) { root.replaceChildren(); return; }
-  const ambient = lanes.observation, lane = ambient.ambient || {};
-  const scheduler = lanes.interaction.scheduler || {}, work = lanes.memory.jobs || {};
-  const pendingTurns = lanes.interaction.pendingInputs;
-  const observedAt = ambient.processedThrough;
-  const observation = !ambient.enabled ? "未开启" : !ambient.connected ? "等待连接" :
-    lane.active ? "分析中 · " + (lane.elapsedMs || 0) + " ms" :
-    !ambient.cameraAt || Date.now() - Date.parse(ambient.cameraAt) > 10000 ? "等待摄像头画面" : "等待采样";
-  const interaction = scheduler.pending || scheduler.activeResponseIds?.length || lanes.interaction.answers.running ? "回答生成中" :
-    pendingTurns || lanes.interaction.classifying || lanes.interaction.preparation?.length ? "问题处理中" : "等待输入";
-  const memory = "运行 " + (work.running || 0) + " · 等待 " + (work.queued || 0) + " · 失败 " + (work.failed || 0);
-  const diary = lanes.memory.accountDiary;
-  const diaryWork = diary?.jobs || {};
-  const diarySummary = !diary ? "" : diary.status === "unavailable" ? " · 账户日记状态暂不可用" :
-    " · 账户日记：运行 " + (diaryWork.running || 0) + " / 等待 " + (diaryWork.queued || 0) + " / 失败 " + (diaryWork.failed || 0);
-  root.innerHTML = [["现场观察", observation, observedAt ? "已分析画面 " + new Date(observedAt).toLocaleTimeString() : "尚无已分析画面"],
-    ["用户交互", interaction, "排队输入 " + pendingTurns + " · 后台排队回答 " + lanes.interaction.answers.queued],
-    ["记忆与报告", "当前会话：" + memory, (lanes.memory.consolidating ? "正在整理记忆索引" : "已完成后台任务 " + (work.completed || 0)) + diarySummary]]
-    .map(([name, status, detail]) => "<div><b>" + esc(name) + "</b><span>" + esc(status) + "</span><small>" + esc(detail) + "</small></div>")
-    .join("");
+  window.LaneView.render(state);
 }
 
 // Ambient observation must be visible for as long as it is running. ADR 005/007:
@@ -1172,7 +1150,7 @@ async function connectRealtimeSession(generation, media, retryAttempt) {
       interactionTransport = message.interactionTransport === "livekit" && livekitRoom
         ? "livekit" : interactionTransport;
       $("#duplexState").textContent = stream ? (interactionTransport === "livekit" ? "LiveKit" : "WebSocket fallback") + " · 直接说话，可随时打断" : "文本会话在线";
-      $("#realtimeButton").textContent = "结束会话";
+      $("#realtimeButton").textContent = "结束语音对话";
     } else if (message.type === "provider_unavailable") {
       providerUnavailable = true;
       providerReady = false;
@@ -1301,7 +1279,7 @@ async function connectRealtimeSession(generation, media, retryAttempt) {
     if (!ready && generation === connectionGeneration) rejectReady(Error("实时模型连接在就绪前关闭"));
     if (socket !== ws) return;
     $("#duplexState").textContent = "实时会话已结束";
-    $("#realtimeButton").textContent = "启动全双工陪练";
+    $("#realtimeButton").textContent = "开始语音对话";
     socket = null;
     stateRefreshPendingAt = 0;
     providerReady = false;
@@ -1348,7 +1326,7 @@ function disconnectRealtime() {
   videoTimer = null;
   stopAudioCapture();
   $("#duplexState").textContent = "实时会话已结束";
-  $("#realtimeButton").textContent = "启动全双工陪练";
+  $("#realtimeButton").textContent = "开始语音对话";
 }
 
 

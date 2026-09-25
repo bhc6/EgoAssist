@@ -8,7 +8,7 @@ import re
 import sqlite3
 
 from .generator import DiaryGenerator
-from .sources import collect, digest, period_for
+from .sources import collect, digest, period_for, source_manifest, snapshot_change
 from .store import DiaryStore, now
 from egoassist.memory.temporal import ClockContext
 
@@ -58,6 +58,7 @@ class DiaryService:
             data['records'].append({'sourceId':'note:'+note['id'],'kind':'personal-note',
                 'text':note['text'],'occurredAt':note['day'], 'recordedAt':note['created'], 'localDate':note['day']})
         data['coverage']['personalNotes']=len(notes)
+        if notes: data['coverage']['byKind']['personal-note']=len(notes)
         data['coverage']['records']+=len(notes)
         for note in notes:
             counts=data['coverage']['byDay']; counts[note['day']]=counts.get(note['day'],0)+1
@@ -92,13 +93,19 @@ class DiaryService:
                 if not data['coverage']['complete']: raise ValueError('部分来源无法读取，已停止整理，避免漏记')
                 if row.get('sourceFingerprint') != data['fingerprint']:
                     row['nodes']={};row['calls']=[]
-                row.update(sourceFingerprint=data['fingerprint'],coverage=data['coverage'])
+                row.update(sourceFingerprint=data['fingerprint'],coverage=data['coverage'],
+                           sourceManifest=source_manifest(data),snapshotAt=now(),
+                           sourceExternalRefs={r['sessionId']+':'+r['externalId']:r['sourceId']
+                                               for r in data['records'] if r.get('externalId')})
+                store.put(row)
                 body,daily=await self.generator.generate(row,data,store.put)
                 latest=await asyncio.to_thread(self.sources,uid,row['period'])
-                if data['fingerprint']!=latest['fingerprint']:
-                    raise ValueError('整理期间来源发生变化，请重新生成；本次未发布旧内容')
+                change=snapshot_change(row,latest)
+                if change['invalid']:
+                    raise ValueError('整理依据已修改、删除或无法读取，请重新整理')
                 row.update(status='completed' if data['records'] else 'empty',phase='已归档',
-                    body=body,daily=daily,sources=data['records'],finishedAt=now())
+                    body=body,daily=daily,sources=data['records'],finishedAt=now(),
+                    newRecords=change['added'])
                 store.put(row)
         except asyncio.CancelledError:
             if store.path.exists():
@@ -116,13 +123,19 @@ class DiaryService:
         store=self.store(uid); row=store.get(identifier)
         if row.get('sourceFingerprint'):
             current=await asyncio.to_thread(self.sources,uid,row['period'])
-            if current['fingerprint']!=row['sourceFingerprint']:
+            # The worker may have committed while the source read was in flight.
+            row=store.get(identifier)
+            change=snapshot_change(row,current)
+            if change['invalid']:
                 if row['status'] in {'queued','running'}:
                     await self.cancel(uid,identifier)
+                    row=store.get(identifier)
                 # Don't expose deleted/corrected source text through a historical snapshot.
                 row={k:v for k,v in row.items() if k not in {'body','daily','sources','nodes','calls'}}
-                row.update(status='stale',phase='来源已变化，请重新整理')
+                row.update(status='stale',phase='原依据已修改、删除或无法读取，请重新整理')
                 store.put(row)
+            else:
+                row['newRecords']=change['added']
         row['feedback']=store.feedback(identifier)
         row['notes']=store.notes(row['period']['start'][:10],row['period']['end'][:10])
         return row

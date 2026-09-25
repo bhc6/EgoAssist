@@ -15,6 +15,31 @@ def digest(value):
     return hashlib.sha256(json.dumps(value, ensure_ascii=False, sort_keys=True).encode()).hexdigest()
 
 
+def source_manifest(data):
+    """Semantic evidence identity, excluding rebuildable hints and storage touches."""
+    return {record['sourceId']: digest({key: value for key, value in record.items()
+            if key not in {'updatedAt', 'derivedEventHints'}}) for record in data['records']}
+
+
+def snapshot_change(row, current):
+    """Append-only activity may extend a snapshot, never invalidate its evidence."""
+    previous = row.get('sourceManifest')
+    if previous is None:
+        return {'invalid': row.get('sourceFingerprint') != current['fingerprint'], 'added': 0}
+    manifest = source_manifest(current)
+    invalid = not current['coverage']['complete'] or any(manifest.get(ref) != value for ref, value in previous.items())
+    # Imported corrections can supersede a source without changing its old row.
+    for record in current['records']:
+        if record['sourceId'] in previous or record['kind'] != 'historical-dialogue':
+            continue
+        correction = json.loads(record['text']).get('supersedes')
+        external_refs = row.get('sourceExternalRefs', {})
+        if correction and (correction in previous or record.get('sessionId', '') + ':' + correction in previous
+                           or record.get('sessionId', '') + ':' + correction in external_refs):
+            invalid = True
+    return {'invalid': invalid, 'added': len(manifest.keys() - previous.keys())}
+
+
 def period_for(kind, anchor, timezone):
     if kind not in {'daily', 'weekly', 'monthly'}:
         raise ValueError('请选择日记、周回顾或月回顾')
@@ -63,7 +88,8 @@ def collect(root: Path, timeline_path: Path, user_id: str, period: dict):
                                 add(source['sourceId'], 'historical-dialogue',
                                     json.dumps({'speaker':source['speaker'],'text':source['text'],
                                         'supersedes':source['supersedes']}, ensure_ascii=False),
-                                    at.isoformat(), source['receivedAt'], sessionId=path.stem)
+                                    at.isoformat(), source['receivedAt'], sessionId=path.stem,
+                                    externalId=source['externalId'])
                         elif kind == 'message' and row.get('status') == 'completed' and row.get('message', {}).get('role') == 'user':
                             text = row['message']['content']; kind = 'user-statement'
                         elif kind == 'message' and row.get('status') == 'completed' and row.get('message', {}).get('role') == 'assistant':

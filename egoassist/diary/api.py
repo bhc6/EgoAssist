@@ -35,7 +35,7 @@ def mount(app, *, users_root, timeline_path, api_key, user_key, blocked):
     async def detail(request):
         row=await service.get(user(request),request.match_info['id'])
         # Full evidence is on demand; internal intermediate checkpoints stay out of the reading response.
-        public={k:v for k,v in row.items() if k not in {'nodes'}}
+        public={k:v for k,v in row.items() if k not in {'nodes','sourceManifest','sourceExternalRefs'}}
         return web.json_response(public)
 
     async def cancel(request):
@@ -56,6 +56,12 @@ def mount(app, *, users_root, timeline_path, api_key, user_key, blocked):
         text=payload.get('text')
         if not isinstance(text,str) or not 1<=len(text.strip())<=10000: raise ValueError('补记需要 1 至 10000 个字符')
         return web.json_response(service.store(user(request)).note(day,text.strip()),status=201)
+
+    async def notes(request):
+        from datetime import timedelta
+        day=date.fromisoformat(request.query['day'])
+        return web.json_response({'notes':service.store(user(request)).notes(
+            day.isoformat(),(day+timedelta(days=1)).isoformat())})
 
     async def feedback(request):
         row=await service.get(user(request),request.match_info['id']); payload=await request.json()
@@ -124,7 +130,7 @@ def mount(app, *, users_root, timeline_path, api_key, user_key, blocked):
     app.middlewares.append(lifecycle)
     app.cleanup_ctx.append(context)
     app.add_routes([web.get('/api/diary',listing),web.post('/api/diary',submit),
-        web.post('/api/diary/notes',note),web.post('/api/diary/settings',settings),
+        web.get('/api/diary/notes',notes),web.post('/api/diary/notes',note),web.post('/api/diary/settings',settings),
         web.get('/api/diary/{id}',detail),web.post('/api/diary/{id}/cancel',cancel),
         web.post('/api/diary/{id}/retry',retry),web.post('/api/diary/{id}/feedback',feedback),
         web.get('/api/diary/{id}/export',export)])

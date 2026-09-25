@@ -1,0 +1,54 @@
+.lane-overview { margin: 10px 0 16px; }
+.lane-overview-heading { display:flex; justify-content:space-between; align-items:center; gap:12px; margin-bottom:8px; font-size:12px; }
+.lane-overview a, .lane-workspace a { color:#20695f; text-decoration:none; }
+.lane-overview a:hover, .lane-workspace a:hover { text-decoration:underline; }
+.lane-summary { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:10px; }
+.lane-summary > a { display:grid; gap:4px; border:1px solid var(--line); border-left:3px solid var(--lane-color); border-radius:8px; background:#fff; padding:10px 14px; min-width:0; color:var(--ink); }
+[data-lane="observation"] { --lane-color:#427aab; }
+[data-lane="interaction"] { --lane-color:#258776; }
+[data-lane="memory"] { --lane-color:#9066a7; }
+.lane-summary b { display:flex; align-items:center; gap:7px; }
+.lane-summary i { width:7px; height:7px; border-radius:50%; background:#9aa8ae; flex-shrink:0; }
+.lane-summary [data-state="active"] i { background:var(--lane-color); box-shadow:0 0 0 3px color-mix(in srgb,var(--lane-color) 16%,transparent); }
+.lane-summary small { color:var(--muted); font-size:11px; }
+.lane-summary.is-stale > a { border-style:dashed; }
+.lane-summary.is-stale .lane-status::after { content:" · 待同步"; }
+.lane-workspace { padding:14px 0; }
+.lane-workspace h1 { margin:0; font-size:24px; }
+.lane-workspace p { line-height:1.7; }
+.lane-workspace .panel-head p { margin:8px 0; color:var(--muted); }
+.lane-inputs { display:flex; flex-wrap:wrap; gap:12px 26px; background:#eaf0f2; padding:16px; border:1px solid var(--line); border-radius:8px; margin-top:20px; }
+.lane-inputs span { font-size:13px; }
+.lane-explanation { color:var(--muted); font-size:12px; }
+.lane-detail-grid { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:18px; align-items:start; }
+.lane-detail-grid > article { min-width:0; background:white; padding:20px; border:1px solid var(--line); border-top:4px solid var(--lane-color); border-radius:10px; }
+.lane-card-heading { display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:10px; }
+.lane-card-heading h2 { margin:0; font-size:19px; }
+.lane-card-heading .lane-status { font-size:12px; padding:4px 8px; background:#eef3f3; border-radius:20px; }
+.lane-purpose { color:var(--muted); font-size:13px; min-height:44px; }
+.lane-stages { display:flex; padding:0; margin:18px 0; list-style:none; gap:8px; }
+.lane-stages li { position:relative; flex:1; min-width:0; padding:10px 5px; border-radius:5px; background:#f1f4f5; text-align:center; font-size:12px; }
+.lane-stages li+li::before { content:"→"; position:absolute; left:-9px; top:15px; color:var(--muted); }
+.lane-stages small { display:block; color:var(--muted); margin-top:5px; font-size:11px; }
+.lane-stages [data-stage="active"] { background:#e0f1e9; outline:1px solid #90bca8; }
+.lane-stages [data-stage="done"] { border-bottom:2px solid var(--lane-color); }
+.lane-detail-grid dl { display:grid; grid-template-columns:110px minmax(0,1fr); gap:10px 8px; font-size:12px; margin:20px 0; }
+.lane-detail-grid dt { color:var(--muted); }.lane-detail-grid dd { margin:0; overflow-wrap:anywhere; }
+.lane-detail-grid h3 { font-size:14px; margin:20px 0 8px; }
+.lane-result { white-space:pre-wrap; overflow-wrap:anywhere; max-height:180px; overflow:auto; font-size:13px; }
+.lane-empty { color:var(--muted); font-size:12px; }
+.lane-error { color:#9a3c32; font-size:13px; }
+.lane-jobs { list-style:none; padding:0; max-height:240px; overflow:auto; }
+.lane-jobs li { display:grid; gap:5px; padding:10px 0; border-bottom:1px solid var(--line); font-size:12px; overflow-wrap:anywhere; }
+.lane-jobs small { color:var(--muted); font-size:10px; }
+.lane-diary { border-top:1px solid var(--line); padding-bottom:20px; }
+.lane-exchange { padding:18px; margin-top:20px; border:1px solid var(--line); border-radius:8px; }
+.lane-exchange p { margin:8px 0; color:var(--muted); }
+@media(max-width:1000px) { .lane-detail-grid { grid-template-columns:1fr; } .lane-purpose { min-height:0; } }
+@media(max-width:600px) {
+  .lane-summary { gap:6px; }.lane-summary > a { padding:8px 6px; font-size:11px; }
+  .lane-summary b { gap:4px; font-size:12px; }.lane-summary small { display:none; }
+  .lane-overview-heading { font-size:11px; }.lane-overview { margin:8px 0 12px; }
+  .lane-detail-grid > article { padding:16px; }.lane-inputs { display:grid; gap:10px; }
+  .lane-workspace h1 { font-size:22px; }
+}

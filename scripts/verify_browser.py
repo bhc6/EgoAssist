@@ -63,7 +63,7 @@ async def verify(output, real_turn=False):
                     await diary.screenshot(path=str(output / f'diary-{width}.png'), full_page=True)
                 await diary.close()
                 report['recommendedNavigationDefaults'] = True
-                await page.locator('a[href="#/tasks"]').click()
+                await page.locator('.workspace-nav a[href="#/tasks"]').click()
                 await page.locator('#skillSelect').select_option('packing-coach')
                 await page.wait_for_function("document.querySelector('#skillName').textContent.includes('packing-coach')")
                 await page.locator('#taskSelect').select_option('commute-check')
@@ -76,7 +76,7 @@ async def verify(output, real_turn=False):
                 assert '对话工作流' in await page.locator('#skillName').text_content()
                 assert 'static-skill-policy-injection' in await page.locator('#knowledge').text_content()
                 report['conversationalSkillReady'] = True
-                await page.locator('a[href="#/conversation"]').click()
+                await page.locator('.workspace-nav a[href="#/conversation"]').click()
                 assert await page.locator('[data-performance="routerMs"]').text_content() == '-'
                 if real_turn:
                     async def wait_for_report(accepted):
@@ -102,7 +102,7 @@ async def verify(output, real_turn=False):
                     report['realTextTurn'] = True
                     report['insights'] = []
                     for kind in ('daily', 'weekly', 'monthly'):
-                        await page.locator('a[href="#/reports"]').click()
+                        await page.locator('.workspace-nav a[href="#/reports"]').click()
                         await page.locator('#insightKind').select_option(kind)
                         async with page.expect_response(lambda response: response.url.endswith('/api/insights') and response.request.method == 'POST', timeout=60000) as pending:
                             await page.locator('#insightGenerate').click()
@@ -114,7 +114,7 @@ async def verify(output, real_turn=False):
                             report['concurrentReportStatus'] = next(j['status'] for j in active['jobs'] if j['jobId'] == accepted['job']['jobId'])
                             assert report['concurrentReportStatus'] in {'queued', 'running'}
                             previous = await page.evaluate('state.performance.latestUsage.responseId')
-                            await page.locator('a[href="#/conversation"]').click()
+                            await page.locator('.workspace-nav a[href="#/conversation"]').click()
                             await page.locator('#textTurnInput').fill('刚才的现场记录里，验收完成了吗？')
                             await page.locator('#textTurnSend').click()
                             await page.wait_for_function('previous => state.performance.latestUsage?.responseId !== previous', arg=previous, timeout=45000)
@@ -134,7 +134,7 @@ async def verify(output, real_turn=False):
                         # must use the source's local day rather than its UTC day.
                         for year, month, day in re.findall(r'(\d{4})[年-](\d{1,2})[月-](\d{1,2})日?', summary):
                             assert f'{int(year):04d}-{int(month):02d}-{int(day):02d}' in expected_dates, result
-                    await page.locator('a[href="#/reports"]').click()
+                    await page.locator('.workspace-nav a[href="#/reports"]').click()
                     async with page.expect_response(lambda response: response.url.endswith('/api/insights') and response.request.method == 'POST', timeout=60000) as pending:
                         await page.locator('#proactiveSuggestions').check()
                     suggestions = await wait_for_report(await (await pending.value).json())
@@ -142,7 +142,7 @@ async def verify(output, real_turn=False):
                     assert suggestions['status'] == 'completed', suggestions
                     assert suggestions['suggestions'], suggestions
                     await page.locator('#proactiveSuggestions').uncheck()
-                    await page.locator('a[href="#/audit"]').click()
+                    await page.locator('.workspace-nav a[href="#/audit"]').click()
                     await page.locator('#promptAuditDetails').evaluate('(node) => { node.open = true; }')
                     await page.wait_for_function("document.querySelector('#actualPromptRequests').textContent.includes('insight.request')")
                     report['realPromptAuditVisible'] = True
@@ -150,7 +150,7 @@ async def verify(output, real_turn=False):
                     await page.evaluate("socket.close(4001, 'acceptance-disconnect')")
                     await page.wait_for_function('providerReady && socket?.readyState === WebSocket.OPEN', timeout=30000)
                     assert await page.evaluate('selectedSessionId') == original_session
-                    await page.locator('a[href="#/conversation"]').click()
+                    await page.locator('.workspace-nav a[href="#/conversation"]').click()
                     await page.locator('#textTurnInput').fill('刚才的现场记录里，验收完成了吗？')
                     previous_response = await page.evaluate('state.performance.latestUsage.responseId')
                     await page.locator('#textTurnSend').click()
@@ -212,8 +212,9 @@ async def verify(output, real_turn=False):
                     if (outbox.entries().length) throw Error('deleted user request retained');
                 }''')
                 report['pendingTextSurvivesReload'] = True
-                await page.locator('a[href="#/conversation"]').click()
-                assert await page.locator('#executionLanes').is_hidden()
+                await page.locator('.workspace-nav a[href="#/conversation"]').click()
+                assert await page.locator('#executionLanes').is_visible()
+                assert await page.locator('#executionLanes [data-lane]').count() == 3
                 assert await page.locator('#performanceMetrics').is_hidden()
                 assert await page.locator('#memoryActivity').is_hidden()
                 assert not await page.locator('#cameraPanel').evaluate('(node) => node.open')
@@ -229,14 +230,20 @@ async def verify(output, real_turn=False):
                     assert layout['composerBottom'] < height, layout
                     report['viewports'].append(layout)
                 await page.locator('#cameraPanel > summary').click()
-                assert await page.locator('#cameraButton').is_visible()
+                await page.locator('#cameraButton').wait_for(state='visible')
                 await page.locator('#cameraPanel > summary').click()
-                await page.locator('a[href="#/audit"]').click()
+                await page.locator('.workspace-nav a[href="#/lanes"]').click()
+                await page.locator('#lane-memory').wait_for(state='visible')
+                assert await page.locator('#laneDetails article').count() == 3
+                assert await page.locator('#lane-memory').is_visible()
+                assert '个人日记' in await page.locator('#lane-memory').text_content()
+                report['threeLanesAccessible'] = True
+                await page.locator('.workspace-nav a[href="#/audit"]').click()
                 await page.locator('#turnWorkflowDetails > summary').click()
                 assert await page.locator('#liveWorkflow').is_visible()
                 assert await page.locator('#performanceMetrics').is_visible()
                 report['diagnosticsAccessible'] = True
-                await page.locator('a[href="#/conversation"]').click()
+                await page.locator('.workspace-nav a[href="#/conversation"]').click()
                 await page.locator('#logout').click()
                 await page.locator('#authGate').wait_for(state='visible')
                 await page.locator('#loginMode').click()

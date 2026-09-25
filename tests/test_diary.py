@@ -225,3 +225,69 @@ def test_diary_notes_export_and_retention_invalidate_only_diary_derivatives(tmp_
             deleted=await client.post('/api/privacy/delete',json={'confirm':True})
             assert deleted.status==200 and not (tmp_path/'users'/uid).exists()
     asyncio.run(run())
+
+
+def test_diary_snapshot_completes_while_new_records_arrive_and_remains_readable(tmp_path):
+    async def run():
+        root=tmp_path/'users'/'me';journal=SessionJournal(root/'sessions'/'case.jsonl',session_id='case')
+        original=message(journal,'上午已经完成原型检查')
+        service=DiaryService(tmp_path/'users',tmp_path/'none.sqlite3','')
+        started,release=asyncio.Event(),asyncio.Event()
+        async def generate(row,data,save):
+            started.set();await release.wait()
+            return body([data['records'][0]['sourceId']],'上午完成原型检查'),[]
+        service.generator.generate=generate
+        row=service.submit('me',period_for('daily','2026-09-01','Asia/Shanghai'))
+        await started.wait()
+        message(journal,'下午新增计划','2026-09-01T14:00:00+08:00')
+        running=await service.get('me',row['id'])
+        assert running['status']=='running' and running['newRecords']==1
+        release.set();await asyncio.gather(*list(service.tasks.values()))
+        completed=await service.get('me',row['id'])
+        assert completed['status']=='completed' and completed['newRecords']==1
+        assert len(completed['sources'])==1 and completed['snapshotAt']
+        service.store('me').note('2026-09-01','新增补记')
+        reopened=DiaryService(tmp_path/'users',tmp_path/'none.sqlite3','')
+        result=await reopened.get('me',row['id'])
+        assert result['status']=='completed' and result['newRecords']==2
+        assert result['body']['overview'][0]['text']=='上午完成原型检查'
+        # Removal of evidence must still retract body and checkpoints.
+        lines=journal.path.read_text('utf-8').splitlines()
+        journal.path.write_text('\n'.join(line for line in lines if json.loads(line)['id']!=original['id'])+'\n',encoding='utf-8')
+        invalid=await reopened.get('me',row['id'])
+        assert invalid['status']=='stale' and not {'body','sources','nodes','calls'} & invalid.keys()
+        await service.close();await reopened.close()
+    asyncio.run(run())
+
+
+def test_diary_snapshot_ignores_index_touch_but_retracts_changed_evidence(tmp_path):
+    from egoassist.diary.sources import source_manifest,snapshot_change
+    source={'sourceId':'memory:one','kind':'memory-state','text':'原始事实','updatedAt':'old'}
+    original={'records':[source],'coverage':{'complete':True}}
+    row={'sourceManifest':source_manifest(original)}
+    touched={'records':[{**source,'updatedAt':'new','derivedEventHints':[{'title':'new index'}]}], 'coverage':{'complete':True}}
+    assert snapshot_change(row,touched)=={'invalid':False,'added':0}
+    touched['records'][0]['text']='已修正事实'
+    assert snapshot_change(row,touched)['invalid']
+    assert snapshot_change(row,{'records':[source],'coverage':{'complete':False}})['invalid']
+    row={'sourceManifest':{'case:original':'hash'},'sourceExternalRefs':{'case:external-id':'case:original'}}
+    data={'records':[{'sourceId':'case:original','kind':'historical-dialogue','text':'{}'},
+        {'sourceId':'case:correction','sessionId':'case','kind':'historical-dialogue','text':json.dumps({'supersedes':'external-id'})}],
+        'coverage':{'complete':True}}
+    row['sourceManifest']['case:original']=source_manifest(data)['case:original']
+    assert snapshot_change(row,data)['invalid']
+
+
+def test_diary_notes_list_is_account_scoped_and_date_filtered(tmp_path):
+    async def run():
+        async with TestClient(TestServer(create_app(str(BUILTIN_SKILLS_ROOT),None,str(tmp_path/'runtime.json'),'unused','Ethan'))) as client:
+            assert (await client.get('/api/diary/notes?day=2026-09-01')).status==401
+            await client.post('/api/auth/register',json={'username':'notes-one','password':'notes-password-123'})
+            await client.post('/api/diary/notes',json={'day':'2026-09-01','text':'已保存补记'})
+            result=await (await client.get('/api/diary/notes?day=2026-09-01')).json()
+            assert [row['text'] for row in result['notes']]==['已保存补记']
+            assert not (await (await client.get('/api/diary/notes?day=2026-09-02')).json())['notes']
+            await client.post('/api/auth/logout')
+            await client.post('/api/auth/register',json={'username':'notes-two','password':'notes-password-123'})
+            assert not (await (await client.get('/api/diary/notes?day=2026-09-01')).json())['notes']
+    asyncio.run(run())
