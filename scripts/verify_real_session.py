@@ -27,7 +27,7 @@ async def verify(output, model, scenario='greeting'):
     report = {'model': model, 'mock': False, 'input': 'text-control', 'passed': False,
               'microphoneAsrMeasured': False, 'events': [], 'audioPackets': 0}
     turns = (['记住：我的储物柜编号是7429。', '我的储物柜编号是什么？']
-             if scenario == 'memory' else ['你好，请用一句话介绍你自己。'])
+             if scenario == 'memory' else ['你好'] if scenario == 'hello' else ['你好，请用一句话介绍你自己。'])
     report['scenario'] = scenario
     report['turns'] = []
     app = create_app(str(BUILTIN_SKILLS_ROOT), None, str(output / 'runtime.json'), model, 'Ethan')
@@ -141,6 +141,6 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--model', default='qwen3.5-omni-flash-realtime')
-    parser.add_argument('--scenario', choices=('greeting', 'memory'), default='greeting')
+    parser.add_argument('--scenario', choices=('greeting', 'hello', 'memory'), default='greeting')
     args = parser.parse_args()
     sys.exit(0 if asyncio.run(verify(args.output, args.model, args.scenario)) else 1)

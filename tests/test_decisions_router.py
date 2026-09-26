@@ -2,6 +2,7 @@ import asyncio
 import json
 from types import SimpleNamespace
 
+import aiohttp
 from aiohttp import web
 from aiohttp.test_utils import TestServer
 import pytest
@@ -147,6 +148,47 @@ def test_invalid_response_never_falls_through_to_actions(monkeypatch):
                 assert result["speechControl"] is None and result["taskControl"] is None
                 assert router._http_session is None
             finally: await router.aclose()
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("case", ["cold-success", "connect-stalled", "read-stalled", "total-deadline"])
+def test_cold_connection_preserves_response_budget_and_total_deadline(monkeypatch, case):
+    async def run():
+        calls = []
+        # The connection and response each fit the stage budget, but their
+        # sum exceeds it. Previously cold-success timed out before the answer.
+        class SlowConnector(aiohttp.TCPConnector):
+            async def _create_connection(self, *args, **kwargs):
+                await asyncio.sleep(.6 if case == "connect-stalled" else .16)
+                return await super()._create_connection(*args, **kwargs)
+
+        async def handler(request):
+            calls.append(await request.json())
+            await asyncio.sleep(.6 if case == "read-stalled" else .16)
+            return web.json_response(body())
+
+        app = web.Application()
+        app.router.add_post("/decisions", handler)
+        async with TestServer(app) as server:
+            monkeypatch.setattr("egoassist.realtime.decisions_router.DECISIONS_URL", str(server.make_url("/decisions")))
+            async with aiohttp.ClientSession(connector=SlowConnector()) as session:
+                router = DecisionsTurnRouter("qwen", decisions_key="test", decisions_session=session,
+                    timeout_seconds=.28 if case == "total-deadline" else .8, decisions_timeout=.25)
+                try:
+                    async with asyncio.timeout(1):
+                        result = await router.classify("hello", [])
+                    if case == "cold-success":
+                        assert result["status"] == "classified"
+                        assert result["interaction"]["action"] == "reply"
+                        assert len(calls) == 1
+                    else:
+                        assert result["status"] == "unavailable" and result["timedOut"]
+                        assert result["interaction"]["action"] == "uncertain"
+                    assert not session.connector._acquired
+                    assert router._http_session is None
+                finally:
+                    await router.aclose()
+                assert not session.closed  # Shared transport ownership is unchanged.
     asyncio.run(run())
 
 

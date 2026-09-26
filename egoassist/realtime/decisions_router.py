@@ -334,11 +334,19 @@ class DecisionsTurnRouter(SemanticTurnRouter):
                 raise ProviderRequestError(401, "MissingOpenRouterKey")
             if self._decisions_session is None:
                 self._decisions_session = aiohttp.ClientSession(trust_env=True, trace_configs=[transport_trace()])
-            async with asyncio.timeout(self.decisions_timeout):
+            # A cold DNS/TCP/TLS connection must not consume the response-read
+            # allowance. The complete classification (including any structured
+            # extraction) remains bounded by SemanticTurnRouter's deadline.
+            audit["timeoutPolicy"] = {"connectSeconds": self.decisions_timeout,
+                                      "readSeconds": self.decisions_timeout,
+                                      "totalSeconds": self.timeout_seconds}
+            async with asyncio.timeout(self.timeout_seconds):
                 async with self._decisions_session.post(
                     DECISIONS_URL, json=payload, allow_redirects=False,
                     headers={"Authorization": "Bearer " + self.decisions_key},
                     trace_request_ctx=audit.setdefault("transport", {}),
+                    timeout=aiohttp.ClientTimeout(total=None, connect=self.decisions_timeout,
+                                                  sock_read=self.decisions_timeout),
                 ) as response:
                     audit["httpStatus"] = response.status
                     raw = (await response.text()).replace(self.decisions_key, "[REDACTED]")
