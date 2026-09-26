@@ -11,7 +11,7 @@ class AmbientPanel {
     root.innerHTML = `<div class="ambient-heading"><b id="ambientTitle">后台环境观察</b><span id="ambientLiveStatus" role="status"></span><button id="ambientGrant" type="button">授权开启</button><button id="ambientRevoke" type="button" hidden>停止后台观察</button></div>
       <p id="ambientPurpose">让助手理解你眼前的情况：回答现场问题、记录有依据的经历，并在与你当前目标相关时提醒。</p>
       <p id="ambientNext" class="ambient-next"></p>
-      <div class="ambient-feedback"><span id="ambientControlStatus" role="status" aria-live="polite"></span><button id="ambientOpenDevices" type="button" hidden>打开设备设置</button></div>
+      <div class="ambient-feedback"><span id="ambientControlStatus" role="status" aria-live="polite"></span><button id="ambientConnect" type="button" hidden>连接观察</button><button id="ambientOpenDevices" type="button" hidden>打开设备设置</button></div>
       <details id="ambientSettings"><summary>观察方式与设置 <span id="ambientDirty"></span></summary>
         <p>授权后按间隔分析摄像头画面。观察授权适用于本账号全部会话；以下设置只应用于当前会话。不开麦克风也能观察。</p>
         <form id="ambientSettingsForm"><label>观察间隔（秒）<input id="ambientInterval" type="number" min="2" max="120" step="1" required></label>
@@ -27,6 +27,7 @@ class AmbientPanel {
     this.$('#ambientGrant').onclick = () => this.act('consent', true);
     this.$('#ambientRevoke').onclick = () => this.act('consent', false);
     this.$('#ambientOpenDevices').onclick = () => actions.devices();
+    this.$('#ambientConnect').onclick = () => this.connect();
     this.$('#ambientSettingsForm').onsubmit = event => {event.preventDefault(); this.act('settings');};
     this.$('#ambientSettingsForm').oninput = () => {if(this.pendingControl?.kind==='settings')this.pendingControl=null;this.dirty=true;this.feedback('设置已修改，点击“应用设置”保存。');this.controls();};
     this.$('#ambientDiscard').onclick = () => {this.dirty=false;this.values(this.info);this.feedback('已恢复服务器设置。');this.controls();};
@@ -43,6 +44,7 @@ class AmbientPanel {
     this.$('#ambientControlStatus').classList.toggle('error',error);
   }
   controls() {
+    this.$('#ambientConnect').disabled = this.busy || this.connecting;
     this.$('#ambientGrant').disabled = this.busy;
     this.$('#ambientRevoke').disabled = this.busy;
     for(const node of this.$('#ambientSettingsForm').elements)node.disabled=this.busy;
@@ -52,6 +54,7 @@ class AmbientPanel {
     this.$('#ambientSave').textContent = this.busy ? '处理中…' : '应用设置';
   }
   reset() {
+    this.connecting=false;this.connectionError=null;
     this.operation++;this.scope=null;this.info=null;this.busy=false;this.dirty=false;
     this.pendingControl=null;
     this.feedback('');this.root.hidden=true;
@@ -78,12 +81,14 @@ class AmbientPanel {
     const failure=info.lane?.providerError;
     this.root.className='ambient-banner ambient-panel '+(consent?'authorized':'idle');
     this.$('#ambientTitle').textContent=info.watchlist?.mode==='focused'?(info.watchlist.title || '专项环境观察'):'后台环境观察';
-    this.$('#ambientLiveStatus').textContent=!consent?'已停止':failure?'服务异常':!info.connected?'已授权 · 等待连接':info.processing?'正在分析画面':!frameFresh?'已授权 · 等待画面':'正在按间隔观察';
+    this.$('#ambientLiveStatus').textContent=!consent?'已停止':this.connecting?'正在连接观察…':!info.connected?(this.connectionError?'连接失败 · 可重试':'已授权 · 尚未连接'):failure?'服务异常':info.processing?'正在分析画面':!frameFresh?'已连接 · 等待摄像头画面':'正在按间隔观察';
     this.$('#ambientGrant').hidden=consent;this.$('#ambientRevoke').hidden=!consent;
     this.$('#ambientNext').textContent=!consent?'不会自动分析新画面。主动提问和任务内画面核对仍可使用。':
-      failure?'观察服务暂不可用，请检查设置与诊断。':!info.connected || !frameFresh?'还没有持续输入画面；打开设备设置、启用摄像头并连接实时会话后开始。':
+      !info.connected?'点击“连接观察”恢复实时连接。授权本身不会建立连接，也不会打开设备。':failure?'观察服务暂不可用，请检查设置与诊断。':!frameFresh?'连接已建立，但还没有持续输入画面；请在设备设置中启用摄像头。':
       `当前会话约每 ${info.intervalSeconds} 秒分析一帧 · ${info.remindersEnabled!==false?'需要时提醒':'提醒已关闭'} · ${info.questionsEnabled?'必要时先询问':'不主动询问'}。`;
     this.$('#ambientOpenDevices').hidden=!consent || Boolean(info.connected && frameFresh);
+    this.$('#ambientConnect').hidden=!consent || Boolean(info.connected && !this.connecting);
+    this.$('#ambientConnect').textContent=this.connecting?'正在连接…':this.connectionError?'重试连接':'连接观察';
     if(!this.dirty && !this.busy)this.values(info);
     this.controls();
     const latest=info.observation;
@@ -99,9 +104,28 @@ class AmbientPanel {
     }
     updateDisclosureHTML(this.$('#ambientReviews'),reviews,scope);
   }
+  async connect() {
+    if(this.connecting || this.busy || !this.info?.consented)return;
+    const scope=this.scope, operation=++this.operation;
+    this.connecting=true;this.connectionError=null;
+    this.feedback('正在建立实时连接；完成后接收摄像头画面。');
+    this.render(this.info,scope);
+    try {
+      await this.actions.connect();
+      if(this.scope!==scope || this.operation!==operation)return;
+      this.feedback('实时连接已建立；摄像头未启用时，请打开设备设置。');
+    } catch(error) {
+      if(this.scope!==scope || this.operation!==operation)return;
+      this.connectionError=error.message;
+      this.feedback('连接未完成：'+error.message,true);
+    } finally {
+      if(this.scope===scope && this.operation===operation){this.connecting=false;this.render(this.info,scope);}
+    }
+  }
   async act(kind, granted) {
     if(this.busy)return;
     const scope=this.scope, operation=++this.operation;
+    this.connecting=false;
     this.pendingControl=null;
     let settings;
     if(kind==='settings'){

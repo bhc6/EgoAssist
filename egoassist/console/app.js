@@ -670,6 +670,11 @@ function renderObservationReviews() {
 const ambientPanel = new AmbientPanel($("#ambientBanner"), {
   session: () => selectedSessionId,
   consent: setAmbientConsent,
+  connect: async () => {
+    const isCurrent = sessionScope();
+    await connectRealtime({media:false});
+    if(isCurrent())render(await request(selectedStatePath()));
+  },
   settings: async settings => {
     const isCurrent = sessionScope();
     const payload = await post("/api/ambient/settings", {sessionId:selectedSessionId, ...settings});
