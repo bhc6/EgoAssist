@@ -1168,6 +1168,12 @@ async function connectRealtimeSession(generation, media, retryAttempt) {
       }
       ready = true;
       providerReady = true;
+      // A transient restart can leave the old fetch error rendered after the
+      // socket has recovered. Clear only connection startup messages; keep
+      // errors belonging to a submitted turn visible for review.
+      if (/暂时无法连接本地服务|实时连接|实时模型连接/.test($("#textTurnError").textContent || "")) {
+        $("#textTurnError").textContent = "";
+      }
       speechGeneration = null; // A restarted server has a new connection-local fence.
       selectedSessionId = message.contextSessionId || selectedSessionId;
       try {
