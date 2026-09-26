@@ -23,7 +23,7 @@ def test_speech_endpoint_waits_through_pause_without_delaying_barge_in(monkeypat
     calls = []
     conversation = SimpleNamespace(update_session=lambda **kwargs: calls.append(kwargs))
     bridge._configure_dialogue(conversation)
-    assert calls[-1]['turn_detection_silence_duration_ms'] == 1200
+    assert calls[-1]['turn_detection_silence_duration_ms'] == 1000
     assert calls[-1]['output_modalities'] == ['audio', 'text']
     assert calls[-1]['turn_detection_param'] == {'create_response': False, 'interrupt_response': False}
     bridge._configure_dialogue(conversation)

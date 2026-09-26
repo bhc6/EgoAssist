@@ -849,7 +849,7 @@ class OmniBrowserBridge:
 
     def _configure_dialogue(self, conversation) -> None:
         from egoassist.core.settings import integer
-        silence_ms = integer('EGOASSIST_SPEECH_END_SILENCE_MS', 1200, minimum=300, maximum=3000)
+        silence_ms = integer('EGOASSIST_SPEECH_END_SILENCE_MS', 1000, minimum=300, maximum=3000)
         tools = [] if getattr(self, "tool_model", None) else getattr(self, "_provider_tools", [])
         signature = (conversation, self.voice, self.instructions, json.dumps(tools, sort_keys=True), silence_ms)
         if getattr(self, "_last_dialogue_configuration", None) == signature:
