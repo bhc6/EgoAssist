@@ -672,6 +672,10 @@ const ambientPanel = new AmbientPanel($("#ambientBanner"), {
   consent: setAmbientConsent,
   connect: async () => {
     const isCurrent = sessionScope();
+    // Unlock output in the button gesture even when no microphone is requested.
+    audioContext = audioContext || new AudioContext();
+    await audioContext.resume();
+    if(!isCurrent())return;
     await connectRealtime({media:false});
     if(isCurrent())render(await request(selectedStatePath()));
   },

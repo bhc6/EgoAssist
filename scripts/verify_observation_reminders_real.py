@@ -21,12 +21,45 @@ from run_egoassist import create_app
 from verify_shared_scene import decode
 
 
-async def verify(output, base_url=None):
+async def verify(output, base_url=None, image_path=None, goal=None, delay_seconds=0, replay_vision=None):
     load_env(str(ROOT/'.env'))
     output.mkdir(parents=True, exist_ok=False)
     report = {'passed': False, 'providerMock': False, 'hardwareMeasured': False, 'pageErrors': []}
+    if replay_vision:
+        assert not base_url, 'Vision replay is isolated-only'
+        from egoassist.realtime.omni import _OmniPerceptionLane, OmniBrowserBridge
+        original_request=_OmniPerceptionLane.request
+        saved=json.loads(replay_vision.read_text('utf8'))
+        def replay_request(lane,image,context=None):
+            if not context or context.get('schema_version')!='ambient-context.v1':
+                return original_request(lane,image,context)
+            # Keep the recorded visual facts/reminder, remove references absent in this isolated account.
+            raw={**saved,'reference_check':None,'follow_up_of':None}
+            policy=context.get('reference_context',{}).get('outputPolicy',{})
+            goals=context.get('reference_context',{}).get('reminderGoals',[])
+            if not policy.get('remindersEnabled') or not any(g['text']==goal for g in goals):
+                raw['notification']=None
+            decision=OmniBrowserBridge.parse_ambient_output(json.dumps(raw,ensure_ascii=False),open_observation=True)
+            lane.loop.call_soon(lane.on_decision,decision,context)
+            return True
+        _OmniPerceptionLane.request=replay_request
+        report.update(providerMock=True,visionReplay=str(replay_vision),realSpeechProvider=True,
+                      replayAdjustments=['reference_check removed: historical memory absent in isolated account',
+                                         'nonmatching/disabled goal negative cases simulated'])
     source = ROOT/'data_real/egolife/A1_JAKE_DAY1/DAY1_A1_JAKE_11100000.mp4'
     _, image = decode(source)
+    if image_path:
+        source=image_path
+        image=source.read_bytes()
+    if delay_seconds:
+        assert not base_url, 'Delay injection is isolated-only'
+        from egoassist.realtime.observation_service import ObservationService
+        original=ObservationService.session_ambient_result
+        async def delayed(self, captured, raw):
+            await asyncio.sleep(delay_seconds)
+            return await original(self, captured, raw)
+        ObservationService.session_ambient_result=delayed
+        report['injectedResultDelaySeconds']=delay_seconds
     report.update(source=str(source), sha256=hashlib.sha256(image).hexdigest())
     try:
         async with AsyncExitStack() as stack:
@@ -60,8 +93,10 @@ async def verify(output, base_url=None):
                     await page.locator('#ambientReminders').set_checked(enabled)
                     await page.locator('#ambientSave').click()
                     await page.wait_for_function('!ambientPanel.busy && !ambientPanel.dirty')
-                await settings('看到桌上的红白格桌布时提醒我检查笔记本。')
-                await page.evaluate('async()=>{await connectRealtime({media:false});}')
+                await settings(goal or '看到桌上的红白格桌布时提醒我检查笔记本。')
+                await page.locator('#ambientConnect').click()
+                await page.wait_for_function('providerReady && !ambientPanel.connecting',timeout=70000)
+                assert await page.evaluate('audioContext?.state')=='running'
                 await page.evaluate("""() => {
                     window.reminderEvents = [];
                     socket.addEventListener('message', event => {
@@ -84,6 +119,8 @@ async def verify(output, base_url=None):
                 await page.wait_for_function("id=>state.runtimeLanes.observation.reviews.some(r=>r.candidateId===id && ['audio-sent','played'].includes(r.status))", arg=first['candidateId'], timeout=30000)
                 await page.wait_for_function("reminderEvents.some(e=>e.type==='audio')", timeout=15000)
                 await page.wait_for_function("reminderEvents.some(e=>e.type==='assistant_transcript' && e.text)", timeout=15000)
+                await page.wait_for_function("id=>state.runtimeLanes.observation.reviews.some(r=>r.candidateId===id && r.status==='played')",arg=first['candidateId'],timeout=30000)
+                report['browserPlaybackConfirmed']=True
                 report['delivery'] = await page.evaluate('id=>state.runtimeLanes.observation.reviews.find(r=>r.candidateId===id)', first['candidateId'])
                 assert not report['delivery'].get('draftId')
                 report['events'] = await page.evaluate('reminderEvents')
@@ -107,6 +144,7 @@ async def verify(output, base_url=None):
                 disabled, _ = await observe()
                 report['disabledReview'] = disabled
                 assert disabled['status'] not in {'ready','audio-sent','played'}, disabled
+                report['reminderChecksPassed'] = True
                 await page.locator('#ambientRevoke').click()
                 await page.wait_for_function('!ambientState.consented && !ambientPanel.busy')
                 await page.locator('#textTurnInput').fill('九乘九是多少？只回答数字。')
@@ -140,5 +178,9 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--output',type=Path,required=True)
     parser.add_argument('--base-url')
+    parser.add_argument('--image',type=Path)
+    parser.add_argument('--goal')
+    parser.add_argument('--delay-seconds',type=float,default=0)
+    parser.add_argument('--replay-vision',type=Path)
     args=parser.parse_args()
-    raise SystemExit(0 if asyncio.run(verify(args.output,args.base_url)) else 1)
+    raise SystemExit(0 if asyncio.run(verify(args.output,args.base_url,args.image,args.goal,args.delay_seconds,args.replay_vision)) else 1)

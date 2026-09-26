@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
-from egoassist.core.settings import perception_settings
+from egoassist.core.settings import observation_speech_max_age_ms
 from egoassist.product import (
     AmbientFrameContext,
     AmbientObservationHypothesis,
@@ -173,7 +173,7 @@ class ObservationService:
                 return reject(validation.reason)
             evidence = validation.observation
             fresh_for_speech = (
-                evidence.frame_age_ms <= perception_settings()["liveMaxAgeMs"]
+                evidence.frame_age_ms <= observation_speech_max_age_ms(hypothesis.notification)
             )
             watch.ingest(dict(evidence.evidence))
             self.product_database.record_observation(evidence)

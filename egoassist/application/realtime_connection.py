@@ -929,9 +929,9 @@ class RealtimeConnection:
                     if review.get("reminderGoalSourceIds", []) != ([goal["sourceId"]] if goal else []):
                         return False
                 age = (datetime.now(timezone.utc) - datetime.fromisoformat(review["capturedAt"])).total_seconds() * 1000
-                from egoassist.core.settings import perception_settings
+                from egoassist.core.settings import observation_speech_max_age_ms
                 # Once speech begins, let it finish; stale queued reminders must not start.
-                if not review.get("sentAt") and age > perception_settings()["liveMaxAgeMs"]:
+                if not review.get("sentAt") and age > observation_speech_max_age_ms(review.get('notification')):
                     return False
                 return bool(watch and options["remindersEnabled" if kind == "reminder" else "questionsEnabled"]
                     and origin.get("contextId") == watch.perception_context_id

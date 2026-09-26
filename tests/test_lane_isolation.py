@@ -228,7 +228,7 @@ def test_observation_memory_failure_preserves_source_and_suppresses_clarificatio
     clock = ClockContext.current()
     captured = SimpleNamespace(observation_mode='open', previous_observation=None,
         frame_captured_at=clock.now_utc, frame_id='frame', media=None)
-    hypothesis = SimpleNamespace(visible_evidence=['blue bicycle'], uncertainties=[])
+    hypothesis = SimpleNamespace(visible_evidence=['blue bicycle'], uncertainties=[], notification=None)
     evidence = SimpleNamespace(source='camera/test', received_at=clock.now_utc,
         observation_id='observation', task_id=None, frame_age_ms=0)
     def unavailable(*args):

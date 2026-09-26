@@ -24,7 +24,15 @@ def perception_settings():
         "liveMaxAgeMs": integer(
             "EGOASSIST_LIVE_FRAME_MAX_AGE_MS", 5000, maximum=300000
         ),
+        "requestedReminderMaxAgeMs": integer(
+            "EGOASSIST_REQUESTED_REMINDER_MAX_AGE_MS", 20000, maximum=60000
+        ),
     }
+
+
+def observation_speech_max_age_ms(notification=None):
+    settings = perception_settings()
+    return settings['requestedReminderMaxAgeMs'] if isinstance(notification, dict) and notification.get('kind') == 'requested-reminder' else settings['liveMaxAgeMs']
 
 
 def asr_settings():

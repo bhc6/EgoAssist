@@ -6,7 +6,7 @@ publishes its result after the case commit lock has been released.
 from dataclasses import dataclass
 from typing import Any
 from egoassist.core.lane_contracts import AcceptedObservation
-from egoassist.core.settings import perception_settings
+from egoassist.core.settings import observation_speech_max_age_ms
 from egoassist.memory.service import ObservationMemory
 from egoassist.prompts import prompt_text
 
@@ -57,7 +57,7 @@ class ObservationInteraction:
     def ambient(self, message: AcceptedObservation):
         captured, hypothesis, evidence = message.captured, message.hypothesis, message.evidence
         observation_entry = message.entry
-        fresh_for_speech = evidence.frame_age_ms <= perception_settings()['liveMaxAgeMs']
+        fresh_for_speech = evidence.frame_age_ms <= observation_speech_max_age_ms(hypothesis.notification)
         self.remember(message, ambient=True)
         self.owner.scene.events.schedule()
         speech = None
@@ -113,6 +113,8 @@ class ObservationInteraction:
                 "utterance": prompt_text("perception/ambient_notification", message=review["notification"]["message"]),
                 "reason": "observation-reminder",
             }
+            if (review.get('notification') or {}).get('kind') == 'requested-reminder':
+                speech['utterance'] += ' 这是刚才采样画面中的事件。用“刚才看到”表述，不声称此刻仍在发生；直接完成用户已请求的提醒，不询问是否需要提醒，不添加记录或保存承诺。'
         return {
             "accepted": True,
             "reason": message.reason,

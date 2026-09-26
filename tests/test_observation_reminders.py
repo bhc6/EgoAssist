@@ -31,6 +31,42 @@ def consider(runtime, captured, hypothesis, **options):
         'reminders_enabled': True, **options})
 
 
+@pytest.mark.parametrize('kind,age,ready', [
+    ('requested-reminder',9512,True), ('requested-reminder',20001,False),
+    ('hazard',9512,False), ('goal-help',9512,False), (None,9512,False)])
+def test_recent_requested_event_can_speak_without_relaxing_live_alerts(tmp_path,monkeypatch,kind,age,ready):
+    from egoassist.realtime.observation_interaction import ObservationInteraction
+    from egoassist.core.lane_contracts import AcceptedObservation
+    monkeypatch.setenv('EGOASSIST_REQUESTED_REMINDER_MAX_AGE_MS','20000')
+    monkeypatch.setenv('EGOASSIST_LIVE_FRAME_MAX_AGE_MS','5000')
+    runtime, _, captured, hypothesis=setup(tmp_path)
+    if kind:
+        hypothesis.notification['kind']=kind
+    else:
+        hypothesis.notification=None
+        hypothesis.clarification='这是你的钥匙吗？'
+        hypothesis.salient_change=True
+    for key in ('watchlist_id','watchlist_version','context_id','frame_id'):
+        setattr(captured,key,'test')
+    captured.watch_epoch=0
+    entry=runtime.journal.append('ambient_observation',{'observation_id':'recent'})
+    consumer=ObservationInteraction.__new__(ObservationInteraction)
+    consumer.remember=lambda *a,**kw:None
+    consumer.owner=SimpleNamespace(scene=SimpleNamespace(events=SimpleNamespace(schedule=lambda:None),ingest_review=lambda r:None),
+                                   lanes=runtime,queued_turn_ids=set(),output_generation=0)
+    consumer.memory_service=SimpleNamespace(pending_draft=lambda *a:None)
+    consumer.user_id='u';consumer.session_id='case'
+    consumer.bridge=lambda:SimpleNamespace()
+    consumer.interaction_state=SimpleNamespace(playback_context=lambda:{},allows=lambda *a:True)
+    consumer.ambient_options=lambda owner:{'questionsEnabled':True,'remindersEnabled':True,'questionCooldownSeconds':90}
+    result=consumer.ambient(AcceptedObservation(captured,hypothesis,SimpleNamespace(frame_age_ms=age),entry,'accepted'))
+    assert bool(result['speech']) is ready
+    if ready:
+        assert '刚才看到' in result['speech']['utterance']
+    else:
+        assert runtime.reviews.recent()[-1]['reason']=='stale-frame'
+
+
 def test_reminder_works_without_questions_and_never_creates_a_memory_draft(tmp_path):
     runtime, timeline, captured, hypothesis = setup(tmp_path)
     row = consider(runtime, captured, hypothesis)
