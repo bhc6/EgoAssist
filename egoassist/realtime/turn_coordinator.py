@@ -671,6 +671,7 @@ class TurnCoordinator:
                     self.session_tool_declarations(), self.session_tool_handler
                 )
             if not background_intent and result.get("taskControl") == "show-reference":
+                from egoassist.core.settings import tool_calls_enabled
                 result["referenceResult"] = execute_reference_request(
                     self.harness,
                     self.execute_session_tool,
@@ -680,7 +681,7 @@ class TurnCoordinator:
                         "intentId": intent["intentId"],
                         "jobId": job["jobId"],
                     },
-                )
+                ) if tool_calls_enabled() else {"status": "unsupported", "reason": "工具调用已关闭。"}
             if not background_intent:
                 self.refresh_harness_context(
                     self.bridge(), self.harness, self.session_runtime

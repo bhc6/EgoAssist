@@ -37,6 +37,11 @@ def asr_settings():
 
 def tool_settings():
     return {
+        "enabled": tool_calls_enabled(),
         "maxRounds": integer("EGOASSIST_TOOL_MAX_ROUNDS", 4, maximum=64),
         "maxCalls": integer("EGOASSIST_TOOL_MAX_CALLS", 16, maximum=256),
     }
+
+
+def tool_calls_enabled():
+    return bool(integer("EGOASSIST_TOOL_CALLS_ENABLED", 0, minimum=0, maximum=1))

@@ -20,7 +20,7 @@ from egoassist.application.realtime_connection import RealtimeConnection
 from egoassist.application.retention import AccountRetention
 from egoassist.application.state import StateProjection
 from egoassist.application.task_api import TaskEndpoints
-from egoassist.core.settings import number
+from egoassist.core.settings import number, tool_calls_enabled
 from egoassist.memory import ClockContext, TimelineMemory
 from egoassist.memory.commit import MemoryCommitService
 from egoassist.memory.service import MemoryService
@@ -346,6 +346,8 @@ def create_app(
                     "reason": "A task-scoped artifact resolver and browser viewer are connected.",
                 }
                 item["handler"] = "builtin.artifact-reference.v1"
+            if not tool_calls_enabled():
+                item["availability"] = {"status": "unconfigured", "reason": "工具调用已关闭。"}
             declarations.append(item)
         return declarations
 

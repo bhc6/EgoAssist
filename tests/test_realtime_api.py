@@ -215,6 +215,37 @@ def install_queue_test_bridge(monkeypatch):
     return instances
 
 
+@pytest.mark.parametrize('enabled', [False, True])
+def test_tool_switch_controls_declarations_model_and_execution(tmp_path, monkeypatch, enabled):
+    monkeypatch.delenv('EGOASSIST_TOOL_CALLS_ENABLED', raising=False)
+    if enabled:
+        monkeypatch.setenv('EGOASSIST_TOOL_CALLS_ENABLED', '1')
+    instances=install_queue_test_bridge(monkeypatch)
+    patch_semantic_router(monkeypatch)
+
+    async def scenario():
+        app=create_app(str(BUILTIN_SKILLS_ROOT),None,str(tmp_path/'runtime.json'),'test','Ethan')
+        async with TestClient(TestServer(app)) as client:
+            await register_client(client)
+            sid=(await (await client.post('/api/sessions')).json())['session']['id']
+            await client.post('/api/skills/activate',json={'skill':'assembly-coach','sessionId':sid})
+            async with client.ws_connect('/ws/realtime?session='+sid) as ws:
+                await ws.receive_json(); await ws.receive_json()
+                bridge=instances[-1]
+                assert bool(bridge.declarations)==enabled
+                assert (bridge.tool_model is not None)==enabled
+                if not enabled:
+                    with pytest.raises(RuntimeError,match='工具调用已关闭'):
+                        bridge.tool_handler('show_reference',{},True,{'tools':[{'name':'show_reference'}]})
+                    response=await client.post('/api/tools/execute',json={'sessionId':sid,'tool':'show_reference','arguments':{}})
+                    assert response.status==400
+                    assert '工具调用已关闭' in (await response.json())['error']
+                await ws.send_json({'type':'control','transcript':'你好','clientRequestId':'hello'})
+                await asyncio.wait_for(bridge.request_event.wait(),timeout=3)
+                assert bridge.requests
+    asyncio.run(scenario())
+
+
 def test_vision_prepares_in_parallel_and_stop_bypasses_blocked_question(tmp_path, monkeypatch):
     from egoassist.realtime.scene import SharedScene
     install_queue_test_bridge(monkeypatch)
@@ -1370,6 +1401,7 @@ def test_case_memory_policy_is_audited_and_gates_realtime_plugins(tmp_path, monk
 
 
 def test_websocket_sessions_isolate_runtime_memory_and_resume_from_journal(tmp_path, monkeypatch):
+    monkeypatch.setenv('EGOASSIST_TOOL_CALLS_ENABLED', '1')
     instances = []
 
     class FakeBridge:
@@ -1510,6 +1542,7 @@ def test_websocket_sessions_isolate_runtime_memory_and_resume_from_journal(tmp_p
 
 
 def test_rejected_skill_proposal_preserves_runtime_and_exit_clears_bridge(tmp_path, monkeypatch):
+    monkeypatch.setenv('EGOASSIST_TOOL_CALLS_ENABLED', '1')
     instances = install_queue_test_bridge(monkeypatch)
 
     async def classify(_self, text, catalog):
@@ -1981,6 +2014,7 @@ def test_simultaneous_websocket_handshakes_reserve_exactly_one_writer(tmp_path, 
 
 
 def test_case_observation_tool_audit_and_routing_survive_state_and_reconnect(tmp_path, monkeypatch):
+    monkeypatch.setenv('EGOASSIST_TOOL_CALLS_ENABLED', '1')
     install_queue_test_bridge(monkeypatch)
     patch_semantic_router(monkeypatch)
 
@@ -2185,6 +2219,7 @@ def test_active_case_owner_cache_fails_bounded_instead_of_growing(tmp_path, monk
 
 
 def test_provider_tool_callback_is_blocked_after_case_transition(tmp_path, monkeypatch):
+    monkeypatch.setenv('EGOASSIST_TOOL_CALLS_ENABLED', '1')
     instances = install_queue_test_bridge(monkeypatch)
     classification_started = asyncio.Event()
     classification_cancelled = asyncio.Event()
@@ -2246,6 +2281,7 @@ def test_provider_tool_callback_is_blocked_after_case_transition(tmp_path, monke
 
 
 def test_foreground_tool_origin_is_rejected_after_new_turn_generation(tmp_path, monkeypatch):
+    monkeypatch.setenv('EGOASSIST_TOOL_CALLS_ENABLED', '1')
     instances = install_queue_test_bridge(monkeypatch)
     patch_semantic_router(monkeypatch)
 
@@ -2281,6 +2317,7 @@ def test_foreground_tool_origin_is_rejected_after_new_turn_generation(tmp_path, 
 
 
 def test_provider_tool_callback_is_blocked_after_turn_correction(tmp_path, monkeypatch):
+    monkeypatch.setenv('EGOASSIST_TOOL_CALLS_ENABLED', '1')
     instances = install_queue_test_bridge(monkeypatch)
     patch_semantic_router(monkeypatch)
 

@@ -540,6 +540,9 @@ class TaskEndpoints:
         )
 
     async def post_tool(self, request):
+        from egoassist.core.settings import tool_calls_enabled
+        if not tool_calls_enabled():
+            raise ValueError("工具调用已关闭。")
         user_id = request[self.user_key]["id"]
         payload = await request.json()
         session_id = str(payload.get("sessionId", "")).strip() or None

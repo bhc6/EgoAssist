@@ -144,6 +144,7 @@ def test_temporal_reminder_survives_worker_restart_and_cancel_is_distinct(tmp_pa
 
 
 def test_product_api_exposes_timer_only_with_live_temporal_worker(tmp_path, monkeypatch):
+    monkeypatch.setenv('EGOASSIST_TOOL_CALLS_ENABLED', '1')
     async def scenario():
         environment = await WorkflowEnvironment.start_time_skipping(
             download_dest_dir=str(ROOT / ".cache" / "temporal-test-server"),

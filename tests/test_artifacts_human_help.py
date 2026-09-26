@@ -16,7 +16,8 @@ async def register_client(client, username):
     return (await response.json())["user"]
 
 
-def test_task_artifact_is_checkpoint_scoped_and_records_access(tmp_path):
+def test_task_artifact_is_checkpoint_scoped_and_records_access(tmp_path, monkeypatch):
+    monkeypatch.setenv('EGOASSIST_TOOL_CALLS_ENABLED', '1')
     async def scenario():
         app = create_app(
             str(BUILTIN_SKILLS_ROOT), None,

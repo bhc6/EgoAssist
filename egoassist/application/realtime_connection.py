@@ -410,6 +410,9 @@ class RealtimeConnection:
         def execute_session_tool(
             name: str, arguments: dict, confirmed: bool, origin: dict | None = None
         ) -> dict:
+            from egoassist.core.settings import tool_calls_enabled
+            if not tool_calls_enabled():
+                raise RuntimeError("工具调用已关闭。")
             if (
                 owner.socket_token is not socket_token
                 or owner.epoch != connection_epoch
@@ -907,8 +910,9 @@ class RealtimeConnection:
                 emit,
                 transcript_received,
             )
-            bridge.auto_approve_tools = True
-            bridge.tool_model = ToolModel(api_key)
+            from egoassist.core.settings import tool_calls_enabled
+            bridge.auto_approve_tools = tool_calls_enabled()
+            bridge.tool_model = ToolModel(api_key) if tool_calls_enabled() else None
             bridge.on_transcript_evidence = transcript_with_evidence
             bridge.interaction_managed = True
             bridge.playback_context = interaction_state.playback_context
