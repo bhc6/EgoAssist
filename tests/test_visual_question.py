@@ -170,7 +170,7 @@ def test_scene_http_connection_reused_across_visual_lanes_and_closed(tmp_path, m
         async def answer(request):
             body = await request.json()
             transports.append(request.transport)
-            text = '{"description":"red","people":[]}' if body["parameters"].get("response_format") else "red"
+            text = '{"description":"red","people":[]}' if "people" in body["input"]["messages"][0]["content"][0]["text"] and "directAnswer" not in body["input"]["messages"][0]["content"][0]["text"] else '{"evidence":[{"description":"red","sourceIds":["F01"]}],"uncertainties":[]}'
             return web.json_response({"output": {"choices": [{"message": {"content": [{"text": text}]}, "finish_reason": "stop"}]}})
 
         app = web.Application()

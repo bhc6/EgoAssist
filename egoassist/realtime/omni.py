@@ -2166,8 +2166,9 @@ class OmniBrowserBridge:
             self._return_result_to_inbox(request, "output-permission")
             self._trace("response.permission.blocked", {"origin": request.origin, "purpose": request.purpose})
             return
-        if (getattr(self, "backend", "omni") == "omni"
-                and (request.origin or {}).get("inputChannel") == "explicit-control"):
+        if ((request.origin or {}).get("preparedAnswer") or
+                (getattr(self, "backend", "omni") == "omni"
+                 and (request.origin or {}).get("inputChannel") == "explicit-control")):
             self.loop.call_soon_threadsafe(self._send_text_response, request)
             return
         try:
@@ -2237,15 +2238,18 @@ class OmniBrowserBridge:
         if self._context_harness is not None:
             for item in self._context_harness.provider_replay_items(compact_timestamps=True):
                 conversation.create_item(item)
+        prepared_answer = (request.origin or {}).get("preparedAnswer")
         self._response_conversation = conversation
         self._trace("response.dispatched", {
             "sequence": request.sequence, "purpose": request.purpose, "outputMode": request.output_mode,
             "instructions": request.instructions, "origin": dict(request.origin or {}),
-            "backend": "text-and-tts", "model": conversation.model,
+            "backend": "visual-answer-and-tts" if prepared_answer else "text-and-tts",
+            "model": prepared_answer["model"] if prepared_answer else conversation.model,
         })
         conversation.create_response(
             instructions=request.instructions,
             output_modalities=["text"] if request.output_mode == "text" else ["audio", "text"],
+            prepared_answer=prepared_answer,
         )
 
     def _cancel_provider_response(self) -> None:

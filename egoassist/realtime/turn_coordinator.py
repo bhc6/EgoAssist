@@ -800,6 +800,11 @@ class TurnCoordinator:
                         ),
                     },
                 )
+            from .direct_visual import prepared_visual_answer
+            prepared_answer = prepared_visual_answer(
+                shared_scene, semantic, task=bool(processing_runtime.task),
+                compound=bool(secondary_response_candidates or parallel_candidates or background_intent),
+            )
             primary_instruction = None
             if (
                 not background_intent
@@ -831,6 +836,7 @@ class TurnCoordinator:
                     question=text,
                     instructions=primary_instruction,
                     context=shared_answer_context,
+                    prepared_result=prepared_answer,
                     dialogue_job={"intentId": intent["intentId"], "jobId": job["jobId"]}
                     if intent_kind == "foreground-dialogue"
                     and (not processing_runtime.task)
@@ -1111,6 +1117,7 @@ class TurnCoordinator:
                 origin={
                     "turnId": turn_id,
                     "answerObligation": turn_id,
+                    **({"preparedAnswer": prepared_answer} if prepared_answer else {}),
                     "inputChannel": "explicit-control" if explicit else "microphone",
                     "intentId": intent["intentId"],
                     "jobId": job["jobId"],

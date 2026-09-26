@@ -53,7 +53,7 @@ class VisualQuestions:
         if sequence:
             from .interaction_window import interaction_vision_model
             model = interaction_vision_model(len(frames))
-        prompt = prompt_text("scene/interaction_window" if sequence else "scene/question")
+        prompt = prompt_text("scene/interaction_window" if sequence else "scene/question") + "\n" + prompt_text("scene/direct_answer")
         timeout = float(os.getenv('EGOASSIST_INTERACTION_VISION_TIMEOUT', '8')) if sequence else self.timeout
         if not .1 <= timeout <= 10:
             raise ValueError('interaction vision timeout must be between 0.1 and 10 seconds')
@@ -88,8 +88,8 @@ class VisualQuestions:
                     headers={"Authorization": "Bearer " + self.scene.api_key}, json={"model": model,
                     "input": {"messages": [{"role": "system", "content": [{"text": prompt}]},
                         {"role": "user", "content": content}]},
-                    "parameters": {"temperature": 0, "enable_thinking": False, "max_tokens": 500 if sequence else 256,
-                                   **({'response_format': {'type': 'json_object'}} if sequence else {})}}) as response:
+                    "parameters": {"temperature": 0, "enable_thinking": False, "max_tokens": 700 if sequence else 500,
+                                   'response_format': {'type': 'json_object'}}}) as response:
                     response.raise_for_status()
                     payload = await response.json()
                 result['providerMs'] = round((time.perf_counter() - provider_started) * 1000, 1)
@@ -98,11 +98,14 @@ class VisualQuestions:
             description = content if isinstance(content, str) else "".join(c.get("text", "") for c in content)
             if not description.strip() or choice.get("finish_reason") not in {None, "stop"}:
                 raise ValueError("incomplete visual evidence")
-            if sequence:
+            if sequence or description.lstrip().startswith("{"):
                 from .visual_history import validate_evidence
-                facts, uncertainties = validate_evidence(json.loads(description), set(source_labels))
+                from .direct_visual import validate_direct_answer
+                parsed = json.loads(description)
+                facts, uncertainties = validate_evidence(parsed, set(source_labels))
                 facts = [{**fact, 'sourceIds': [source_labels[ref] for ref in fact['sourceIds']]} for fact in facts]
-                result.update(evidence=facts, uncertainties=uncertainties, rawOutput=description)
+                result.update(evidence=facts, uncertainties=uncertainties, rawOutput=description,
+                              directAnswer=validate_direct_answer(parsed, source_labels))
                 description = '\n'.join(f['description'] for f in facts)
             result.update(status="observed", description=description, requestId=payload.get("request_id"), usage=payload.get("usage"))
         except Exception as exc:

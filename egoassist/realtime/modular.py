@@ -443,10 +443,10 @@ class ModularConversation:
             self.item_ids.discard(old)
             self._audit({"stage": "context", "status": "evicted-oldest-item", "apiCalls": 0, "cost": None})
 
-    def create_response(self, *, instructions, output_modalities):
-        self._on_loop(self._start_response, instructions, list(output_modalities))
+    def create_response(self, *, instructions, output_modalities, prepared_answer=None):
+        self._on_loop(self._start_response, instructions, list(output_modalities), prepared_answer)
 
-    def _start_response(self, instructions, modalities):
+    def _start_response(self, instructions, modalities, prepared_answer=None):
         if self.closed:
             return
         if self.response and not self.response.done():
@@ -455,21 +455,22 @@ class ModularConversation:
         sid = "modular-" + uuid4().hex
         self.active_response_id = sid
         self.response_usage = None
-        self.response = self._task(self._respond(sid, instructions, modalities))
+        response_model = prepared_answer["model"] if prepared_answer else self.model
+        self.response = self._task(self._respond(sid, instructions, modalities, prepared_answer))
         def before_start_cancelled(task):
             if task.cancelled():
                 if self.response is task:
                     self.response = None
-                self._event("response.cancelled", response={"id": sid, "model": self.model, "status": "cancelled"})
+                self._event("response.cancelled", response={"id": sid, "model": response_model, "status": "cancelled"})
         self.response.add_done_callback(before_start_cancelled)
-        self._event("response.created", response={"id": sid, "model": self.model})
+        self._event("response.created", response={"id": sid, "model": response_model})
 
-    async def _respond(self, sid, instructions, modalities):
+    async def _respond(self, sid, instructions, modalities, prepared_answer=None):
         started = time.perf_counter()
         status = "completed"
         audio_available = None
         text_parts = []
-        visual = not self.session.get("enable_input_audio_transcription")
+        visual = not prepared_answer and not self.session.get("enable_input_audio_transcription")
         try:
             # Allow an immediate cancellation from response.created to propagate.
             await asyncio.sleep(0)
@@ -482,6 +483,14 @@ class ModularConversation:
                 messages.append({"role": "system", "content": instructions})
                 audio = Modalities.AUDIO in modalities
                 async def tokens():
+                    if prepared_answer:
+                        token = prepared_answer['text']
+                        text_parts.append(token)
+                        self._event("response.audio_transcript.delta" if audio else "response.text.delta", response_id=sid, delta=token)
+                        self._audit({'stage': 'prepared-answer', 'model': prepared_answer['model'],
+                                     'responseId': sid, 'apiCalls': 0, 'deliveryPath': 'direct-visual'})
+                        yield token
+                        return
                     async with aclosing(self.provider.text_stream(messages)) as stream:
                         async for token in stream:
                             text_parts.append(token)
@@ -512,7 +521,7 @@ class ModularConversation:
             self._audit({"stage": "response", "status": status, "responseId": sid,
                          "latencyMs": (time.perf_counter() - started) * 1000, "apiCalls": 0, "cost": None})
             self._event("response.done" if status == "completed" else "response." + status,
-                        response={"id": sid, "model": self.config["visionModel"] if visual else self.model,
+                        response={"id": sid, "model": prepared_answer["model"] if prepared_answer else self.config["visionModel"] if visual else self.model,
                                   "status": status, "usage": self.response_usage, "audioAvailable": audio_available})
 
     async def _speak_text_turn(self, sid, tokens, text_parts):

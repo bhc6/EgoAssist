@@ -49,14 +49,15 @@ class AnswerJobs:
         return journal.append("answer.job", {**value, **changes}, parent_id=row.get("id"),
                               required_event_ids=(row['id'],))
 
-    def register(self, user_id, journal, *, turn_id, question, instructions, context=None, dialogue_job=None, deferred=False):
+    def register(self, user_id, journal, *, turn_id, question, instructions, context=None, dialogue_job=None, deferred=False, prepared_result=None):
         self.journals[str(journal.path)] = (user_id, journal)
         if turn_id not in answer_jobs(journal):
             journal.append("answer.job", {"turnId": turn_id, "question": question,
                 "instructions": instructions, "context": context or {},
                 "dialogueJob": dialogue_job,
                 "status": "queued" if deferred else "foreground",
-                "model": self.model, "attempt": 0, "createdAt": datetime.now(timezone.utc).isoformat()},
+                "model": prepared_result["model"] if prepared_result else self.model,
+                "preparedResult": prepared_result, "attempt": 0, "createdAt": datetime.now(timezone.utc).isoformat()},
                 idempotency_key="answer:" + turn_id)
 
     def interrupt(self, journal, turn_id):

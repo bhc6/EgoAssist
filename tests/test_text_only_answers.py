@@ -113,6 +113,30 @@ def test_text_fallback_is_persisted_without_claiming_audio(tmp_path):
     assert answer["text"] == "Available text"
 
 
+@pytest.mark.parametrize('channel', ['microphone', 'explicit-control'])
+def test_prepared_visual_uses_delivery_bridge_for_both_channels(tmp_path, monkeypatch, channel):
+    monkeypatch.setattr('egoassist.realtime.modular.ModularConversation',
+                        partial(ModularConversation, provider_factory=FakeProvider))
+
+    async def run():
+        events = []
+        async def emit(payload):
+            events.append(payload)
+        bridge = OmniBrowserBridge('test', 'test', 'Ethan', 'instructions', emit, lambda _: None)
+        bridge.connected = True
+        cloud = bridge.conversation = CloudConversation()
+        harness = ContextHarness(SessionJournal(tmp_path / 'context.jsonl'))
+        bridge.set_context_harness(harness)
+        bridge.request_response('grounding', origin={'turnId': 'visual', 'inputChannel': channel,
+            'preparedAnswer': {'text': '红白格桌布。', 'model': 'actual-vl'}})
+        await settle(lambda: any(e.get('type') == 'response_status' and e.get('status') == 'completed' for e in events))
+        assert not cloud.created and bridge._text_conversation.provider.messages == []
+        assert any(e['type'] == 'audio' for e in events)
+        assert any(r.get('message', {}).get('content') == '红白格桌布。' for r in harness.journal.entries(types={'message'}))
+        await bridge.close()
+    asyncio.run(run())
+
+
 @pytest.mark.parametrize("original_source,resume_source,expected", [
     ("explicit-control", "explicit-control", "explicit-control"),
     ("explicit-control", "input-audio-transcript", "explicit-control"),

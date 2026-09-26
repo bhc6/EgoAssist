@@ -445,13 +445,8 @@ function renderWorkCenter() {
       (answer?.durationMs != null ? "<small>回答耗时 " + esc(answer.durationMs) + " ms</small>" : "") +
       (answer?.inputToCompleteMs != null ? "<small>接收到完整答案 " + esc(answer.inputToCompleteMs) + " ms</small>" : "") +
       (() => {
-        const models = [...new Set([
-          turn.semantic?.model,
-          ...(state.events || []).filter(e => e.payload?.turnId === turn.turnId || e.payload?.origin?.turnId === turn.turnId)
-            .flatMap(e => [e.model, e.payload?.model, e.payload?.request?.model]),
-          answer?.model,
-        ].filter(Boolean))];
-        return models.length ? "<small>经手模型：" + esc(models.join(" → ")) + "</small>" : "";
+        const models = turnModelStageText(turn, state.events || []);
+        return models ? "<small>" + esc(models) + "</small>" : "";
       })() +
       "<button type='button' class='inspect-turn' data-inspect-turn='" + esc(turn.turnId) + "'>查看处理记录</button>" +
       (answer && ["queued", "running"].includes(answer.status) ? "<button type='button' data-answer-action='cancel' data-answer-turn='" + esc(turn.turnId) + "'>取消这个问题</button>" : "") +

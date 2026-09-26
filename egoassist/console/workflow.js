@@ -34,13 +34,7 @@ function renderTurnWorkflow() {
   const pendingVision = state.sharedScene?.questionVisionPending?.find(p => p.turnId === turn.turnId);
   const events = (state.events || []).filter(e => e.payload?.turnId === turn.turnId ||
     e.payload?.origin?.turnId === turn.turnId || (answer?.responseId && e.responseId === answer.responseId));
-  const models = [...new Set([
-    semantic?.model,
-    ...events.flatMap(e => [e.model, e.payload?.model, e.payload?.request?.model]),
-    ...(state.toolActivity || []).filter(c => c.origin?.turnId === turn.turnId && c.request).map(c => c.tool),
-    answer?.model,
-    scene?.model,
-  ].filter(Boolean))];
+  const models = turnModelStageText(turn, state.events || []);
   const elapsed = answer?.startedAt && answer.status === "running" ?
     " · 已等待 " + Math.max(0, (Date.now() - Date.parse(answer.startedAt)) / 1000).toFixed(1) + " 秒 / 上限 " + answer.timeoutSeconds + " 秒" : "";
   const row = (label, detail) => "<div class='workflow-fact'><b>" + esc(label) + "</b><span>" + esc(detail) + "</span></div>";
@@ -56,8 +50,7 @@ function renderTurnWorkflow() {
       semantic.selectedSkill, semantic.selectedTask].filter(Boolean).map(workKindLabel).join(" · ") || "已完成分类" : "等待分类记录") +
     row("记忆处理", ["invalid", "unavailable"].includes(semantic?.status) ? "原话已保留，等待后台解析" :
       semantic?.memoryQuery ? "本轮请求检索记忆" : semantic?.memoryText ? "本轮包含记忆候选" : "本轮没有记忆候选") +
-    row("回答模型", answer?.model || "尚无该问题的回答模型记录") +
-    row("经手模型", models.length ? models.join(" → ") : "尚无模型记录") +
+    row("实际模型阶段", models || "尚无实际调用记录") +
     row("分类耗时", semantic?.latencyMs != null ? semantic.latencyMs + " ms" : "尚未完成测量") +
     row("接收到首字", answer?.inputToFirstTextMs != null ? answer.inputToFirstTextMs + " ms" : "尚未收到文字") +
     row("接收到首音频", answer?.inputToFirstAudioMs != null ? answer.inputToFirstAudioMs + " ms" : "尚未收到音频") +
