@@ -446,7 +446,9 @@ function renderWorkCenter() {
       (answer?.inputToCompleteMs != null ? "<small>接收到完整答案 " + esc(answer.inputToCompleteMs) + " ms</small>" : "") +
       (() => {
         const models = turnModelStageText(turn, state.events || []);
-        return models ? "<small>" + esc(models) + "</small>" : "";
+        const route = jevRouteSummary(turn.semantic);
+        return (route ? "<small>JEV路由：" + esc(route) + "</small>" : "") +
+          (models ? "<small>" + esc(models) + "</small>" : "");
       })() +
       "<button type='button' class='inspect-turn' data-inspect-turn='" + esc(turn.turnId) + "'>查看处理记录</button>" +
       (answer && ["queued", "running"].includes(answer.status) ? "<button type='button' data-answer-action='cancel' data-answer-turn='" + esc(turn.turnId) + "'>取消这个问题</button>" : "") +

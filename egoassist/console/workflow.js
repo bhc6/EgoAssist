@@ -48,6 +48,7 @@ function renderTurnWorkflow() {
     row("人物关联", scene?.avAssociation?.status === "account-confirmed" ? "账号已确认参考画面关联" : "声音与画面人物尚未确认关联") +
     row("请求判断", semantic ? [semantic.interaction?.audience, semantic.interaction?.action,
       semantic.selectedSkill, semantic.selectedTask].filter(Boolean).map(workKindLabel).join(" · ") || "已完成分类" : "等待分类记录") +
+    row("JEV路由", jevRouteSummary(semantic) || "等待 JEV 分类") +
     row("记忆处理", ["invalid", "unavailable"].includes(semantic?.status) ? "原话已保留，等待后台解析" :
       semantic?.memoryQuery ? "本轮请求检索记忆" : semantic?.memoryText ? "本轮包含记忆候选" : "本轮没有记忆候选") +
     row("实际模型阶段", models || "尚无实际调用记录") +
@@ -57,7 +58,7 @@ function renderTurnWorkflow() {
     row("接收到完整回答", answer?.inputToCompleteMs != null ? answer.inputToCompleteMs + " ms" : "尚未完成") +
     row("回答耗时", answer?.durationMs != null ? answer.durationMs + " ms" : answer?.generationMs != null ? answer.generationMs + " ms（响应创建至完成）" : "尚未完成测量") +
     (answer?.error ? row("失败原因", answer.error) : "") +
-    (semantic ? "<details data-disclosure='semantic'><summary>分类结果与依据</summary><pre>" + esc(JSON.stringify(semantic, null, 2)) + "</pre></details>" : "") +
+    (semantic ? "<details data-disclosure='semantic'><summary>JEV 路由明细与分类依据</summary><pre>" + esc(jevRouteDetails(semantic) + "\n\n" + JSON.stringify(semantic, null, 2)) + "</pre></details>" : "") +
     "<details data-disclosure='events'><summary>本问题运行记录（" + events.length + "）</summary><ol class='workflow-event-list'>" +
     events.map(e => "<li><time>" + esc(eventTime(e)) + "</time> <button type='button' data-workflow-event='" + esc(e.eventId) + "'>" + esc(e.eventType || e.payload?.eventType || e.type) +
       "</button>" + (e.latencyMs != null ? " · " + esc(e.latencyMs) + " ms" : "") + "</li>").join("") +

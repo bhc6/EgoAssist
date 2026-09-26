@@ -610,8 +610,23 @@ class CaseWorkLedger:
                 if entry.get("eventType") == "response.created" and origin.get("turnId"):
                     response_turns[origin["turnId"]] = entry
             if entry.get("type") == "control_decision" and entry.get("turnId"):
-                decisions[entry["turnId"]] = {k: v for k, v in (entry.get("decision") or {}).items()
-                                             if k not in {"requestMetrics", "rawOutput"}}
+                decision = entry.get("decision") or {}
+                visible = {k: v for k, v in decision.items()
+                           if k not in {"requestMetrics", "rawOutput"}}
+                # Keep the finite JEV decision visible without exposing the
+                # large request/context payload that belongs in the audit log.
+                metrics = decision.get("requestMetrics") or {}
+                answers = (metrics.get("decisions") or {}).get("answers") or {}
+                if answers:
+                    visible["jevChoices"] = {
+                        key: {field: value[field] for field in ("choice", "probabilities", "confidence") if field in value}
+                        for key, value in answers.items() if isinstance(value, dict) and value.get("choice")
+                    }
+                    visible["jevRoute"] = ((metrics.get("decisions") or {}).get("route")
+                                           or answers.get("route", {}).get("choice"))
+                if metrics.get("structuredReason"):
+                    visible["jevStructuredReason"] = metrics["structuredReason"]
+                decisions[entry["turnId"]] = visible
             if entry.get("type") == "message" and entry.get("status") == "completed" and (entry.get("message") or {}).get("role") == "assistant":
                 completed_text[entry.get("responseId")] = entry["message"]["content"]
             if entry.get("type") == "turn_delivery":

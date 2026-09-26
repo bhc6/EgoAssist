@@ -95,3 +95,22 @@ def test_ui_reports_actual_stages_and_correlates_tts():
     script = source + '\nconsole.log(JSON.stringify(turnModelStages({turnId:"t",semantic:{model:"jev"}},' + json.dumps(events) + ')));'
     result = subprocess.run(['node', '-e', script], capture_output=True, text=True, encoding='utf8', check=True)
     assert [s['model'] for s in json.loads(result.stdout)] == ['jev', 'test-vl', 'tts-model']
+
+
+def test_ui_reports_jev_route_and_probabilities():
+    source = Path('egoassist/console/model_stages.js').read_text(encoding='utf8')
+    semantic = {
+        'model': 'typesafe/jev-1.13-20260917', 'method': 'semantic-turn-router-v20',
+        'intentKind': 'foreground-dialogue', 'interaction': {'audience': 'assistant', 'action': 'reply', 'output': 'speech'},
+        'memoryQuery': None, 'skillStatus': 'no-match', 'latencyMs': 812.4,
+        'jevRoute': 'reply', 'jevChoices': {'route': {'choice': 'reply', 'probabilities': {'reply': .98, 'keep': .02}}, 'details': {'choice': 'none', 'probabilities': {'none': 1}}},
+        'requestMetrics': {'decisions': {'answers': {
+            'route': {'choice': 'reply', 'probabilities': {'reply': .98, 'keep': .02}},
+            'details': {'choice': 'none', 'probabilities': {'none': 1}},
+        }}},
+    }
+    script = source + '\nconsole.log(jevRouteSummary(' + json.dumps(semantic) + '));\nconsole.log(jevRouteDetails(' + json.dumps(semantic) + '));'
+    result = subprocess.run(['node', '-e', script], capture_output=True, text=True, encoding='utf8', check=True)
+    lines = result.stdout.splitlines()
+    assert '回答' in lines[0] and '对助手' in lines[0] and '语音' in lines[0]
+    assert '路由：回答' in result.stdout and 'JEV选择' in result.stdout and '98%' in result.stdout and 'JEV耗时：812.4 ms' in result.stdout
