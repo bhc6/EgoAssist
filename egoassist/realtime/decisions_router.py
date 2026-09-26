@@ -6,6 +6,7 @@ import asyncio
 from copy import deepcopy
 import json
 import os
+import re
 import time
 
 import aiohttp
@@ -22,6 +23,22 @@ from .router_protocol import expand_decision
 DECISIONS_URL = "https://openrouter.ai/api/alpha/decisions"
 PRECONNECT_URL = "https://openrouter.ai/api/v1/models/count"
 DECISIONS_SESSION = web.AppKey("egoassist.decisions.http", aiohttp.ClientSession)
+
+_TEMPORAL_RECALL = re.compile(r"(?:今天|今日|昨天|昨晚|今早|今晨|这周|本周|最近|刚才|之前)")
+_COUNT_QUESTION = re.compile(r"(?:几次|多少次|次数|几回|多少回|几遍|多少遍|有没有|是否|吗[？?！!。]?$)")
+
+
+def looks_like_temporal_recall(text: str) -> bool:
+    """Keep explicit period/count questions on the recall path.
+
+    This is a routing floor only. It does not extract facts or answer the
+    question; it prevents a source statement or current visual frame from
+    being mistaken for a complete historical count.
+    """
+    value = "".join(str(text or "").split())
+    if not value or not _TEMPORAL_RECALL.search(value):
+        return False
+    return bool(_COUNT_QUESTION.search(value) or re.search(r"(?:几|多少).{0,6}(?:喝|吃|看|做|次|个|件)", value))
 
 
 def transport_trace():
@@ -146,6 +163,7 @@ class DecisionsTurnRouter(SemanticTurnRouter):
             result["modelsUsed"].append(self.model)
         if not metrics.get("structuredReason"):
             result["model"] = (metrics.get("decisions") or {}).get("resolvedModel", self.decisions_model)
+        result["evidenceScope"] = (metrics.get("decisions") or {}).get("evidenceScope", "none")
         return result
 
     @staticmethod
@@ -190,10 +208,25 @@ class DecisionsTurnRouter(SemanticTurnRouter):
         answers = await self._request_decisions(payload, audit)
         choices = {key: value["choice"] for key, value in answers.items()}
         route, retention = choices["route"], choices["retention"]
+        evidence_scope = choices.get("evidenceScope", "none")
+        temporal_recall = evidence_scope == "temporal-history" or looks_like_temporal_recall(text)
+        audit["evidenceScope"] = evidence_scope
+        if evidence_scope in {"temporal-history", "stored-memory"} and route in {"reply", "text", "remember", "structured"}:
+            audit["modelRoute"] = route
+            audit["modelRetention"] = retention
+            audit["routeOverride"] = "evidence-scope-recall"
+            route, retention = "recall", "none"
+        if route in {"remember", "reply", "text", "task", "structured"} and temporal_recall:
+            audit["modelRoute"] = route
+            audit["modelRetention"] = retention
+            audit["routeOverride"] = "temporal-count-recall"
+            route, retention = "recall", "none"
         audit["route"] = route
         reason = None
         if context.get("memoryDraft") or retention == "draft":
             reason = "pending-memory-draft"
+        elif evidence_scope == "temporal-history":
+            reason = "temporal-history-evidence"
         elif route == "structured" or retention == "mixed" or choices["details"] == "extract":
             reason = "structured-content"
         elif answers["details"]["probabilities"]["extract"] >= 0.3:
@@ -214,6 +247,18 @@ class DecisionsTurnRouter(SemanticTurnRouter):
             audit["structuredRawOutput"] = raw
             parsed = expand_decision(json.loads(raw))
             self._restrict_retention(parsed, retention, context, audit)
+            if temporal_recall:
+                # The count question is a historical recall even when the
+                # second-stage extractor reports ambiguous details. Keep it
+                # out of source-memory writes and out of current-frame answers.
+                parsed["memoryQuery"] = "referential"
+                parsed["memoryQuerySpec"] = None
+                parsed["memoryAtoms"] = []
+                parsed["memoryDraft"] = None
+                parsed["preferenceIntent"] = "none"
+                parsed["intents"] = [{"kind": "foreground-dialogue", "text": text, "parameters": {}}]
+                parsed["interaction"] = {"audience": "assistant", "action": "reply", "output": "speech"}
+                audit["structuredRouteOverride"] = "temporal-count-recall"
             return json.dumps(parsed, ensure_ascii=False)
 
         interaction = {

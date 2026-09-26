@@ -25,6 +25,7 @@ from egoassist.memory import ClockContext, TimelineMemory
 from egoassist.memory.commit import MemoryCommitService
 from egoassist.memory.service import MemoryService
 from egoassist.realtime.semantic import SemanticTurnRouter
+from egoassist.realtime.decisions_router import looks_like_temporal_recall
 from egoassist.memory.insights import InsightGenerator
 from egoassist.memory.recovery import MemoryRecovery
 from egoassist.product import (
@@ -1635,6 +1636,9 @@ def create_app(
             instructions += prompt_text("run_egoassist/grounded_user_instructions.4")
         evidence = result.get("episodicInjection", {}).get("evidence", [])
         packet = result.get("evidencePackage")
+        evidence_scope = (result.get("semanticDecision") or {}).get("evidenceScope")
+        if evidence_scope == "temporal-history" or looks_like_temporal_recall(transcript):
+            instructions += prompt_text("run_egoassist/grounded_user_instructions.18")
         if result.get('memoryRead', {}).get('status') == 'degraded':
             instructions += prompt_text('evidence_answer/unavailable')
         if packet:

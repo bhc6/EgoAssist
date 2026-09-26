@@ -7,7 +7,7 @@ from aiohttp import web
 from aiohttp.test_utils import TestServer
 import pytest
 
-from egoassist.realtime.decisions_router import DecisionsTurnRouter, create_turn_router
+from egoassist.realtime.decisions_router import DecisionsTurnRouter, create_turn_router, looks_like_temporal_recall
 from egoassist.realtime.semantic import SemanticTurnRouter
 from egoassist.prompts import compact_audit_payload, prompt_bundle
 
@@ -301,6 +301,58 @@ def test_simple_recall_preserves_query_and_quiet_permission():
         assert result["intents"][0]["text"] == "我的柜子编号是什么？"
         assert "quiet" not in result["interaction"]  # grants remain checked by executor
         assert router._http_session is None
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("text,expected", [
+    ("我今天喝了几次水", True), ("今天有没有吃药？", True),
+    ("这周做了多少次训练", True), ("今天喝水", False),
+    ("记住我今天喝水", False), ("帮我设置今天喝水提醒", False),
+])
+def test_temporal_count_floor_only_catches_questions(text, expected):
+    assert looks_like_temporal_recall(text) is expected
+
+
+def test_jev_memory_misroute_is_overridden_to_recall():
+    async def run():
+        router = DecisionsTurnRouter("qwen", decisions_key="jev")
+        async def decide(payload, audit):
+            return body("remember", retention="source")["answers"]
+        router._request_decisions = decide
+        result = await router.classify("我今天喝了几次水", [])
+        assert result["memoryQuery"] == "referential"
+        assert result["interaction"]["action"] == "reply"
+        assert not result["memoryAtoms"]
+        audit = result["requestMetrics"]["decisions"]
+        assert audit["routeOverride"] == "temporal-count-recall"
+        assert audit["modelRoute"] == "remember"
+        await router.aclose()
+    asyncio.run(run())
+
+
+def test_jev_evidence_scope_routes_unseen_temporal_query_to_recall():
+    async def run():
+        async def extract(**kwargs):
+            wire = {"v": 1, "interaction": {"audience": "assistant", "action": "reply", "output": "speech"}}
+            return SimpleNamespace(status_code=200, output=SimpleNamespace(choices=[
+                SimpleNamespace(message=SimpleNamespace(content=json.dumps(wire)))
+            ]))
+
+        router = DecisionsTurnRouter("qwen", decisions_key="jev", generation_call=extract)
+
+        async def decide(payload, audit):
+            return typed_body(payload["questions"], route="reply", retention="none",
+                              evidenceScope="temporal-history")["answers"]
+
+        router._request_decisions = decide
+        result = await router.classify("这段时间我总共饮水几次？", [])
+        assert result["memoryQuery"] == "referential"
+        assert result["memoryAtoms"] == []
+        assert result["evidenceScope"] == "temporal-history"
+        assert result["requestMetrics"]["structuredReason"] == "temporal-history-evidence"
+        assert result["requestMetrics"]["decisions"]["routeOverride"] == "evidence-scope-recall"
+        await router.aclose()
+
     asyncio.run(run())
 
 

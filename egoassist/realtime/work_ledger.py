@@ -624,6 +624,8 @@ class CaseWorkLedger:
                     }
                     visible["jevRoute"] = ((metrics.get("decisions") or {}).get("route")
                                            or answers.get("route", {}).get("choice"))
+                    visible["evidenceScope"] = ((metrics.get("decisions") or {}).get("evidenceScope")
+                                                  or answers.get("evidenceScope", {}).get("choice"))
                 if metrics.get("structuredReason"):
                     visible["jevStructuredReason"] = metrics["structuredReason"]
                 decisions[entry["turnId"]] = visible
