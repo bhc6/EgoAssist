@@ -94,6 +94,42 @@ async def verify(output, real=False, base_url=None):
             await page.locator('#ambientSave').click()
             await page.wait_for_function('ambientState.intervalSeconds===9 && !ambientPanel.busy')
             report['failedSaveRetainsDraftAndCanRetry']=True
+            report['faultInjection'].extend(['state fetch aborted', 'settings fetch aborted before dispatch',
+                                             'settings response lost after commit', 'consent response lost after commit'])
+            # Network failures can occur before dispatch or after a committed write.
+            # Poll recovery must reconcile actual state, never replay the mutation.
+            async def abort_read(route): await route.abort('failed')
+            await page.route('**/api/state?*',abort_read)
+            await page.evaluate("document.querySelector('#textTurnError').textContent='保留对话错误'")
+            await page.wait_for_function("document.querySelector('#stateConnectionStatus').textContent.includes('自动重连')",timeout=15000)
+            assert await page.locator('#textTurnError').inner_text()=='保留对话错误'
+            await page.unroute('**/api/state?*',abort_read)
+            await page.wait_for_function("!document.querySelector('#stateConnectionStatus').textContent",timeout=15000)
+            assert await page.locator('#textTurnError').inner_text()=='保留对话错误'
+            report['stateNetworkFailureRecoversWithoutOverwritingDialogue']=True
+            await page.route('**/api/ambient/settings',abort_read,times=1)
+            await page.locator('#ambientInterval').fill('11');await page.locator('#ambientSave').click()
+            await page.wait_for_function("document.querySelector('#ambientControlStatus').textContent.includes('尚未确认')",timeout=15000)
+            assert await page.locator('#ambientInterval').input_value()=='11'
+            assert (await snapshot())['ambient']['intervalSeconds']==9
+            report['failedDispatchPreservesDraftAndDoesNotAutoRetry']=True
+            async def lose_response(route):
+                response=await route.fetch()
+                assert response.ok
+                await route.abort('failed')
+            await page.route('**/api/ambient/settings',lose_response,times=1)
+            await page.locator('#ambientSave').click()
+            await page.wait_for_function("document.querySelector('#ambientControlStatus').textContent.includes('已确认设置生效')",timeout=15000)
+            assert not await page.evaluate('ambientPanel.dirty')
+            assert (await snapshot())['ambient']['intervalSeconds']==11
+            report['lostSaveResponseReconcilesCommittedSettings']=True
+            await page.route('**/api/ambient/consent',lose_response,times=1)
+            await page.locator('#ambientRevoke').click()
+            await page.wait_for_function("document.querySelector('#ambientControlStatus').textContent.includes('已确认后台观察停止')",timeout=15000)
+            assert await page.locator('#ambientGrant').is_visible()
+            report['lostStopResponseReconcilesConsent']=True
+            await page.locator('#ambientGrant').click()
+            await page.wait_for_function('ambientState.consented && !ambientPanel.busy')
             for _ in range(4):
                 stale=await snapshot()
                 await page.locator('#ambientRevoke').click()

@@ -29,6 +29,8 @@ function stalled(signal) {
   await assert.rejects(fetchJSON('/cancelled', {signal: cancelled.signal}), /cancelled/);
   global.fetch = async () => ({ok: false, status: 401, text: async () => '{"message":"expired"}'});
   await assert.rejects(fetchJSON('/auth'), error => error.status === 401 && error.message === 'expired');
+  global.fetch = async () => { throw new TypeError('Failed to fetch'); };
+  await assert.rejects(fetchJSON('/offline'), error => error.connectionUncertain && error.message.includes('暂时无法连接') && !error.message.includes('Failed to fetch'));
   global.fetch = async () => ({ok: true, text: async () => '{"jobId":"retained-job"}'});
   assert.deepEqual(await fetchJSON('/jobs'), {jobId: 'retained-job'});
   global.fetch = async () => ({ok: true, text: async () => 'invalid json'});

@@ -28,7 +28,7 @@ class AmbientPanel {
     this.$('#ambientRevoke').onclick = () => this.act('consent', false);
     this.$('#ambientOpenDevices').onclick = () => actions.devices();
     this.$('#ambientSettingsForm').onsubmit = event => {event.preventDefault(); this.act('settings');};
-    this.$('#ambientSettingsForm').oninput = () => {this.dirty=true;this.feedback('设置已修改，点击“应用设置”保存。');this.controls();};
+    this.$('#ambientSettingsForm').oninput = () => {if(this.pendingControl?.kind==='settings')this.pendingControl=null;this.dirty=true;this.feedback('设置已修改，点击“应用设置”保存。');this.controls();};
     this.$('#ambientDiscard').onclick = () => {this.dirty=false;this.values(this.info);this.feedback('已恢复服务器设置。');this.controls();};
   }
   values(info = {}) {
@@ -53,6 +53,7 @@ class AmbientPanel {
   }
   reset() {
     this.operation++;this.scope=null;this.info=null;this.busy=false;this.dirty=false;
+    this.pendingControl=null;
     this.feedback('');this.root.hidden=true;
     this.$('#ambientLatest').textContent='';this.$('#ambientEvidence').replaceChildren();this.$('#ambientReviews').replaceChildren();
     this.renderedResult=null;
@@ -60,6 +61,17 @@ class AmbientPanel {
   render(info, scope, reviews = '') {
     if(this.scope!==scope){this.reset();this.scope=scope;this.values(info);this.$('#ambientSettings').open=false;this.$('#ambientResults').open=false;}
     this.info=info;
+    if(this.pendingControl && !this.busy && info){
+      const pending=this.pendingControl;
+      const confirmed=Object.entries(pending.expected).every(([key,value])=>info[key]===value);
+      if(confirmed){
+        if(pending.kind==='settings')this.dirty=false;
+        this.feedback(pending.kind==='settings'?'连接已恢复，已确认设置生效。':info.consented?'连接已恢复，已确认观察授权开启。':'连接已恢复，已确认后台观察停止。');
+      }else{
+        this.feedback('连接已恢复，但尚未确认刚才的操作生效；请核对当前状态后重试。',true);
+      }
+      this.pendingControl=null;
+    }
     this.root.hidden=!info?.enabled;
     if(!info?.enabled)return;
     const consent=Boolean(info.consented), frameFresh=info.cameraAt && Date.now()-Date.parse(info.cameraAt)<10000;
@@ -90,6 +102,7 @@ class AmbientPanel {
   async act(kind, granted) {
     if(this.busy)return;
     const scope=this.scope, operation=++this.operation;
+    this.pendingControl=null;
     let settings;
     if(kind==='settings'){
       if(!this.$('#ambientSettingsForm').reportValidity())return;
@@ -104,7 +117,10 @@ class AmbientPanel {
       if(kind==='settings')this.dirty=false;
       this.feedback(kind==='settings'?'设置已保存，下次采样按新间隔执行。':granted?'观察已授权；有摄像头输入时开始。':'已停止全部会话的后台观察。已保存记录保留，设备和主动对话未关闭。');
     }catch(error){
-      if(this.scope===scope && this.operation===operation)this.feedback(error.message,true);
+      if(this.scope===scope && this.operation===operation){
+        if(error.connectionUncertain)this.pendingControl={kind,expected:kind==='settings'?{...settings,reminderGoal:settings.reminderGoal.trim()}:{consented:granted}};
+        this.feedback(error.message,true);
+      }
     }finally{
       if(this.scope===scope && this.operation===operation){this.busy=false;if(!this.dirty)this.values(this.info);this.controls();}
     }

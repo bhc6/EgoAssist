@@ -46,6 +46,7 @@ let promptAuditSession = null;
 let promptAuditCursor = null;
 const promptAuditRows = new Map();
 let stateRefreshPendingAt = 0;
+let stateSyncRevision = 0;
 let pdfjs = null, artifactDocument = null, artifactPageNumber = 1, artifactScale = 1;
 let artifactRenderGeneration = 0, artifactRenderTask = null, pendingHumanHelpPreview = null;
 let mirrorCamera = localStorage.getItem("egoassist.camera.mirror") !== "false";
@@ -91,6 +92,7 @@ function setAuthMode(mode) {
 }
 
 function showLogin() {
+  $("#stateConnectionStatus").textContent = "";
   window.resetConversationHistory?.();
   sessionRevision += 1;
   disconnectRealtime();
@@ -558,6 +560,8 @@ function renderPerformance(audit = {}) {
 function render(next) {
   if (!currentUser || !next || next.sessionId !== selectedSessionId) return;
   if (responseScopes.has(next) && !responseScopes.get(next)()) return;
+  stateSyncRevision++;
+  $("#stateConnectionStatus").textContent = "";
   state = next;
   if (state.ambient) {
     acceptAmbient(state.ambient); state.ambient = ambientState;
@@ -1886,11 +1890,11 @@ $("#promptTemplatesDetails").ontoggle = refreshPromptAudit;
 setInterval(() => { if (location.hash === "#/audit" && ($("#promptAuditDetails").open || $("#promptTemplatesDetails").open)) refreshPromptAudit(); maybeSuggest(); }, 3000);
 
 boot().catch(error => { showLogin(); $("#authError").textContent = error.message; });
-setInterval(async () => {
+async function refreshConsoleState() {
   if (socket?.readyState === WebSocket.OPEN) {
     if (stateRefreshPendingAt) {
       if (Date.now() - stateRefreshPendingAt <= 8000) return;
-      $("#textTurnError").textContent = "实时状态更新超过 8 秒，正在通过 HTTP 补偿查询；已受理任务仍保留。";
+      $("#stateConnectionStatus").textContent = "实时状态更新超过 8 秒，正在查询服务器状态。";
     } else {
       if (socket.bufferedAmount > VIDEO_BUFFER_HIGH_WATER) return;
       stateRefreshPendingAt = Date.now();
@@ -1901,17 +1905,21 @@ setInterval(async () => {
     stateRefreshPendingAt = 0;
   }
   if (!currentUser || !selectedSessionId || detachedStatePolling || Date.now() - lastDetachedStatePoll < 3000) return;
-  const sid = selectedSessionId, uid = currentUser.id;
+  const isCurrent = sessionScope(), revision = stateSyncRevision;
   detachedStatePolling = true;
   lastDetachedStatePoll = Date.now();
   try {
     const latest = await request(selectedStatePath(), {signal: AbortSignal.timeout(8000)});
-    if (selectedSessionId === sid && currentUser?.id === uid) {
+    if (isCurrent()) {
       render(latest);
-      if (stateRefreshPendingAt) $("#textTurnError").textContent = "状态已通过 HTTP 更新，等待实时推送恢复";
       stateRefreshPendingAt = 0;
     }
-  } catch (error) { if (selectedSessionId === sid) $("#textTurnError").textContent = "状态更新中断 · " + error.message; }
+  } catch (error) {
+    if (isCurrent() && revision === stateSyncRevision)
+      $("#stateConnectionStatus").textContent = "状态暂未同步，正在自动重连；当前显示上次快照。";
+  }
   finally { detachedStatePolling = false; }
-}, 1200);
+}
+setInterval(refreshConsoleState, 1200);
+addEventListener("online", () => { lastDetachedStatePoll = 0; refreshConsoleState(); });
 addEventListener("beforeunload", () => { disconnectRealtime(); stopMedia(); });

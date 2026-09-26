@@ -21,7 +21,14 @@ async function fetchJSON(path, options = {}) {
   } catch (error) {
     if (controller.signal.aborted) {
       const timeout = controller.signal.reason?.name === "TimeoutError";
-      throw Error((timeout ? "请求超时" : "请求已取消") + "：" + path + "。已受理的后台任务可在恢复连接后查看。");
+      const failure = Error((timeout ? "请求超时" : "请求已取消") + "：" + path + "。已受理的后台任务可在恢复连接后查看。");
+      failure.connectionUncertain = timeout;
+      throw failure;
+    }
+    if (error instanceof TypeError) {
+      const failure = Error("暂时无法连接本地服务，正在等待恢复。操作是否生效需恢复后核对。");
+      failure.connectionUncertain = true;
+      throw failure;
     }
     throw error;
   } finally {
