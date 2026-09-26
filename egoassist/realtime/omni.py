@@ -695,7 +695,13 @@ class OmniBrowserBridge:
                             if isinstance(captured, dict) and captured.get("turnId"):
                                 transcript_event.update(turnId=captured["turnId"],
                                     timestamp=captured.get("timestamp"), persisted=True)
-                            bridge._schedule(transcript_event)
+                                bridge._schedule(transcript_event)
+                            # A batching evidence handler owns publication until
+                            # the complete conversational turn is persisted.
+                            # This prevents an unlinked fragment from appearing
+                            # in the conversation record and then being replaced.
+                            elif captured is not None:
+                                bridge._schedule(transcript_event)
                         # Publish the canonical journal identity after capture, before
                         # waiting on routing or answers. Never deduplicate by wording.
                         bridge._schedule_callback(accept_transcript)

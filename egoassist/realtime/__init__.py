@@ -45,6 +45,7 @@ from .memory_policy import (
 )
 from .semantic import (
     SemanticTurnRouter, TurnAccumulator, TURN_ROUTER_POLICY_VERSION, memory_draft_candidate,
+    is_fast_turn_control,
 )
 from .locale_prompts import PROMPTS, PromptBundle, get_prompts
 from .work_ledger import CaseWorkLedger, ExecutionEnvelope
@@ -77,6 +78,7 @@ __all__ = [
     "IdentityStore",
     "MEMORY_POLICY_VERSION", "default_memory_policy", "memory_profiles", "normalize_memory_policy",
     "SemanticTurnRouter", "TurnAccumulator", "TURN_ROUTER_POLICY_VERSION", "memory_draft_candidate",
+    "is_fast_turn_control",
     "CaseWorkLedger", "ExecutionEnvelope",
     "PROMPTS", "PromptBundle", "get_prompts",
     "LIVEKIT_DATA_TOPIC",

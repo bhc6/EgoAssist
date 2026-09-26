@@ -208,6 +208,56 @@ class TurnCoordinator:
                 queue.task_done()
                 self.refill_turn_queue()
 
+    async def _speak_routing_fallback(self, turn_id: str, turn_sequence: int) -> bool:
+        """Give failed routing a short audible recovery instead of going silent."""
+        bridge_ref = getattr(self, "bridge", None)
+        bridge = bridge_ref() if callable(bridge_ref) else bridge_ref
+        latest_sequence = getattr(self.owner, "latest_input_sequence", turn_sequence)
+        if (
+            self.ws.closed
+            or (hasattr(self.owner, "socket_token")
+                and self.owner.socket_token is not self.socket_token)
+            or (hasattr(self.owner, "epoch")
+                and self.owner.epoch != self.connection_epoch)
+            or turn_sequence != latest_sequence
+            or bridge is None
+            or not hasattr(self, "request_bridge_response")
+        ):
+            return False
+        if (hasattr(self, "interaction_state")
+                and not self.interaction_state.allows({"turnId": turn_id}, "conversation")):
+            return False
+        try:
+            # A failed new turn is still a barge-in: a previous answer must not
+            # keep the microphone user's recovery prompt inaudible.
+            bridge.cancel_response()
+        except Exception:
+            pass
+        prompt = "我听到了，但理解服务暂时没有响应，请再说一次。"
+        dispatched = self.request_bridge_response(
+            bridge,
+            prompt,
+            priority=110,
+            interrupt=True,
+            speech_policy="immediate",
+            reason="routing-fallback",
+            max_protection_ms=0,
+            output_mode="audio",
+            purpose="conversation",
+            origin={
+                "turnId": turn_id,
+                "answerObligation": turn_id,
+                "generation": self.owner.output_generation,
+                "inputChannel": "microphone",
+                "fallback": "routing-unavailable",
+            },
+        )
+        self.harness.journal.append(
+            "interaction.routing_fallback",
+            {"turnId": turn_id, "spoken": dispatched is not False},
+        )
+        return dispatched is not False
+
     async def process_queued_turn(
         self,
         text: str,
@@ -242,6 +292,7 @@ class TurnCoordinator:
                 work_ledger.set_turn_status(turn_id, "failed", detail={"reason": "routing-unavailable"})
                 work_ledger.set_turn_delivery(turn_id, "failed", reason="routing-unavailable")
                 await self.turn_progress(turn_id, "failed", reason="routing-unavailable")
+                await self._speak_routing_fallback(turn_id, turn_sequence)
                 if not self.ws.closed:
                     await self.ws.send_json({"type": "error", "turnId": turn_id,
                         "message": "这条输入已保存，但理解服务暂时没有响应，本轮未执行操作。请重试。"})

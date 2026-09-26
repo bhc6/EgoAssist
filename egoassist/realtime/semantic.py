@@ -21,6 +21,24 @@ TASK_CONTROLS = {
     "pause-task", "resume-task", "request-help", "show-reference",
 }
 
+
+def is_fast_turn_control(text: str) -> bool:
+    """Recognize the small set of unambiguous transport controls locally.
+
+    This is intentionally not a general routing vocabulary. It only prevents
+    a stop/pause/cancel command from being held behind the normal speech batch;
+    JEV still owns the final semantic decision.
+    """
+    value = "".join(str(text).casefold().split())
+    if not value:
+        return False
+    return any(token in value for token in (
+        "停止当前语音", "停止播报", "别说了", "不要说了", "停一下",
+        "暂停当前回答", "取消当前回答", "取消回答", "停止回答",
+        "stop speaking", "stop talking", "be quiet", "cancel answer",
+        "pause answer",
+    ))
+
 from egoassist.memory.drafts import memory_draft_candidate
 
 
@@ -51,8 +69,9 @@ class TurnAccumulator:
         self,
         flush_callback: Callable[[str], None],
         *,
-        window_ms: float = 600.0,
+        window_ms: float = 1200.0,
         max_chars: int = 800,
+        priority_predicate: Callable[[str], bool] | None = None,
     ) -> None:
         # Env-var override (also honoured when callers pass the old default 1200).
         try:
@@ -66,6 +85,7 @@ class TurnAccumulator:
         self._flush_callback = flush_callback
         self.window_ms = window_ms
         self.max_chars = max_chars
+        self.priority_predicate = priority_predicate
         self._buffer: list[str] = []
         self._handle: Any = None  # asyncio.TimerHandle | None
 
@@ -75,6 +95,13 @@ class TurnAccumulator:
         if not cleaned:
             return
         self._buffer.append(cleaned)
+        # Output controls must not wait for the normal conversational debounce
+        # window.  This is deliberately limited to control intent detection;
+        # ordinary content still gets the full Gemini-Live-style quiet period.
+        if self.priority_predicate is not None and self.priority_predicate(cleaned):
+            self._cancel_handle()
+            self._do_flush()
+            return
         combined_len = sum(len(f) for f in self._buffer) + len(self._buffer) - 1
         if combined_len >= self.max_chars:
             # Buffer is full — flush immediately without waiting for the timer

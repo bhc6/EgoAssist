@@ -12,6 +12,7 @@ from egoassist.realtime import (
     SemanticTurnRouter,
     SkillRuntime,
     TurnAccumulator,
+    is_fast_turn_control,
     executable_tool_declarations,
     livekit_capability,
 )
@@ -797,9 +798,56 @@ class RealtimeConnection:
         enqueue_persisted_turn = turns.enqueue_persisted_turn
         turn_worker_loop = turns.turn_worker_loop
 
+        # Audio providers may finish several ASR segments independently. Keep
+        # their evidence together while the transcript quiet window coalesces
+        # the text into one conversational turn.
+        pending_transcript_segments: list[dict] = []
+        pending_transcript_events: list[dict] = []
+
+        def merged_transcript_segment() -> dict | None:
+            segments = [item for item in pending_transcript_segments if item]
+            pending_transcript_segments.clear()
+            if not segments:
+                return None
+            merged = dict(segments[0])
+            starts = [item.get("audioStartMs") for item in segments
+                      if item.get("audioStartMs") is not None]
+            ends = [item.get("audioEndMs") for item in segments
+                    if item.get("audioEndMs") is not None]
+            if starts:
+                merged["audioStartMs"] = min(starts)
+            if ends:
+                merged["audioEndMs"] = max(ends)
+            generations = {item.get("generation") for item in segments
+                           if item.get("generation") is not None}
+            if len(generations) == 1:
+                merged["generation"] = generations.pop()
+            merged["segmentCount"] = len(segments)
+            return merged
+
+        def flush_transcript_batch(text: str) -> dict:
+            segment = merged_transcript_segment()
+            captured = _do_enqueue_transcript(text, segment=segment)
+            events = list(pending_transcript_events)
+            pending_transcript_events.clear()
+            if events and bridge is not None:
+                bridge._schedule({
+                    "type": "user_transcript",
+                    "speaker": "unknown",
+                    "channel": "input_audio_transcription",
+                    "echoRisk": events[-1].get("echoRisk", "unknown"),
+                    "text": text,
+                    "turnId": captured["turnId"],
+                    "timestamp": captured.get("timestamp"),
+                    "persisted": True,
+                    "segmentCount": len(events),
+                })
+            return captured
+
         _turn_accumulator = TurnAccumulator(
-            _do_enqueue_transcript,
-            window_ms=float(os.getenv("EGOASSIST_TURN_ACCUMULATE_MS", "600")),
+            flush_transcript_batch,
+            window_ms=float(os.getenv("EGOASSIST_TURN_ACCUMULATE_MS", "1200")),
+            priority_predicate=is_fast_turn_control,
         )
 
         def transcript_received(text):
@@ -810,12 +858,17 @@ class RealtimeConnection:
 
         def transcript_with_evidence(text, segment):
             if str(text).strip():
+                pending_transcript_events.append({"echoRisk": "unknown"})
                 if segment:
                     segment = {
                         **segment,
                         "generation": f"{connection_epoch}:{segment.get('generation')}",
                     }
-                return _do_enqueue_transcript(str(text).strip(), segment=segment)
+                    pending_transcript_segments.append(segment)
+                _turn_accumulator.push(str(text).strip())
+                # The provider event is already emitted to the UI. The durable
+                # turn identity is assigned once the batch is flushed.
+                return None
 
         def proactive_interval_for() -> float:
             """Task checks have their own cadence, independent of ambient sampling."""
