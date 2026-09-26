@@ -121,7 +121,11 @@ class DiaryService:
 
     async def get(self,uid,identifier):
         store=self.store(uid); row=store.get(identifier)
-        if row.get('sourceFingerprint'):
+        # Invalidated snapshots are terminal: only regeneration can produce a
+        # readable version. Re-scanning all journals cannot restore this body.
+        if row['status'] == 'stale':
+            row={k:v for k,v in row.items() if k not in {'body','daily','sources','nodes','calls'}}
+        elif row.get('sourceFingerprint'):
             current=await asyncio.to_thread(self.sources,uid,row['period'])
             # The worker may have committed while the source read was in flight.
             row=store.get(identifier)

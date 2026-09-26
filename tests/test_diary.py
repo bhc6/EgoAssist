@@ -116,6 +116,32 @@ def test_diary_deleted_sources_invalidate_saved_report_and_checkpoints(tmp_path)
     asyncio.run(run())
 
 
+def test_stale_archive_opens_without_rescanning_or_exposing_old_body(tmp_path):
+    async def run():
+        (tmp_path/'users'/'me').mkdir(parents=True)
+        service=DiaryService(tmp_path/'users',tmp_path/'timeline.sqlite3','')
+        store=service.store('me')
+        row=store.create(period_for('daily','2026-09-01','Asia/Shanghai'))
+        row.update(status='stale',sourceFingerprint='old',body=body([]),sources=[{'text':'deleted'}],
+                   nodes={'private':'deleted'},calls=[{'output':'deleted'}],daily={'text':'deleted'})
+        store.put(row)
+        store.note('2026-09-01','仍保留的补记')
+        def forbidden(*args):
+            raise AssertionError('An already retracted archive must not scan history again')
+        service.sources=forbidden
+        try:
+            value=await service.get('me',row['id'])
+            assert value['status']=='stale' and value['id']==row['id']
+            assert not {'body','sources','nodes','calls','daily'} & value.keys()
+            assert value['notes'][0]['text']=='仍保留的补记'
+            # Regeneration remains a separate version, preserving the old archive.
+            new=store.create(row['period'])
+            assert new['id']!=row['id'] and new['status']=='queued'
+        finally:
+            await service.close()
+    asyncio.run(run())
+
+
 def test_diary_restart_recovers_and_cancel_does_not_touch_lane(tmp_path):
     async def run():
         root=tmp_path/'users'/'me';journal=SessionJournal(root/'sessions'/'case.jsonl',session_id='case')

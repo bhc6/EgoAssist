@@ -8,6 +8,7 @@
   const sourceKinds = {'user-statement':'你的原话','sampled-observation':'画面观察','execution-receipt':'执行回执','job-outcome':'任务结果','assistant-delivery':'助手交付的文字','memory-state':'记忆状态','personal-note':'个人补记','historical-dialogue':'历史对话'};
   let entries = [], cursor = null, selected = null, current = null, timer = null;
   let generation = 0, listGeneration = 0, noteGeneration = 0, archiveFilter = null, userId = null;
+  let readingRequest = null;
   const active = row => ['queued','running'].includes(row?.status);
   function status(text, error = false) {
     $('#status').textContent = text;
@@ -15,12 +16,14 @@
   }
   function resetAccount() {
     clearTimeout(timer); generation++; listGeneration++; noteGeneration++;
+    readingRequest?.abort(); readingRequest=null;
     entries = []; cursor = selected = current = userId = null; archiveFilter = null;
     $('#archive').replaceChildren(); $('#reading').replaceChildren(); $('#savedNotes').replaceChildren();
     $('#noteText').value = ''; $('#app').hidden = true; $('#login').hidden = false;
   }
-  async function api(path, body) {
-    const response = await fetch('/api/' + path, {credentials:'same-origin', signal:AbortSignal.timeout(15000),
+  async function api(path, body, signal) {
+    const timeout=AbortSignal.timeout(15000);
+    const response = await fetch('/api/' + path, {credentials:'same-origin', signal:signal ? AbortSignal.any([signal,timeout]) : timeout,
       ...(body === undefined ? {} : {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)})});
     const data = await response.json().catch(() => null);
     if (response.status === 401) {
@@ -48,6 +51,10 @@
     $('#archive').innerHTML = entries.map(row => `<button class="entry" data-id="${esc(row.id)}" aria-current="${row.id===selected}"><strong>${labels[row.period.kind]} · ${esc(range(row.period))}</strong><small>${states[row.status] || esc(row.status)} · ${new Date(row.createdAt).toLocaleString()}</small></button>`).join('') || '<p>这段时间还没有日记，可整理已有记录或先写补记。</p>';
     $('#more').hidden = !cursor;
   }
+  function selection() {
+    // Keep the clicked button in place, including keyboard focus.
+    $('#archive').querySelectorAll('[data-id]').forEach(button=>button.setAttribute('aria-current',String(button.dataset.id===selected)));
+  }
   async function listing(more = false) {
     const epoch = ++listGeneration, params = new URLSearchParams(archiveFilter || {});
     if (more && cursor) params.set('before', cursor);
@@ -65,6 +72,7 @@
     current = row;
     let html = `<p class="eyebrow">${labels[row.period.kind]}</p><h2>${esc(row.body?.title || states[row.status])}</h2><p class="period">${esc(range(row.period))} · ${esc(row.period.timezone)} · ${esc(states[row.status])}</p>`;
     if (row.snapshotAt) html += `<p class="period">整理快照：${esc(new Date(row.snapshotAt).toLocaleString())}</p>`;
+    if (row.status==='stale') html += '<div class="coverage diary-error">这份旧档案的依据已变化，正文已撤下。点击下方“重新整理”，可根据当前仍保留的记录生成新版本。</div>';
     if (row.newRecords) html += `<div class="coverage new-records">快照后新增 ${Number(row.newRecords)} 条记录。当前版本仍可阅读；重新整理可纳入新内容。</div>`;
     if (active(row)) html += `<div class="diary-progress" role="status"><b>${esc(row.phase || '等待整理')}</b><p>已保存 ${row.calls?.length || 0} 次处理结果。可离开页面，回来后继续查看。</p></div>`;
     if (row.coverage) {
@@ -89,24 +97,36 @@
     timer = setTimeout(()=>{if(epoch===generation && selected===id) guarded(()=>open(id,false));},delay);
   }
   async function open(id, select = true) {
+    if (select && selected===id && readingRequest) return;
+    readingRequest?.abort();
+    const request=new AbortController(); readingRequest=request;
     const epoch = ++generation; clearTimeout(timer); selected = id;
-    if (select) { $('#reading').setAttribute('aria-busy','true'); status('正在读取日记…'); }
+    if (select) {
+      selection();
+      const entry=entries.find(row=>row.id===id), root=$('#reading');
+      root.innerHTML=`<div class="empty"><h2>${entry?esc(labels[entry.period.kind]+' · '+range(entry.period)):'正在打开日记'}</h2><p role="status">正在读取这份档案…</p></div>`;
+      root.setAttribute('aria-busy','true');
+      status('正在读取日记…');
+      if (matchMedia('(max-width:760px)').matches) root.scrollIntoView({block:'start'});
+    }
     try {
-      const row = await api('diary/' + encodeURIComponent(id));
+      const row = await api('diary/' + encodeURIComponent(id),undefined,request.signal);
       if (epoch !== generation) return;
       if (select) { $('#kind').value=row.period.kind; $('#anchor').value=row.period.anchor; $('#timezone').value=row.period.timezone; }
       const entry = entries.find(item=>item.id===id);
       if (entry) {entry.status=row.status;entry.phase=row.phase;}
       archive(); render(row); $('#retryLoad').hidden=true;
+      const url=new URL(location.href);url.searchParams.set('entry',id);history.replaceState(null,'',url);
       status(active(row)?'正在后台整理，进度会自动更新。':states[row.status]+(row.newRecords?' · 有新内容可纳入':''));
       if (active(row)) schedule(id,epoch);
     } catch(error) {
       if(epoch!==generation)return;
       $('#reading').setAttribute('aria-busy','false');
+      if(select) $('#reading').innerHTML='<div class="empty"><h2>这份档案暂时无法打开</h2><p>请点击上方“重试加载”，或选择另一份档案。</p></div>';
       // A transient read failure must not permanently stop background progress.
       if(userId && active(current))schedule(id,epoch,5000);
       throw error;
-    }
+    } finally { if(readingRequest===request)readingRequest=null; }
   }
   async function generate(period) {
     const row = await api('diary',{kind:period?.kind || $('#kind').value, anchor:period?.anchor || $('#anchor').value, timezone:period?.timezone || $('#timezone').value});
@@ -124,8 +144,10 @@
     if(!auth.user){resetAccount();status('请登录后查看个人日记。');return;}
     if(userId && userId!==auth.user.id)resetAccount();
     userId=auth.user.id; $('#login').hidden=true; $('#app').hidden=false;
+    const selectionEpoch=generation;
     if(!await listing())return;
     await notes();
+    if(selectionEpoch!==generation)return; // A click during startup owns the reading pane.
     const requested=new URLSearchParams(location.search).get('entry');
     if(requested || entries.length)await open(requested || entries[0].id);
     else status('选择日期整理已有记录，或先写一笔补记。');
@@ -139,7 +161,7 @@
   $('#archive').onclick=event=>{const button=event.target.closest('[data-id]');if(button)guarded(()=>open(button.dataset.id));};
   $('#more').onclick=()=>guarded(()=>listing(true),$('#more'));
   $('#findArchive').onclick=()=>guarded(async()=>{
-    generation++;clearTimeout(timer);archiveFilter={kind:$('#kind').value,anchor:$('#anchor').value,timezone:$('#timezone').value};
+    generation++;clearTimeout(timer);readingRequest?.abort();readingRequest=null;archiveFilter={kind:$('#kind').value,anchor:$('#anchor').value,timezone:$('#timezone').value};
     if(!await listing())return;
     if(entries.length)await open(entries[0].id);
     else {selected=current=null;$('#reading').innerHTML='<div class="empty"><h2>这段时间还没有日记</h2><p>点击“整理这段时间”，或先在下方补记。</p></div>';status('未找到已有日记。');}
