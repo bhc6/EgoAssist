@@ -15,9 +15,13 @@ button { min-height: 32px; border-radius: 4px; }
 button:focus-visible, a:focus-visible, summary:focus-visible { outline: 2px solid #267b98; outline-offset: 3px; }
 select, input { max-width: 100%; min-width: 0; padding: 7px; border: 1px solid #aebac0; border-radius: 3px; background: #fff; }
 main { max-width: 1640px; padding: 16px 24px; }
-.session-strip { grid-template-columns: minmax(0, 2fr) minmax(0, 1fr); border: 0; border-bottom: 1px solid var(--line); background: transparent; }
+.session-strip { grid-template-columns: minmax(0, 1fr) minmax(0, 2fr); border: 0; border-bottom: 1px solid var(--line); background: transparent; }
 .session-strip div { padding: 4px 12px 10px 0; border: 0; }
 .session-strip b { font-family: inherit; font-size: 12px; white-space: normal; overflow-wrap: anywhere; }
+#speechPermissionDetails { margin-top: 8px; }
+#speechPermissionReason { margin: 8px 0; line-height: 1.6; overflow-wrap: anywhere; }
+#speechPermissionFeedback { display: block; margin-top: 6px; line-height: 1.5; }
+#resumeSpeechPermission { max-width: 100%; white-space: normal; margin-top: 6px; }
 .performance-band { padding: 12px 0; background: transparent; margin: 0 0 18px; border-top: 0; }
 .performance-metrics { gap: 10px; }
 .research-grid { grid-template-columns: minmax(0, 1.4fr) minmax(300px, 1fr); gap: 32px; }
@@ -153,7 +157,7 @@ body > footer { background: transparent; color: var(--muted); border-top: 1px so
   .identity-controls > b { max-width: 105px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .identity-controls label { display: flex; flex-wrap: nowrap; white-space: nowrap; }
   .identity-controls #logout { padding-inline: 8px; }
-  .session-strip { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .session-strip { grid-template-columns: minmax(0, 1fr); }
   .research-grid { grid-template-columns: minmax(0, 1fr); }
   .source-panel { border: 0; padding: 0; }
   .camera { max-width: 390px; margin: auto; }

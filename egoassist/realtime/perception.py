@@ -249,6 +249,7 @@ def ambient_prompt(context: AmbientFrameContext | Mapping[str, Any]) -> str:
         + prompt_text('perception/ambient_cross_reference')
         + prompt_text('perception/reference_shape')
         + prompt_text('perception/ambient_notifications')
+        + prompt_text('perception/ambient_speech_permission')
         + json.dumps(
             {
                 "schema": value.schema_version,

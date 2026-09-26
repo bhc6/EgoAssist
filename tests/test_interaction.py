@@ -29,6 +29,41 @@ def test_duration_anchors_to_user_turn_not_recovery_time(tmp_path):
     assert not state.snapshot()["quiet"]
 
 
+def test_quiet_provenance_and_explicit_release_preserve_hold(tmp_path):
+    journal = SessionJournal(tmp_path / 'case.jsonl', session_id='case')
+    CaseWorkLedger(journal).capture_turn('先别说话', source='test', turn_id='quiet', sequence=1)
+    state = InteractionState(journal)
+    state.apply({'audience': 'assistant', 'action': 'listen', 'output': 'silent'}, 'quiet')
+    blocked = state.snapshot()
+    assert blocked['proactiveBlockReason'] == 'quiet-mode'
+    assert blocked['permissionSource']['text'] == '先别说话'
+    event_id = blocked['permissionSource']['eventId']
+    restored = InteractionState(journal)
+    assert restored.snapshot()['permissionSource'] == blocked['permissionSource']
+    restored.pause()
+    with pytest.raises(ValueError, match='permission changed'):
+        restored.clear_quiet('stale')
+    assert restored.snapshot()['quiet']
+    cleared = restored.clear_quiet(event_id)
+    assert not cleared['quiet'] and cleared['paused']
+    assert cleared['proactiveBlockReason'] == 'interaction-hold'
+    assert not restored.allows({}, 'proactive-utterance')
+    restored.release()
+    assert restored.allows({}, 'proactive-utterance')
+    assert not InteractionState(journal).snapshot()['quiet']
+    assert journal.entries(types={'interaction.permission'})[-1]['source'] == 'console-resume'
+
+
+def test_expired_quiet_retains_provenance_without_claiming_block(tmp_path):
+    state = InteractionState(SessionJournal(tmp_path / 'case.jsonl'))
+    state.apply({'audience': 'assistant', 'action': 'listen', 'output': 'silent',
+                 'quiet': {'mode': 'set', 'seconds': 1}}, 'source',
+                timestamp=(datetime.now(timezone.utc)-timedelta(seconds=10)).isoformat())
+    result = state.snapshot()
+    assert result['permissionSource']['turnId'] == 'source'
+    assert result['proactiveAllowed'] and result['proactiveBlockReason'] is None
+
+
 def test_unresolved_speech_holds_output_after_restart(tmp_path):
     journal = SessionJournal(tmp_path / "case.jsonl", session_id="case")
     state = InteractionState(journal)

@@ -1,0 +1,48 @@
+{
+  "scope": "Isolated test accounts; EgoLife sampled frame; real routing, vision and speech providers; browser-reported playback, not hardware measurement",
+  "testsPassed": 944,
+  "runs": [
+    {
+      "run": "browser-real",
+      "passed": false,
+      "realProviders": true,
+      "pageErrors": [],
+      "hardwareMeasured": false,
+      "quietReviewStatus": "deferred",
+      "quietReviewReason": "output-not-permitted",
+      "deliveryGateExercised": null,
+      "quietAfterRelease": false,
+      "freshReviewInitialStatus": "recorded",
+      "freshReviewInitialReason": "no-useful-question",
+      "browserPlaybackConfirmed": false
+    },
+    {
+      "run": "browser-real-v2",
+      "passed": false,
+      "realProviders": true,
+      "pageErrors": [],
+      "hardwareMeasured": false,
+      "quietReviewStatus": "recorded",
+      "quietReviewReason": "no-useful-question",
+      "deliveryGateExercised": null,
+      "quietAfterRelease": null,
+      "freshReviewInitialStatus": null,
+      "freshReviewInitialReason": null,
+      "browserPlaybackConfirmed": false
+    },
+    {
+      "run": "browser-real-v3",
+      "passed": true,
+      "realProviders": true,
+      "pageErrors": [],
+      "hardwareMeasured": false,
+      "quietReviewStatus": "deferred",
+      "quietReviewReason": "output-not-permitted",
+      "deliveryGateExercised": true,
+      "quietAfterRelease": false,
+      "freshReviewInitialStatus": "ready",
+      "freshReviewInitialReason": "useful-reminder-at-idle",
+      "browserPlaybackConfirmed": true
+    }
+  ]
+}

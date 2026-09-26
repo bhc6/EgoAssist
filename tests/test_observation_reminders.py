@@ -31,6 +31,56 @@ def consider(runtime, captured, hypothesis, **options):
         'reminders_enabled': True, **options})
 
 
+def test_new_frame_carries_current_permission_without_replaying_deferred_need(tmp_path):
+    from egoassist import PACKAGE_ROOT
+    from egoassist.realtime.ambient import AmbientWatchList, AmbientWatchSession
+    from egoassist.realtime.interaction import InteractionState
+    from egoassist.realtime.observation_service import ObservationService
+    from egoassist.realtime.perception import ambient_prompt
+    from egoassist.product import AmbientFrameContext
+
+    runtime, timeline, captured, hypothesis = setup(tmp_path)
+    state = InteractionState(runtime.journal)
+    runtime.journal.append('message', {'message': {'role': 'user', 'content': '先保持安静'}})
+    state.apply({'audience': 'assistant', 'action': 'listen', 'output': 'silent'}, 'quiet')
+    watch = AmbientWatchSession(AmbientWatchList.load(PACKAGE_ROOT / 'watchlists/open.json'), consent_id='grant')
+    service = ObservationService.__new__(ObservationService)
+    service.owner = SimpleNamespace(lanes=runtime)
+    service.ambient_watch_session = lambda _: watch
+    service.session_runtime = SimpleNamespace(task=None)
+    service.memory_service = SimpleNamespace(timeline=timeline)
+    service.interaction = SimpleNamespace(interaction_state=state, ambient_options=lambda _: {
+        'remindersEnabled': True, 'questionsEnabled': False})
+    service.bridge = lambda: None
+    service.user_id, service.session_id = 'u', 'case'
+
+    before = service.session_ambient_context('before', datetime.now(timezone.utc))
+    captured.reference_context = before['reference_context']
+    blocked = consider(runtime, captured, hypothesis, allowed=False, output_permission=state.snapshot())
+    assert before['reference_context']['speechPermission']['quiet']
+    old_id = state.permission['id']
+    state.clear_quiet(old_id)
+    after = service.session_ambient_context('after', datetime.now(timezone.utc))
+    permission = after['reference_context']['speechPermission']
+    assert not permission['quiet'] and permission['proactiveAllowed']
+    assert permission['permissionSource']['source'] == 'console-resume'
+    assert permission['permissionSource']['eventId'] != old_id
+    assert before['reference_context']['speechPermission']['quiet']  # Captured context stays immutable.
+    assert after['reference_context']['userMessages'][0]['text'] == '先保持安静'
+    assert after['reference_context']['reminderGoals'] == before['reference_context']['reminderGoals']
+    history = after['reference_context']['questionHistory'][-1]
+    assert history['status'] == 'deferred' and history['sentAt'] is None
+    prompt = ambient_prompt(AmbientFrameContext.model_validate(after))
+    assert '"source":"console-resume"' in prompt and 'has NOT been offered' in prompt
+    assert runtime.reviews.rows[blocked['candidateId']]['status'] == 'deferred'
+    captured.reference_context = after['reference_context']
+    captured.frame_captured_at = after['frame_captured_at']
+    hypothesis.follow_up_of = blocked['candidateId']
+    fresh = consider(runtime, captured, hypothesis, allowed=state.allows({}, 'proactive-utterance'))
+    assert fresh['status'] == 'ready' and fresh['follows'] == blocked['candidateId']
+    assert runtime.reviews.rows[blocked['candidateId']]['status'] == 'deferred'
+
+
 @pytest.mark.parametrize('kind,age,ready', [
     ('requested-reminder',9512,True), ('requested-reminder',20001,False),
     ('hazard',9512,False), ('goal-help',9512,False), (None,9512,False)])
@@ -57,7 +107,7 @@ def test_recent_requested_event_can_speak_without_relaxing_live_alerts(tmp_path,
     consumer.memory_service=SimpleNamespace(pending_draft=lambda *a:None)
     consumer.user_id='u';consumer.session_id='case'
     consumer.bridge=lambda:SimpleNamespace()
-    consumer.interaction_state=SimpleNamespace(playback_context=lambda:{},allows=lambda *a:True)
+    consumer.interaction_state=SimpleNamespace(playback_context=lambda:{},allows=lambda *a:True,snapshot=lambda:{})
     consumer.ambient_options=lambda owner:{'questionsEnabled':True,'remindersEnabled':True,'questionCooldownSeconds':90}
     result=consumer.ambient(AcceptedObservation(captured,hypothesis,SimpleNamespace(frame_age_ms=age),entry,'accepted'))
     assert bool(result['speech']) is ready

@@ -7,7 +7,7 @@
   <link rel="icon" href="data:,">
   <link rel="stylesheet" href="styles.css">
   <link rel="stylesheet" href="responsive.css?v=20260925-cleanup">
-  <link rel="stylesheet" href="memory-controls.css?v=20260925-lanes">
+  <link rel="stylesheet" href="memory-controls.css?v=20260926-speech-permission">
   <link rel="stylesheet" href="lanes.css?v=20260925-lanes">
   <link rel="stylesheet" href="ambient.css?v=20260925-reminders">
 </head>
@@ -48,7 +48,11 @@
 
     <section class="session-strip">
       <div><span>实时连接</span><b id="duplexState">未连接</b></div>
-      <div><span>语音播报</span><b id="outputPermission">可播报</b></div>
+      <div><span>语音播报</span><b id="outputPermission">可播报</b>
+        <details id="speechPermissionDetails"><summary>播报限制与来源</summary><p id="speechPermissionReason"></p></details>
+        <button id="resumeSpeechPermission" type="button" hidden>解除免打扰，允许主动播报</button>
+        <small id="speechPermissionFeedback" role="status"></small>
+      </div>
     </section>
 
     <section class="lane-overview" aria-labelledby="laneOverviewTitle">
@@ -296,11 +300,12 @@
   <script src="lanes.js?v=20260925-reminders"></script>
   <script src="memory_view.js?v=20260909"></script>
   <script src="model_stages.js?v=20260926-direct-visual-jev-route"></script>
+  <script src="speech_permission.js?v=20260926-provenance"></script>
   <script src="workflow.js?v=20260926-direct-visual"></script>
   <script src="request.js?v=20260926-recovery"></script>
   <script src="tool_activity.js?v=20260910"></script>
   <script src="ambient.js?v=20260926-connect"></script>
-  <script src="app.js?v=20260926-jev-route-recovery"></script>
+  <script src="app.js?v=20260926-speech-permission"></script>
   <script src="conversation_history.js?v=20260926-speaker-attribution"></script>
 </body>
 </html>

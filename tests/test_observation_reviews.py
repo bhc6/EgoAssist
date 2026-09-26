@@ -98,6 +98,17 @@ def test_quiet_and_existing_draft_block_spontaneous_questions(tmp_path):
     assert consider(reviews, context, hypothesis, pending={"id": "user-draft"})["reason"] == "pending-clarification"
 
 
+def test_blocked_review_keeps_permission_at_decision_time(tmp_path):
+    journal, reviews, context, hypothesis = fixture(tmp_path)
+    permission = {'quiet': True, 'paused': False, 'permissionSource': {'eventId': 'quiet-1'}}
+    row = consider(reviews, context, hypothesis, allowed=False, output_permission=permission)
+    assert row['reason'] == 'output-not-permitted' and row['outputPermission'] == permission
+    journal.append('interaction.permission', {'quiet': False})
+    recovered = ObservationReviews(journal).rows[row['candidateId']]
+    assert recovered['outputPermission']['quiet']
+    assert recovered['status'] == 'deferred'  # Clearing quiet never replays old evidence.
+
+
 def test_optional_malformed_comparison_preserves_visible_evidence(tmp_path):
     from egoassist.realtime.perception import parse_ambient_hypothesis
     _, reviews, context, _ = fixture(tmp_path)

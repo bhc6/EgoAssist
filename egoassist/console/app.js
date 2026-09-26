@@ -17,6 +17,7 @@ let detachedStatePolling = false, lastDetachedStatePoll = 0;
 const turnOutbox = () => new TurnOutbox(sessionStorage, currentUser.id, selectedSessionId);
 let connectingPromise = null;
 let connectionGeneration = 0;
+let resumingSpeechPermission = false;
 let providerReady = false;
 let mediaPromise = null;
 let mediaGeneration = 0;
@@ -110,6 +111,7 @@ function showLogin() {
   sessionDrafts.clear();
   toolActivityView.reset(null);
   $("#textTurnInput").value = "";
+  $("#speechPermissionFeedback").textContent = "";
   $("#textTurnSend").disabled = false;
   $("#proactiveSuggestions").checked = false;
   $("#insightResults").replaceChildren();
@@ -574,6 +576,9 @@ function render(next) {
   $("#outputPermission").textContent = interaction?.paused ? "暂让声音 · 等待意图" : interaction?.quiet
     ? "免打扰" + (interaction.until ? " · 至 " + new Date(interaction.until).toLocaleTimeString() : " · 等待解除")
       + (interaction.allowReplies ? " · 可回答主动提问" : " · 静默") : "可播报";
+  $("#speechPermissionReason").textContent = speechPermissionText(interaction);
+  $("#resumeSpeechPermission").hidden = !interaction?.quiet;
+  $("#resumeSpeechPermission").disabled = resumingSpeechPermission;
   const decision = task?.decision || state.genericDecision;
   const step = task ? task.steps.find(item => item.id === task.currentCheckpointId) || task.steps[task.stepIndex] : null;
   $("#mode").textContent = "● " + state.realtimeModel;
@@ -648,7 +653,7 @@ function renderObservationReviews() {
     "invalid-notification-schema":"提醒格式不完整", "missing-user-need":"缺少用户需要的依据", "missing-user-request":"缺少提醒请求",
     "reminders-disabled":"主动提醒已关闭", "reminder-goal-changed":"提醒目标已修改或撤销", "already-queued":"同一事项已在等待播报",
     "useful-reminder-at-idle":"根据当前需要在空闲时提醒", "delivery-not-confirmed":"上次播报未确认，等待新画面核对",
-    "questions-disabled":"主动询问已关闭", "output-not-permitted":"当前不允许主动播报", "pending-clarification":"还有问题等待确认",
+    "questions-disabled":"主动询问已关闭", "output-not-permitted":"当时受会话播报权限限制", "pending-clarification":"还有问题等待确认",
     "interaction-busy":"等待当前对话结束", cooldown:"尚在主动播报间隔内", "no-material-change":"没有值得再问的新变化",
     "useful-question-at-idle":"空闲时提出有用的问题", "awaiting-device-playback":"等待设备播放回执",
     "device-playback-confirmed":"设备已确认播放", "clarification-no-longer-pending":"待确认事项已处理或过期",
@@ -656,6 +661,7 @@ function renderObservationReviews() {
   const relations = {conflict:"疑似不一致", change:"状态变化", uncertain:"尚不能判定", consistent:"本次相符"};
   return "<details data-disclosure='observation-reviews'><summary>提醒、询问与依据</summary>" + reviews.map(row =>
     "<div class='observation-review'><b>" + esc(statuses[row.status] || row.status) + "</b> · " + esc(reasons[row.reason] || row.reason) +
+    (row.reason === "output-not-permitted" ? "<p>" + esc(observationPermissionText(row, state?.interaction)) + "</p>" : "") +
     (row.question ? "<p>" + esc(row.question) + "</p>" : "") +
     (row.notification ? "<p>提醒：" + esc(row.notification.message) + "</p><p>此时提醒的原因：" + esc(row.notification.reason) + "</p>" : "") +
     (row.referenceCheck ? "<p>" + esc(relations[row.referenceCheck.relation] || row.referenceCheck.relation) + "：" + esc(row.referenceCheck.reason) + "</p>" : "") +
@@ -1479,6 +1485,28 @@ async function switchRuntime(button, path, payload) {
   finally { button.disabled = false; }
 }
 
+$("#resumeSpeechPermission").onclick = async () => {
+  if (resumingSpeechPermission || !selectedSessionId || !state?.interaction?.quiet) return;
+  const isCurrent = sessionScope(), sessionId = selectedSessionId;
+  const permissionId = state.interaction.permissionSource?.eventId;
+  resumingSpeechPermission = true;
+  $("#resumeSpeechPermission").disabled = true;
+  $("#speechPermissionFeedback").textContent = "正在解除免打扰…";
+  try {
+    audioContext = audioContext || new AudioContext();
+    await audioContext.resume();
+    if (!isCurrent()) return;
+    const result = await post('/api/interaction/resume-speech', {sessionId, permissionId});
+    if (!isCurrent()) return;
+    render(result.state);
+    $("#speechPermissionFeedback").textContent = "已解除免打扰，后续画面满足条件时提醒；不会补播旧提醒。";
+  } catch (error) {
+    if (isCurrent()) $("#speechPermissionFeedback").textContent = error.message;
+  } finally {
+    resumingSpeechPermission = false;
+    $("#resumeSpeechPermission").disabled = false;
+  }
+};
 $("#realtimeButton").onclick = async () => { try { socket || connectingPromise ? disconnectRealtime() : await connectRealtime(); } catch (error) { alert("启动失败：" + error.message); disconnectRealtime(); } };
 $("#cameraButton").onclick = async () => { try { stream || mediaPromise ? stopMedia() : await ensureMedia(); } catch (error) { alert("设备访问失败：" + error.message); } };
 $("#videoFps").onchange = () => { if (!socket) return; clearInterval(videoTimer); videoTimer = setInterval(sendVideoFrame, 1000 / Number($("#videoFps").value)); };
@@ -1635,6 +1663,7 @@ async function changeSession(targetId, label = null) {
   const media = Boolean(stream);
   disconnectRealtime();
   $("#textTurnError").textContent = "正在切换案例，未发送输入已保留在原案例…";
+  $("#speechPermissionFeedback").textContent = "";
   try {
     if (!isCurrent()) return;
     if (label !== null) {

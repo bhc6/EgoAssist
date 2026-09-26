@@ -69,6 +69,11 @@ class ObservationService:
             "remindersEnabled": options.get("remindersEnabled", True),
             "questionsEnabled": options["questionsEnabled"],
         }
+        permission = self.interaction.interaction_state.snapshot()
+        context["reference_context"]["speechPermission"] = {
+            key: permission.get(key) for key in (
+                "quiet", "until", "paused", "permissionSource", "proactiveAllowed")
+        }
         frame = getattr(self.bridge(), "_latest_perception_frame", None)
         if frame and frame.get("frameId") == frame_id and self.owner.scene.frames:
             import base64

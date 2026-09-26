@@ -55,6 +55,8 @@ class InteractionState:
         self.journal = journal
         saved = journal.entries(types={"interaction.permission"}, tail=1)
         self.permission = dict(saved[-1]) if saved else {}
+        self._permission_source = None
+        self._permission_source_id = None
         holds = journal.entries(types={"interaction.hold"}, tail=1)
         self.paused = bool(holds and holds[-1].get("paused"))
         self.grants = set()
@@ -69,9 +71,39 @@ class InteractionState:
         until = permission.get("until")
         if until and datetime.now(timezone.utc) >= datetime.fromisoformat(until):
             permission["quiet"] = False
-        return {"quiet": bool(permission.get("quiet")), "until": until,
+        quiet = bool(permission.get("quiet"))
+        # Resolve provenance only when the permission changes, not on every
+        # audio packet. Source text is diagnostic data, never new instructions.
+        if self._permission_source_id != permission.get('id'):
+            self._permission_source_id = permission.get('id')
+            turn_id = permission.get('turnId')
+            source = next((r for r in self.journal.entries(types={'turn_inbox'})
+                           if r.get('turnId') == turn_id), None) if turn_id else None
+            self._permission_source = {
+                'eventId': permission.get('id'), 'at': permission.get('timestamp'),
+                'turnId': turn_id, 'text': (source.get('text') or '')[:200] if source else None,
+                'source': permission.get('source', 'conversation-classification'),
+            }
+        return {"quiet": quiet, "until": until,
                 "allowReplies": permission.get("allowReplies", True), "paused": self.paused,
-                "sourceTurnId": permission.get("turnId"), "playback": self.playback_context()}
+                "sourceTurnId": permission.get("turnId"), "playback": self.playback_context(),
+                "permissionSource": self._permission_source,
+                "proactiveAllowed": not (quiet or self.paused),
+                "proactiveBlockReason": "quiet-mode" if quiet else "interaction-hold" if self.paused else None}
+
+    def clear_quiet(self, expected_permission_id):
+        """Explicit UI release, guarded against a newer voice quiet command.
+
+        Do not release a speech hold, resume old audio, or replay observations.
+        """
+        if expected_permission_id != self.permission.get('id'):
+            raise ValueError('permission changed')
+        if self.snapshot()['quiet']:
+            self.permission = self.journal.append('interaction.permission', {
+                'quiet': False, 'until': None, 'allowReplies': True,
+                'source': 'console-resume', 'replacesPermissionId': expected_permission_id,
+            })
+        return self.snapshot()
 
     def apply(self, control, turn_id, *, timestamp=None):
         if control.get("action") == "keep" or control["audience"] != "assistant":

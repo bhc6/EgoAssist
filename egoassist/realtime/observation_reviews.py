@@ -42,7 +42,7 @@ class ObservationReviews:
                 self.record(row, status="closed", reason="clarification-no-longer-pending")
 
     def consider(self, captured, hypothesis, observation, *, fresh, enabled, busy, allowed, pending, cooldown,
-                 reminders_enabled=False):
+                 reminders_enabled=False, output_permission=None):
         self.reconcile(pending)
         reference = captured.reference_context or {}
         supplied = {}
@@ -167,6 +167,7 @@ class ObservationReviews:
             "previouslyOfferedAt": offered_at,
             "sourceRoots": sorted(roots), "visibleEvidence": hypothesis.visible_evidence,
             "status": status, "reason": reason, "claim": "model-comparison-not-confirmed-fact",
+            "outputPermission": output_permission if reason == 'output-not-permitted' else None,
         })
 
     def audio_sent(self, candidate_id, timeline, *, user_id, case_id, response_id):

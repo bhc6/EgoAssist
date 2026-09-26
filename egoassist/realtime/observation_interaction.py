@@ -85,6 +85,7 @@ class ObservationInteraction:
                 and self.bridge().has_unresolved_user_input()
             )
         )
+        permission = self.interaction_state.snapshot()
         review = self.owner.lanes.reviews.consider(
             captured,
             hypothesis,
@@ -93,6 +94,8 @@ class ObservationInteraction:
             enabled=self.ambient_options(self.owner)["questionsEnabled"],
             busy=busy,
             allowed=self.interaction_state.allows({}, "proactive-utterance"),
+            output_permission={key: permission.get(key) for key in (
+                'quiet', 'until', 'allowReplies', 'paused', 'permissionSource', 'proactiveBlockReason')},
             pending=pending,
             cooldown=self.ambient_options(self.owner)["questionCooldownSeconds"],
             reminders_enabled=self.ambient_options(self.owner).get("remindersEnabled", True),

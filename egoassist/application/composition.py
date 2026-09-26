@@ -2044,6 +2044,28 @@ def create_app(
             raise ValueError("granted must be true or false")
         return await publish_ambient_control(user_id, session_id)
 
+    async def post_resume_speech(request):
+        payload = await request.json()
+        user_id = request[user_key]['id']
+        session_id = str(payload.get('sessionId', ''))
+        identity.get_context_session(user_id, session_id)
+        permission_id = payload.get('permissionId')
+        if not isinstance(permission_id, str) or not permission_id:
+            raise ValueError('permissionId is required')
+        owner = case_owner(user_id, session_id)
+        async with owner.mutation_lock:
+            if permission_id != owner.interaction.permission.get('id'):
+                return web.json_response({'error': '播报设置已变化，请刷新状态后再操作。'}, status=409)
+            owner.interaction.clear_quiet(permission_id)
+        current = scoped_state_for_user(user_id, session_id)
+        for ws in list(live_sockets_by_session.get(session_id, ())):
+            if not ws.closed:
+                try:
+                    await ws.send_json({'type': 'state', 'state': current})
+                except (ConnectionError, RuntimeError):
+                    pass
+        return web.json_response({'state': current})
+
     async def post_ambient_settings(request):
         user_id = request[user_key]["id"]
         async with ambient_control_locks.setdefault(user_id, asyncio.Lock()):
@@ -2653,6 +2675,7 @@ def create_app(
             web.post("/api/privacy/delete", post_privacy_delete),
             web.post("/api/ambient/consent", post_ambient_consent),
             web.post("/api/ambient/settings", post_ambient_settings),
+            web.post("/api/interaction/resume-speech", post_resume_speech),
             web.post("/api/sessions", post_session),
             web.post("/api/sessions/memory-policy", post_memory_policy),
             web.get("/api/state", get_state),
