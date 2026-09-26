@@ -7,7 +7,7 @@ from pathlib import Path
 import re
 import sqlite3
 
-from .generator import DiaryGenerator
+from .generator import DiaryGenerator, DiaryProviderError
 from .sources import collect, digest, period_for, source_manifest, snapshot_change
 from .store import DiaryStore, now
 from egoassist.memory.temporal import ClockContext
@@ -116,7 +116,8 @@ class DiaryService:
             if store.path.exists():
                 row.setdefault('failures',[]).append({'at':now(),'phase':row.get('phase'),
                     'error':type(exc).__name__+': '+str(exc)[:200]})
-                row.update(status='failed',phase='整理未完成',error=type(exc).__name__+': '+str(exc)[:200])
+                row.update(status='failed',phase='整理未完成',
+                           error=str(exc)[:200] if isinstance(exc, DiaryProviderError) else type(exc).__name__+': '+str(exc)[:200])
                 store.put(row)
 
     async def get(self,uid,identifier):

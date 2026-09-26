@@ -2,6 +2,7 @@
 from collections import defaultdict
 import json
 import os
+import re
 import time
 
 import aiohttp
@@ -16,6 +17,29 @@ class InvalidDiaryResponse(ValueError):
     def __init__(self, message, receipt):
         super().__init__(message)
         self.receipt=receipt
+
+
+class DiaryProviderError(RuntimeError):
+    """Safe provider diagnostics, without echoing source text or credentials."""
+    def __init__(self, status, payload, receipt):
+        payload = payload if isinstance(payload, dict) else {}
+        def identifier(value):
+            return value if isinstance(value, str) and re.fullmatch(r'[A-Za-z0-9_.:-]{1,128}', value) else None
+        code = identifier(payload.get('code'))
+        receipt.update(status='provider-error', httpStatus=status, providerCode=code,
+                       providerRequestId=identifier(payload.get('request_id')))
+        if code == 'DataInspectionFailed':
+            message = '日记整理被模型服务的内容审核拒绝，未生成完整日记。已完成的分块已保留；请联系模型服务支持核查，直接重试可能仍会失败。'
+        elif status == 401:
+            message = '日记模型密钥无效或已失效，请检查服务配置。'
+        elif status == 429:
+            message = '日记模型请求受限，请稍后重试并检查服务额度。'
+        elif status >= 500:
+            message = '日记模型服务暂时异常，请稍后重试。'
+        else:
+            message = '日记模型拒绝了请求，请根据错误码和请求编号检查服务配置。'
+        super().__init__(message + f'（HTTP {status}' + (f'，{code}' if code else '') + '）')
+        self.receipt = receipt
 
 
 def validate(value, allowed):
@@ -59,18 +83,26 @@ class DiaryGenerator:
         messages = [{'role':'system','content':self.policy}, {'role':'user','content':json.dumps(
             {'stage':stage,'period':period,'providedSourceIds':list(aliases.values()),'inputs':project(inputs)},ensure_ascii=False)}]
         started = time.perf_counter()
+        receipt={'model':self.model,'stage':stage,'inputHash':digest(messages),
+                 'sourceIds':sorted(allowed),'sourceMap':{v:k for k,v in aliases.items()}}
         async with aiohttp.ClientSession(trust_env=True, timeout=aiohttp.ClientTimeout(total=90)) as client:
             async with client.post(dashscope.base_http_api_url.rstrip('/')+'/services/aigc/text-generation/generation',
                 headers={'Authorization':'Bearer '+self.key},json={'model':self.model,'input':{'messages':messages},
                 'parameters':{'result_format':'message','temperature':0,'enable_thinking':False,
                               'max_tokens':4000,'response_format':{'type':'json_object'}}}) as response:
-                if response.status != 200: raise RuntimeError('日记模型 HTTP '+str(response.status))
+                if response.status != 200:
+                    try:
+                        error = await response.json(content_type=None)
+                    except (ValueError, UnicodeError):
+                        error = {}
+                    receipt['latencyMs'] = round((time.perf_counter()-started)*1000)
+                    raise DiaryProviderError(response.status, error, receipt)
                 payload = await response.json()
         choice = payload['output']['choices'][0]
         raw = choice['message']['content']
-        receipt={'model':self.model,'stage':stage,'providerRequestId':payload.get('request_id'),
+        receipt.update({'providerRequestId':payload.get('request_id'),
             'usage':payload.get('usage'), 'latencyMs':round((time.perf_counter()-started)*1000),
-            'inputHash':digest(messages),'sourceIds':sorted(allowed),'sourceMap':{v:k for k,v in aliases.items()},'rawOutput':raw}
+            'rawOutput':raw})
         try:
             if choice.get('finish_reason') not in {None,'stop'}: raise ValueError('模型输出被截断，未保存为完成日记')
             body=validate(json.loads(raw),set(aliases.values()))
@@ -97,7 +129,7 @@ class DiaryGenerator:
             row['phase'] = stage; save(row)
             try:
                 body, receipt = await self.call(stage,row['period'],inputs,allowed)
-            except InvalidDiaryResponse as exc:
+            except (InvalidDiaryResponse, DiaryProviderError) as exc:
                 audit.append(exc.receipt);save(row)
                 raise
             cached[key] = body; audit.append(receipt); save(row)

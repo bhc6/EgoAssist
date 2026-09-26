@@ -16,6 +16,50 @@ from egoassist.memory import TimelineMemory
 from run_egoassist import create_app
 
 
+@pytest.mark.parametrize('status,payload,expected', [
+    (400, {'code':'DataInspectionFailed','request_id':'request-123','message':'private evidence'}, '内容审核拒绝'),
+    (401, {'code':'InvalidApiKey','message':'secret-key'}, '密钥无效'),
+    (429, {'code':'Throttling'}, '请求受限'),
+    (503, '<html>private proxy error</html>', '服务暂时异常'),
+    (400, {'code':{'unexpected':'shape'},'request_id':['bad']}, '拒绝了请求'),
+])
+def test_diary_provider_error_preserves_checkpoints_and_safe_diagnostics(tmp_path, monkeypatch, status, payload, expected):
+    from aiohttp import web
+    import dashscope
+    async def run():
+        requests=[]
+        async def deny(request):
+            requests.append(await request.json())
+            return web.json_response(payload,status=status) if isinstance(payload,dict) else web.Response(text=payload,status=status)
+        app=web.Application();app.router.add_post('/services/aigc/text-generation/generation',deny)
+        async with TestServer(app) as server:
+            monkeypatch.setattr(dashscope,'base_http_api_url',str(server.make_url('/')).rstrip('/'))
+            root=tmp_path/'users'/'me'
+            journal=SessionJournal(root/'sessions'/'case.jsonl',session_id='case')
+            message(journal,'测试记录')
+            service=DiaryService(tmp_path/'users',tmp_path/'none.sqlite3','secret-key')
+            store=service.store('me')
+            row=store.create(period_for('daily','2026-09-01','Asia/Shanghai'))
+            data=service.sources('me',row['period'])
+            row.update(sourceFingerprint=data['fingerprint'],nodes={'previous':body(['previous'])},calls=[])
+            original=journal.path.read_bytes()
+            await service.run('me',row)
+            saved=store.get(row['id'])
+            assert saved['status']=='failed' and expected in saved['error']
+            assert 'body' not in saved and len(requests)==1
+            assert saved['nodes']=={'previous':body(['previous'])}
+            assert journal.path.read_bytes()==original
+            receipt=saved['calls'][0]
+            assert receipt['status']=='provider-error' and receipt['httpStatus']==status
+            assert receipt['inputHash'] and receipt['sourceIds'] and receipt['stage']
+            assert 'private' not in json.dumps(saved) and 'secret-key' not in json.dumps(saved)
+            if status==400 and payload.get('code')=='DataInspectionFailed':
+                assert receipt['providerCode']=='DataInspectionFailed'
+                assert receipt['providerRequestId']=='request-123'
+            await service.close()
+    asyncio.run(run())
+
+
 def body(ids, text='测试归纳，不是真实模型输出'):
     return {'title':'测试回顾',**{key:[] for key in SECTIONS},
             'overview':[{'text':text,'sourceIds':list(ids)[:12]}]}
