@@ -74,14 +74,14 @@ Get-Content .\.egoassist\server.log -Tail 40
 
 ### 切换模式与多实例
 
-默认使用 Omni。也可安装模块化依赖并切换为 ASR、VL、文本模型和流式 TTS：
+默认使用模块化实时链路，由 ASR、VL、文本模型和流式 TTS 分工。也可显式切回 Omni 对照：
 
 ```powershell
 .\.venv\Scripts\python.exe -m pip install -e ".[modular]"
 .\.venv\Scripts\python.exe .\run_egoassist.py --realtime-backend modular --open
 ```
 
-切回使用 `--realtime-backend omni`；配置、对照结果和限制见[模块化实时后端](docs/MODULAR_REALTIME_2026-09-14.md)。
+切回使用 `--realtime-backend omni`；配置、真实对照结果和限制见[模块化实时后端](docs/MODULAR_REALTIME_2026-09-14.md)与[语音后端对照](docs/VOICE_BACKEND_COMPARISON_2026-09-26.md)。
 
 第二个实例必须同时使用不同端口和数据根目录：
 

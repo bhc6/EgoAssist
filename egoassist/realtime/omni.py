@@ -545,7 +545,7 @@ class OmniBrowserBridge:
         on_transcript: Callable[[str], Any],
     ) -> None:
         import dashscope
-        self.backend = os.getenv("EGOASSIST_REALTIME_BACKEND", "omni").strip().lower()
+        self.backend = os.getenv("EGOASSIST_REALTIME_BACKEND", "modular").strip().lower()
         if self.backend == "modular":
             from .modular import (
                 Modalities as MultiModality, Callback as OmniRealtimeCallback,
@@ -655,7 +655,7 @@ class OmniBrowserBridge:
                                       "message": "语音暂不可用，回答已显示为文字。"})
                 elif event_type == "pipeline.error":
                     bridge._trace("provider.pipeline.error", response)
-                    if getattr(bridge, "backend", "omni") == "omni" and response.get("responseId"):
+                    if getattr(bridge, "backend", "modular") == "omni" and response.get("responseId"):
                         bridge._schedule({"type": "error", "message": "回答生成失败，请重试。",
                                           "responseId": response.get("responseId")})
                     else:
@@ -927,8 +927,8 @@ class OmniBrowserBridge:
             self._trace("provider.session.ready", {
                 "lane": "dialogue", "generation": generation,
                 "startupMs": round((time.monotonic() - started) * 1000, 1),
-                "backend": getattr(self, "backend", "omni"),
-                "turnDetection": "webrtc-vad-segment-asr" if getattr(self, "backend", "omni") == "modular" else "server-vad-explicit-response",
+                "backend": getattr(self, "backend", "modular"),
+                "turnDetection": "webrtc-vad-segment-asr" if getattr(self, "backend", "modular") == "modular" else "server-vad-explicit-response",
             })
 
     def _schedule_reconnect(self, reason: str) -> None:
@@ -2167,7 +2167,7 @@ class OmniBrowserBridge:
             self._trace("response.permission.blocked", {"origin": request.origin, "purpose": request.purpose})
             return
         if ((request.origin or {}).get("preparedAnswer") or
-                (getattr(self, "backend", "omni") == "omni"
+                (getattr(self, "backend", "modular") == "omni"
                  and (request.origin or {}).get("inputChannel") == "explicit-control")):
             self.loop.call_soon_threadsafe(self._send_text_response, request)
             return
@@ -2676,13 +2676,13 @@ class OmniBrowserBridge:
     def provider_lanes_snapshot(self) -> dict[str, Any]:
         return {
             "dialogue": {
-                "backend": getattr(self, "backend", "omni"),
+                "backend": getattr(self, "backend", "modular"),
                 "models": getattr(self, "modular_config", None),
                 "connected": self.connected,
                 "providerError": self._blocked_failure.public() if getattr(self, "_blocked_failure", None) else None,
                 "microphone": True,
-                "cameraContext": "question-bound-visual-evidence" if getattr(self, "backend", "omni") == "modular" else True,
-                "turnDetection": "webrtc-vad-segment-asr" if getattr(self, "backend", "omni") == "modular" else "server-vad-explicit-response",
+                "cameraContext": "question-bound-visual-evidence" if getattr(self, "backend", "modular") == "modular" else True,
+                "turnDetection": "webrtc-vad-segment-asr" if getattr(self, "backend", "modular") == "modular" else "server-vad-explicit-response",
                 "userVisibleOutput": True,
             },
             "perception": self.perception.snapshot(),

@@ -132,6 +132,40 @@ def test_async_transport_cancellation_and_error_isolation(monkeypatch):
     asyncio.run(run())
 
 
+@pytest.mark.parametrize("first_status,expected_calls", [(503, 2), (400, 1)])
+def test_decisions_retries_only_transient_provider_errors(monkeypatch, first_status, expected_calls):
+    async def run():
+        calls = []
+
+        async def handler(request):
+            calls.append(await request.json())
+            if len(calls) == 1 and first_status != 200:
+                return web.Response(status=first_status)
+            return web.json_response(body())
+
+        app = web.Application()
+        app.router.add_post("/decisions", handler)
+        async with TestServer(app) as server:
+            monkeypatch.setattr("egoassist.realtime.decisions_router.DECISIONS_URL", str(server.make_url("/decisions")))
+            router = DecisionsTurnRouter("qwen", decisions_key="openrouter", timeout_seconds=.8,
+                                        decisions_timeout=.2)
+            try:
+                result = await router.classify("hello", [])
+                assert len(calls) == expected_calls
+                if first_status == 503:
+                    assert result["status"] == "classified"
+                    assert result["requestMetrics"]["decisions"]["attempts"] == 2
+                    assert result["requestMetrics"]["decisions"]["retry"]["attempt"] == 2
+                else:
+                    assert result["status"] == "unavailable"
+                    assert result["providerError"]["httpStatus"] == 400
+                    assert "retry" not in result["requestMetrics"]["decisions"]
+            finally:
+                await router.aclose()
+
+    asyncio.run(run())
+
+
 def test_invalid_response_never_falls_through_to_actions(monkeypatch):
     async def run():
         async def handler(request):

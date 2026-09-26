@@ -231,6 +231,25 @@ def test_modular_bridge_uses_common_scheduler_and_isolated_lanes(monkeypatch):
     asyncio.run(run())
 
 
+def test_modular_bridge_is_default_when_backend_is_unset(monkeypatch):
+    monkeypatch.delenv("EGOASSIST_REALTIME_BACKEND", raising=False)
+    import egoassist.realtime.modular as module
+    monkeypatch.setattr(module, "ModularConversation", partial(ModularConversation, provider_factory=FakeProvider, vad=AlwaysSpeech()))
+
+    async def run():
+        async def emit(event):
+            pass
+        bridge = OmniBrowserBridge("test", "omni-name-not-used", "Ethan", "context", emit, lambda text: None)
+        await bridge.connect()
+        try:
+            assert bridge.backend == "modular"
+            assert bridge.provider_lanes_snapshot()["dialogue"]["backend"] == "modular"
+        finally:
+            await bridge.close()
+
+    asyncio.run(run())
+
+
 def test_invalid_backend_fails_explicitly(monkeypatch):
     monkeypatch.setenv("EGOASSIST_REALTIME_BACKEND", "typo")
     async def run():

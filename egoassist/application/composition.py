@@ -136,7 +136,7 @@ def create_app(
 
     from egoassist.realtime.omni import OmniBrowserBridge
 
-    backend = os.getenv("EGOASSIST_REALTIME_BACKEND", "omni").strip().lower()
+    backend = os.getenv("EGOASSIST_REALTIME_BACKEND", "modular").strip().lower()
     if backend not in {"omni", "modular"}:
         raise ValueError("EGOASSIST_REALTIME_BACKEND must be omni or modular")
     if backend == "modular":
