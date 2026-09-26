@@ -330,6 +330,27 @@ def test_jev_memory_misroute_is_overridden_to_recall():
     asyncio.run(run())
 
 
+@pytest.mark.parametrize("scope", ["stored-memory", "temporal-history"])
+def test_evidence_scope_cannot_cancel_explicit_memory_write(scope):
+    async def run():
+        router = DecisionsTurnRouter("qwen", decisions_key="jev")
+
+        async def decide(payload, audit):
+            return typed_body(payload["questions"], route="remember", retention="explicit",
+                              evidenceScope=scope)["answers"]
+
+        router._request_decisions = decide
+        result = await router.classify("记住：我的储物柜编号是7429。", [])
+        assert result["status"] == "classified"
+        assert result["memoryQuery"] is None
+        assert result["memoryAtoms"][0]["text"] == "记住：我的储物柜编号是7429。"
+        assert result["memoryAtoms"][0]["consent"] == "explicit"
+        assert "routeOverride" not in result["requestMetrics"]["decisions"]
+        await router.aclose()
+
+    asyncio.run(run())
+
+
 def test_jev_evidence_scope_routes_unseen_temporal_query_to_recall():
     async def run():
         async def extract(**kwargs):

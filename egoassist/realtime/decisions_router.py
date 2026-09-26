@@ -209,9 +209,12 @@ class DecisionsTurnRouter(SemanticTurnRouter):
         choices = {key: value["choice"] for key, value in answers.items()}
         route, retention = choices["route"], choices["retention"]
         evidence_scope = choices.get("evidenceScope", "none")
-        temporal_recall = evidence_scope == "temporal-history" or looks_like_temporal_recall(text)
+        explicit_temporal_question = looks_like_temporal_recall(text)
+        memory_write = route == "remember" and retention in {"explicit", "source", "draft"}
+        temporal_recall = explicit_temporal_question or (evidence_scope == "temporal-history" and not memory_write)
         audit["evidenceScope"] = evidence_scope
-        if evidence_scope in {"temporal-history", "stored-memory"} and route in {"reply", "text", "remember", "structured"}:
+        if (evidence_scope in {"temporal-history", "stored-memory"} and not memory_write
+                and route in {"reply", "text", "remember", "structured"}):
             audit["modelRoute"] = route
             audit["modelRetention"] = retention
             audit["routeOverride"] = "evidence-scope-recall"
@@ -225,7 +228,7 @@ class DecisionsTurnRouter(SemanticTurnRouter):
         reason = None
         if context.get("memoryDraft") or retention == "draft":
             reason = "pending-memory-draft"
-        elif evidence_scope == "temporal-history":
+        elif evidence_scope == "temporal-history" and temporal_recall:
             reason = "temporal-history-evidence"
         elif route == "structured" or retention == "mixed" or choices["details"] == "extract":
             reason = "structured-content"
