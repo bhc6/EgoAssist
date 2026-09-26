@@ -1600,6 +1600,7 @@ def create_app(
         transcript: str,
         result: dict,
         target_runtime: SkillRuntime | None = None,
+        *, clock=None,
     ) -> str:
         current_turn = json.dumps(str(transcript).strip(), ensure_ascii=False)
         instructions = (
@@ -1610,6 +1611,8 @@ def create_app(
         )
         instructions += prompt_text("run_egoassist/grounded_user_instructions.2")
         instructions += prompt_text("interaction/responsive_answer")
+        from egoassist.product.answer_time import localize_evidence, time_instructions
+        instructions += time_instructions(clock)
         active_runtime = target_runtime or runtime
         observation = active_runtime.task.observation if active_runtime.task else None
         shared = result.get("sharedScene")
@@ -1618,7 +1621,7 @@ def create_app(
             if shared.get('interactionWindow'):
                 instructions += prompt_text('scene/temporal_answer')
             instructions += prompt_text("scene/grounding") + json.dumps(
-                answer_scene_context(shared), ensure_ascii=False
+                localize_evidence(answer_scene_context(shared), clock), ensure_ascii=False
             )
             if not shared.get("speaker", {}).get("wearer"):
                 instructions += prompt_text("scene/unverified")
@@ -1636,7 +1639,7 @@ def create_app(
             instructions += prompt_text('evidence_answer/unavailable')
         if packet:
             from egoassist.product.answer_service import evidence_instructions
-            instructions += '\n' + evidence_instructions(packet)
+            instructions += '\n' + evidence_instructions(packet, clock=clock)
             evidence = evidence + packet.get('sources', []) + packet.get('conversation', [])
         if (
             result.get("episodicInjection", {}).get("temporalStatus")

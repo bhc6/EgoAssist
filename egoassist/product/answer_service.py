@@ -43,19 +43,21 @@ def provider_evidence_context(packet):
     return context
 
 
-def evidence_instructions(packet):
-    return prompt_text('evidence_answer/boundary') + '\nEVIDENCE_PACKAGE_JSON:\n' + json.dumps(
-        provider_evidence_context(packet), ensure_ascii=False, separators=(',', ':'))
+def evidence_instructions(packet, *, clock=None):
+    from .answer_time import localize_evidence, time_instructions
+    return prompt_text('evidence_answer/boundary') + time_instructions(clock) + '\nEVIDENCE_PACKAGE_JSON:\n' + json.dumps(
+        localize_evidence(provider_evidence_context(packet), clock), ensure_ascii=False, separators=(',', ':'))
 
 
 def turn_answer_context(question, result, *, clock, runtime, shared_scene):
+    from .answer_time import localize_evidence
     packet = result.get('evidencePackage')
-    return {'transcript': question, 'retrievalEvidence': result.get('episodicInjection', {}).get('evidence', []),
+    return localize_evidence({'transcript': question, 'retrievalEvidence': result.get('episodicInjection', {}).get('evidence', []),
         'evidencePackage': answer_context(packet) if packet else None, 'clock': clock,
         'runtime': runtime, 'sharedScene': shared_scene, 'timelineWrite': result.get('timelineWrite'),
         'referenceResult': result.get('referenceResult'),
         'memoryRead': result.get('memoryRead'),
-        'memoryBoundary': 'Incomplete retrieval is not evidence that an event never happened.'}
+        'memoryBoundary': 'Incomplete retrieval is not evidence that an event never happened.'}, clock)
 
 
 def validate_answer(value, packet):

@@ -814,6 +814,7 @@ class TurnCoordinator:
                     else text,
                     result,
                     self.session_runtime,
+                    clock=shared_answer_context['clock'],
                 )
                 # Scene and source packets are already in grounded instructions.
                 # Keep the remaining turn evidence request-scoped as well; it

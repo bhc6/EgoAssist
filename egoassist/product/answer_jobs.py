@@ -232,8 +232,10 @@ class AnswerJobs:
             from egoassist.memory.source_index import SourceIndex
             SourceIndex(journal.path.parent.parent).snapshot(packet['snapshotId'], journal.session_id, packet['question'])
             context['evidenceAtQuestion'] = {**context['evidenceAtQuestion'], 'evidencePackage': answer_context(packet)}
+        from .answer_time import localize_evidence, time_instructions
+        clock = (row.get('context') or {}).get('clock')
         messages = [{"role": "system", "content": prompt_text("answer_completion/generate")
-                     + "\n" + json.dumps(context, ensure_ascii=False)},
+                     + time_instructions(clock) + "\n" + json.dumps(localize_evidence(context, clock), ensure_ascii=False)},
                     {"role": "user", "content": row["question"]}]
         frame = (scene.get("visual") or {}).get("frame")
         frames = (scene.get('interactionWindow') or {}).get('frames') or ([frame] if frame else [])
