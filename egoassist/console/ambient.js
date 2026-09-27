@@ -17,10 +17,10 @@ class AmbientPanel {
         <form id="ambientSettingsForm"><label>观察间隔（秒）<input id="ambientInterval" type="number" min="2" max="120" step="1" required></label>
           <label class="ambient-check"><input id="ambientReminders" type="checkbox">需要时主动提醒</label>
           <label class="ambient-check"><input id="ambientQuestions" type="checkbox">关键信息不确定时先询问</label>
-          <label>主动播报最短间隔（秒）<input id="ambientQuestionCooldown" type="number" min="1" max="3600" step="1" required></label>
+          <label>主动询问最短间隔（秒，不限制提醒）<input id="ambientQuestionCooldown" type="number" min="1" max="3600" step="1" required></label>
           <label class="ambient-goal">希望观察帮你留意什么（可选）<textarea id="ambientReminderGoal" rows="2" maxlength="600" placeholder="例如：看到钥匙时提醒我收进包里"></textarea></label>
           <button id="ambientSave" type="submit">应用设置</button><button id="ambientDiscard" type="button">撤销未保存修改</button></form>
-        <p>默认需要时提醒，不主动询问。开启询问后，仅在不确定的信息会影响当前帮助时问一句，例如“桌角那个是你的钥匙吗？”，不会因普通变化追问。关闭两项即可只记录。目标保存后持续用于本会话观察，清空即撤销；这不是定时提醒。空闲时播报，同一事项不反复提醒。采样可能漏看，不保证识别所有需要。</p>
+        <p>默认每次新观察符合提醒条件时都在空闲时播报，同一事项再次出现也会提醒。不主动询问；开启询问后，仅在不确定的信息会影响当前帮助时问一句，例如“桌角那个是你的钥匙吗？”。询问间隔不限制提醒。关闭两项即可只记录。目标保存后持续用于本会话观察，清空即撤销；这不是定时提醒。安静模式、正在对话或画面过期时不会强行播报。采样可能漏看，不保证识别所有需要。</p>
       </details>
       <details id="ambientResults"><summary>最近观察与依据 <span id="ambientResultTime"></span></summary><p id="ambientLatest"></p><div id="ambientEvidence"></div><div id="ambientReviews"></div></details>`;
     this.$ = selector => root.querySelector(selector);
@@ -48,7 +48,7 @@ class AmbientPanel {
     this.$('#ambientGrant').disabled = this.busy;
     this.$('#ambientRevoke').disabled = this.busy;
     for(const node of this.$('#ambientSettingsForm').elements)node.disabled=this.busy;
-    this.$('#ambientQuestionCooldown').disabled = this.busy || !(this.$('#ambientQuestions').checked || this.$('#ambientReminders').checked);
+    this.$('#ambientQuestionCooldown').disabled = this.busy || !this.$('#ambientQuestions').checked;
     this.$('#ambientDiscard').disabled = this.busy || !this.dirty;
     this.$('#ambientDirty').textContent = this.dirty ? '· 未保存' : '';
     this.$('#ambientSave').textContent = this.busy ? '处理中…' : '应用设置';

@@ -44,6 +44,9 @@ class ObservationReviews:
     def consider(self, captured, hypothesis, observation, *, fresh, enabled, busy, allowed, pending, cooldown,
                  reminders_enabled=False, output_permission=None):
         self.reconcile(pending)
+        existing = self.rows.get(observation["observation_id"])
+        if existing is not None:
+            return existing
         reference = captured.reference_context or {}
         supplied = {}
         for item in [*reference.get("userMessages", []), *reference.get("reminderGoals", [])]:
@@ -106,7 +109,7 @@ class ObservationReviews:
         is_reminder = hypothesis.notification is not None
         question = None if is_reminder else hypothesis.clarification
         utterance = (notification or {}).get("message") if is_reminder else question
-        # A goal is offered once, even when the next frame paraphrases the same reminder.
+        # Link related observations for audit, without suppressing new occasions.
         notification_sources = set((notification or {}).get("source_ids", []))
         goal_sources = notification_sources & {item["sourceId"] for item in reference.get("reminderGoals", [])}
         need_sources = goal_sources or {root for source in notification_sources
@@ -125,7 +128,6 @@ class ObservationReviews:
                 is_reminder or not hypothesis.salient_change or (row.get("frame") or {}).get("sha256") == (captured.media or {}).get("sha256"))
         exact = self.offered.get(fingerprint)
         duplicate = prior or (exact if exact and same_issue(exact) else None) or next((row for row in reversed(self.recent(64)) if same_issue(row)), None)
-        queued = any(row["status"] == "ready" and same_issue(row) for row in self.rows.values())
         offered_at = (duplicate or {}).get("sentAt") or (duplicate or {}).get("previouslyOfferedAt")
         now = datetime.now(timezone.utc)
         recent_output = self.last_sent_at and (now - datetime.fromisoformat(self.last_sent_at)).total_seconds() < cooldown
@@ -133,10 +135,6 @@ class ObservationReviews:
         if utterance or is_reminder:
             if notification_error or check_error or (hypothesis.follow_up_of and not known_follow_up):
                 status, reason = "suppressed", notification_error or check_error or "unknown-follow-up"
-            elif offered_at:
-                status, reason = "suppressed", "already-offered"
-            elif queued:
-                status, reason = "deferred", "already-queued"
             elif not fresh:
                 status, reason = "deferred", "stale-frame"
             elif not (reminders_enabled if is_reminder else enabled):
@@ -147,7 +145,7 @@ class ObservationReviews:
                 status, reason = "deferred", "pending-clarification"
             elif busy:
                 status, reason = "deferred", "interaction-busy"
-            elif recent_output:
+            elif recent_output and not is_reminder:
                 status, reason = "deferred", "cooldown"
             elif not is_reminder and not hypothesis.salient_change and not check and not duplicate:
                 status, reason = "suppressed", "no-material-change"

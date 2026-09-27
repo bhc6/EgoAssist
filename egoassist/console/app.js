@@ -649,12 +649,12 @@ function renderObservationReviews() {
   const statuses = {recorded:"已记录比对", suppressed:"本次不播报", deferred:"暂缓播报", ready:"等待播报音频", "audio-sent":"音频已发送 · 播放待确认", played:"设备已开始播放", closed:"信息确认已结束"};
   const reasons = {"invalid-reference-schema":"比对格式不完整，保留原始观察", "unknown-reference":"引用不在本次背景中", "reference-recorded-after-frame":"引用晚于画面时间",
     "same-frame-is-not-independent-evidence":"同一帧的重复分析不能独立佐证", "unknown-visible-evidence":"缺少对应画面证据",
-    "unknown-follow-up":"无法定位此前事项", "already-offered":"同一事项已播报", "stale-frame":"画面已过实时期限",
+    "unknown-follow-up":"无法定位此前事项", "already-offered":"旧策略：同一事项已播报（新观察允许再次提醒）", "stale-frame":"画面已过实时期限",
     "invalid-notification-schema":"提醒格式不完整", "missing-user-need":"缺少用户需要的依据", "missing-user-request":"缺少提醒请求",
     "reminders-disabled":"主动提醒已关闭", "reminder-goal-changed":"提醒目标已修改或撤销", "already-queued":"同一事项已在等待播报",
     "useful-reminder-at-idle":"根据当前需要在空闲时提醒", "delivery-not-confirmed":"上次播报未确认，等待新画面核对",
     "questions-disabled":"主动询问已关闭", "output-not-permitted":"当时受会话播报权限限制", "pending-clarification":"还有问题等待确认",
-    "interaction-busy":"等待当前对话结束", cooldown:"尚在主动播报间隔内", "no-material-change":"没有值得再问的新变化",
+    "interaction-busy":"等待当前对话结束", cooldown:"尚在主动询问间隔内", "no-material-change":"没有值得再问的新变化",
     "useful-question-at-idle":"空闲时提出有用的问题", "awaiting-device-playback":"等待设备播放回执",
     "device-playback-confirmed":"设备已确认播放", "clarification-no-longer-pending":"待确认事项已处理或过期",
     "output-interrupted-before-audio":"播报尚未发送便被打断", "no-useful-question":"本次无需主动播报"};

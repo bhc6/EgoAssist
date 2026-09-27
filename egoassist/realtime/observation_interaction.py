@@ -57,6 +57,10 @@ class ObservationInteraction:
     def ambient(self, message: AcceptedObservation):
         captured, hypothesis, evidence = message.captured, message.hypothesis, message.evidence
         observation_entry = message.entry
+        # Each accepted observation can schedule speech once. A new observation
+        # of the same condition is a new opportunity to remind the user.
+        if observation_entry['observation_id'] in self.owner.lanes.reviews.rows:
+            return {'accepted': True, 'reason': 'observation-already-reviewed', 'speech': None}
         fresh_for_speech = evidence.frame_age_ms <= observation_speech_max_age_ms(hypothesis.notification)
         self.remember(message, ambient=True)
         self.owner.scene.events.schedule()

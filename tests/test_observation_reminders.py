@@ -89,7 +89,7 @@ def test_recent_requested_event_can_speak_without_relaxing_live_alerts(tmp_path,
     from egoassist.core.lane_contracts import AcceptedObservation
     monkeypatch.setenv('EGOASSIST_REQUESTED_REMINDER_MAX_AGE_MS','20000')
     monkeypatch.setenv('EGOASSIST_LIVE_FRAME_MAX_AGE_MS','5000')
-    runtime, _, captured, hypothesis=setup(tmp_path)
+    runtime, timeline, captured, hypothesis=setup(tmp_path)
     if kind:
         hypothesis.notification['kind']=kind
     else:
@@ -113,6 +113,15 @@ def test_recent_requested_event_can_speak_without_relaxing_live_alerts(tmp_path,
     assert bool(result['speech']) is ready
     if ready:
         assert '刚才看到' in result['speech']['utterance']
+        duplicate = consumer.ambient(AcceptedObservation(captured,hypothesis,SimpleNamespace(frame_age_ms=age),entry,'accepted'))
+        assert duplicate['speech'] is None
+        runtime.reviews.audio_sent('recent', timeline, user_id='u', case_id='case', response_id='first-speech')
+        runtime.reviews.played('recent')
+        duplicate = consumer.ambient(AcceptedObservation(captured,hypothesis,SimpleNamespace(frame_age_ms=age),entry,'accepted'))
+        assert duplicate['speech'] is None
+        next_entry = runtime.journal.append('ambient_observation', {'observation_id': 'next-sample'})
+        repeated = consumer.ambient(AcceptedObservation(captured,hypothesis,SimpleNamespace(frame_age_ms=age),next_entry,'accepted'))
+        assert repeated['speech'] and repeated['origin']['observationReviewId'] == 'next-sample'
     else:
         assert runtime.reviews.recent()[-1]['reason']=='stale-frame'
 
@@ -134,11 +143,30 @@ def test_reminder_works_without_questions_and_never_creates_a_memory_draft(tmp_p
     ('reminders_enabled', False, 'reminders-disabled'), ('busy', True, 'interaction-busy'),
     ('allowed', False, 'output-not-permitted'), ('fresh', False, 'stale-frame')])
 def test_reminders_obey_output_gates(tmp_path, option, value, reason):
-    runtime, _, captured, hypothesis = setup(tmp_path)
+    runtime, timeline, captured, hypothesis = setup(tmp_path)
+    first = consider(runtime, captured, hypothesis)
+    runtime.reviews.audio_sent(first['candidateId'], timeline, user_id='u', case_id='case', response_id='speech')
     options = dict(fresh=True, enabled=False, busy=False, allowed=True, pending=None, cooldown=90, reminders_enabled=True)
     options[option] = value
     row = runtime.journal.append('ambient_observation', {'observation_id': 'obs'})
     assert runtime.reviews.consider(captured, hypothesis, row, **options)['reason'] == reason
+
+
+def test_same_observation_cannot_reset_delivery_or_create_another_review(tmp_path):
+    runtime, timeline, captured, hypothesis = setup(tmp_path)
+    event = runtime.journal.append('ambient_observation', {'observation_id': 'one-sample'})
+    options = dict(fresh=True, enabled=False, busy=False, allowed=True, pending=None,
+                   cooldown=90, reminders_enabled=True)
+    first = runtime.reviews.consider(captured, hypothesis, event, **options)
+    assert runtime.reviews.consider(captured, hypothesis, event, **options) == first
+    runtime.reviews.audio_sent(first['candidateId'], timeline, user_id='u', case_id='case', response_id='speech')
+    runtime.reviews.played(first['candidateId'])
+    restarted = ObservationReviews(SessionJournal(runtime.journal.path))
+    repeated = restarted.consider(captured, hypothesis, event, **options)
+    assert repeated['status'] == 'played' and repeated['responseId'] == 'speech'
+    restarted.audio_sent(first['candidateId'], timeline, user_id='u', case_id='case', response_id='duplicate')
+    assert restarted.rows[first['candidateId']]['responseId'] == 'speech'
+    assert len(restarted.rows) == 1
 
 
 @pytest.mark.parametrize(('field', 'value', 'reason'), [
@@ -161,17 +189,21 @@ def test_future_goal_cannot_support_current_frame(tmp_path):
     assert consider(runtime, captured, hypothesis)['reason'] == 'reference-recorded-after-frame'
 
 
-def test_same_goal_deduplicates_pending_paraphrases_and_survives_restart(tmp_path):
+def test_same_goal_reminds_on_each_new_observation_and_after_restart(tmp_path):
     runtime, timeline, captured, hypothesis = setup(tmp_path)
     first = consider(runtime, captured, hypothesis)
-    for message in ('记得拿钥匙。', '请收好桌上的钥匙。'):
-        hypothesis.notification['message'] = message
-        assert consider(runtime, captured, hypothesis)['reason'] == 'already-queued'
     runtime.reviews.audio_sent(first['candidateId'], timeline, user_id='u', case_id='case', response_id='speech')
+    runtime.reviews.played(first['candidateId'])
+    for message in ('记得拿钥匙。', '请收好桌上的钥匙。'):
+        captured.frame_captured_at = datetime.now(timezone.utc)
+        hypothesis.notification['message'] = message
+        row = consider(runtime, captured, hypothesis)
+        assert row['status'] == 'ready'
+        runtime.reviews.audio_sent(row['candidateId'], timeline, user_id='u', case_id='case', response_id=row['candidateId'])
     restarted = ThreeLaneRuntime(SessionJournal(runtime.journal.path), 'u')
     hypothesis.salient_change = True
     hypothesis.notification['kind'] = 'goal-help'
-    assert consider(restarted, captured, hypothesis)['reason'] == 'already-offered'
+    assert consider(restarted, captured, hypothesis)['status'] == 'ready'
 
 
 def test_unsent_ready_candidate_is_reconsidered_after_restart(tmp_path):
@@ -194,7 +226,7 @@ def test_goal_identity_survives_cadence_change_but_not_clear_and_recreate(tmp_pa
     assert runtime.observation_goal()['sourceId'] != first['sourceId']
 
 
-def test_hazard_requires_evidence_and_same_frame_cannot_repeat_by_paraphrasing(tmp_path):
+def test_new_hazard_observation_can_repeat_with_unchanged_visible_content(tmp_path):
     runtime, timeline, captured, hypothesis = setup(tmp_path)
     hypothesis.notification.update(kind='hazard', source_ids=[], message='杯子在桌边，请留意。', reason='杯子倾斜在桌缘')
     hypothesis.visible_evidence = ['杯子倾斜在桌缘']
@@ -202,7 +234,8 @@ def test_hazard_requires_evidence_and_same_frame_cannot_repeat_by_paraphrasing(t
     assert row['status'] == 'ready'
     runtime.reviews.audio_sent(row['candidateId'], timeline, user_id='u', case_id='case', response_id='speech')
     hypothesis.notification['message'] = '请留意桌边的杯子。'
-    assert consider(runtime, captured, hypothesis)['reason'] == 'already-offered'
+    captured.frame_captured_at = datetime.now(timezone.utc)
+    assert consider(runtime, captured, hypothesis)['status'] == 'ready'
 
 
 def test_ordinary_scene_has_no_reminder(tmp_path):
@@ -211,13 +244,13 @@ def test_ordinary_scene_has_no_reminder(tmp_path):
     assert consider(runtime, captured, hypothesis)['status'] == 'recorded'
 
 
-def test_changed_goal_does_not_inherit_delivery_and_added_references_do_not_repeat(tmp_path):
+def test_added_references_and_changed_goal_allow_new_reminders(tmp_path):
     runtime, timeline, captured, hypothesis = setup(tmp_path)
     first = consider(runtime, captured, hypothesis)
     runtime.reviews.audio_sent(first['candidateId'], timeline, user_id='u', case_id='case', response_id='speech')
     captured.reference_context['userMessages'] = [{'sourceId':'extra', 'referenceId':'u1', 'text':'钥匙'}]
     hypothesis.notification['source_ids'] = ['g1','u1']
-    assert consider(runtime, captured, hypothesis)['reason'] == 'already-offered'
+    assert consider(runtime, captured, hypothesis)['status'] == 'ready'
     runtime.journal.append('ambient.settings', {'settings': {'reminderGoal':'看到钥匙提醒我交给同事'}})
     captured.reference_context = runtime.observation_references(timeline)
     captured.frame_captured_at = datetime.now(timezone.utc)

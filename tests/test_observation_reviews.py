@@ -67,7 +67,7 @@ def test_deferred_question_reconsidered_on_fresh_frame_without_scene_change(tmp_
     assert second["status"] == "ready" and second["follows"] == first["candidateId"]
 
 
-def test_draft_only_after_audio_and_paraphrase_suppression_survives_restart(tmp_path):
+def test_draft_only_after_audio_and_new_question_can_follow_closed_review(tmp_path):
     journal, reviews, context, hypothesis = fixture(tmp_path)
     timeline = TimelineMemory(tmp_path / "timeline.sqlite3")
     first = consider(reviews, context, hypothesis)
@@ -84,12 +84,13 @@ def test_draft_only_after_audio_and_paraphrase_suppression_survives_restart(tmp_
     hypothesis.follow_up_of = first["candidateId"]
     hypothesis.clarification = "Was this another cloth?"
     context.reference_context["questionHistory"] = restored.recent()
-    second = consider(restored, context, hypothesis)
-    assert second["reason"] == "already-offered"
+    second = consider(restored, context, hypothesis, cooldown=0)
+    assert second["status"] == "ready"
+    assert second["follows"] == first["candidateId"]
     hypothesis.follow_up_of = second["candidateId"]
     context.reference_context["questionHistory"] = restored.recent()
     third = consider(restored, context, hypothesis)
-    assert third["reason"] == "already-offered"
+    assert third["reason"] == "cooldown"
 
 
 def test_quiet_and_existing_draft_block_spontaneous_questions(tmp_path):
