@@ -80,7 +80,8 @@ def test_explicit_text_uses_shared_context_without_audio_input(tmp_path, monkeyp
             assert cloud.cancelled == 0
             messages = text.provider.messages[0]
             assert any("My appointment is at 9." in row["content"] for row in messages)
-            assert messages[-1]["content"] == "Use the shared evidence: appointment at 9."
+            assert messages[1] == {"role": "system", "content": "Use the shared evidence: appointment at 9."}
+            assert messages[-1]["role"] == "user" and 'What time was it?' in messages[-1]["content"]
             completed = [event for event in events if event.get("type") == "response_status" and event.get("status") == "completed"]
             if action in {"complete", "tts-down"}:
                 assert bridge._dialogue_exchanges == 0

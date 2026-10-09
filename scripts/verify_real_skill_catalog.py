@@ -58,6 +58,26 @@ async def verify(output, model):
                     result = {'input': text, 'passed': False}
                     report['turns'].append(result)
                     result.update(await turn(ws, output, sid, text))
+                    answer = result['transcript'].strip()
+                    assert answer and answer != text.strip(), 'Assistant echoed the current user statement'
+                    if text == '退出当前 Skill。':
+                        assert not any(value in answer for value in ('可以出门', '携带核对', '当前任务已完成')), answer
+                        if len(report['turns']) > 1 and '现场记录' in report['turns'][-2]['input']:
+                            assert '通勤' not in answer, answer
+                    if text == '帮我写一句给前台的取物说明。':
+                        assert any(value in answer for value in ('前台', '领取', '取物', '取件', '拿取')), answer
+                        assert not any(value in answer.lower() for value in ('cookie', '浏览器')), answer
+                        assert not any(value in answer for value in ('手机', '钥匙', '门禁卡', '纸箱', '配件', '七箱', '棕色')), answer
+                        assert not any(value in answer for value in ('里面有', '贴有', '会议资料', '放在桌上')), answer
+                    # Assert the actual text-provider request, not only routing state.
+                    requests = [r['payload'] for r in journal(output, sid)
+                                if r.get('eventType') == 'provider.model.request'
+                                and r.get('payload', {}).get('stage') == 'text']
+                    assert requests, 'No audited text-provider request'
+                    messages = requests[-1]['request']['input']['messages']
+                    users = [m for m in messages if m.get('role') == 'user']
+                    assert users and text in str(users[-1]['content']), 'Current user turn missing from provider context'
+                    result['providerUserTurns'] = len(users)
                     state = await (await client.get('/api/state?session=' + sid)).json()
                     result['observed'] = {'skill': state['activeSkill'], 'task': state['task']}
                     result['state'] = check_state(state, skill, task, checkpoint)

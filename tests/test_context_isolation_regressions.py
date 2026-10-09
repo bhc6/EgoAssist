@@ -117,7 +117,7 @@ def test_model_input_and_audit_freeze_before_event_loop_yields(visual):
             assert not c.provider.messages
         else:
             contents = [m['content'] for m in c.provider.messages[0]]
-            assert contents == ['original policy', 'original question', 'answer current question']
+            assert contents == ['original policy', 'answer current question', 'original question']
             assert not c.provider.frames
         audit_row = next(e for e in callback.events if e['type'] == 'pipeline.audit')
         assert audit_row['contextItemIds'] == ['original']
@@ -126,13 +126,15 @@ def test_model_input_and_audit_freeze_before_event_loop_yields(visual):
     asyncio.run(run())
 
 
-def test_text_adapter_keeps_context_captured_before_queued_message(tmp_path, monkeypatch):
+@pytest.mark.parametrize('output_mode', ['audio', 'text'])
+def test_text_adapter_keeps_context_captured_before_queued_message(tmp_path, monkeypatch, output_mode):
     async def run():
         from egoassist.realtime.context_harness import ContextHarness, ContextSettings
         bridge = object.__new__(OmniBrowserBridge)
         import threading
         bridge._response_lock = threading.Lock()
         bridge._response_sequence = 0
+        bridge.backend = 'omni'
         bridge._context_harness = ContextHarness(SessionJournal(tmp_path / 'events.jsonl'), ContextSettings())
         bridge._context_harness.record_user('captured question', source='test')
         bridge._queued_requests = []
@@ -141,8 +143,8 @@ def test_text_adapter_keeps_context_captured_before_queued_message(tmp_path, mon
         bridge._response_text = {}
         bridge._trace = lambda *args, **kwargs: None
         bridge._send_response = lambda request: None
-        request = _ResponseRequest('answer', 50, 1, output_mode='text', context_items=tuple(
-            bridge._context_harness.provider_replay_items(compact_timestamps=True)))
+        assert bridge.request_response('answer', output_mode=output_mode, origin={'inputChannel': 'explicit-control'})
+        request = bridge._inflight_response
         bridge._context_harness.record_user('future question', source='test')
         class FakeConversation:
             def __init__(self): self.items = []; self.item_ids = set(); self.model = 'test'
@@ -167,4 +169,45 @@ def test_text_adapter_keeps_context_captured_before_queued_message(tmp_path, mon
         assert len(conversation.items) == 1
         assert 'captured question' in str(conversation.items[0])
         assert 'future question' not in str(conversation.items)
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize('output_mode', ['audio', 'text'])
+def test_modular_bridge_replays_user_turns_and_freezes_queued_context(tmp_path, output_mode):
+    async def run():
+        import threading
+        from egoassist.realtime.context_harness import ContextHarness, ContextSettings
+        c, callback = conversation()
+        # Reproduce the old adapter state: it retained assistant outputs only.
+        c.create_item({'id': 'stale', 'type': 'message', 'role': 'assistant', 'content': 'stale adapter answer'})
+        bridge = object.__new__(OmniBrowserBridge)
+        bridge.backend = 'modular'
+        bridge._response_lock = threading.Lock()
+        bridge._response_sequence = 0
+        bridge._context_harness = ContextHarness(SessionJournal(tmp_path/'events.jsonl'), ContextSettings())
+        bridge._context_harness.record_user('previous question', source='test')
+        bridge._context_harness.journal.append_message('assistant', 'previous answer', source='test')
+        bridge._context_harness.record_user('current question', source='test')
+        bridge._queued_requests = []
+        bridge._response_pending = True
+        bridge._active_response_ids = set()
+        bridge._trace = lambda *args, **kwargs: None
+        bridge._schedule_response_watchdog = lambda *args: None
+        bridge.conversation = c
+        bridge.modalities = SimpleNamespace(AUDIO='audio', TEXT='text')
+        assert not bridge.request_response('answer current question', output_mode=output_mode)
+        request = bridge._queued_requests[0]
+        bridge._context_harness.record_user('future question', source='test')
+        bridge._send_response_direct(request)
+        await settle(lambda: any(e['type'] == 'response.done' for e in callback.events))
+        messages = c.provider.messages[0]
+        history = messages[2:]
+        assert [row['role'] for row in history] == ['user', 'assistant', 'user']
+        assert all(text in row['content'] for text, row in zip(
+            ['previous question', 'previous answer', 'current question'], history))
+        assert 'future question' not in str(messages)
+        assert 'stale adapter answer' not in str(messages)
+        assert c.active_context_item_ids == [
+            item['id'] for item in request.context_items]
+        await c.aclose()
     asyncio.run(run())

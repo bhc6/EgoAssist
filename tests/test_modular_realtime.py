@@ -84,7 +84,7 @@ def test_streaming_response_maps_ids_and_replays_context():
         assert callback.events[-1]["response"]["status"] == "completed"
         assert callback.events[-1]["response"]["usage"]["total_tokens"] == 12
         assert [m["content"] for m in c.provider.messages[0]].count("where?") == 1
-        assert "toolReceipt" in c.provider.messages[0][2]["content"]
+        assert "toolReceipt" in c.provider.messages[0][3]["content"]
         assert c.provider.messages[0][0]["content"] == "Only cited evidence"
         await c.aclose()
         assert c.provider.closed and not c.tasks

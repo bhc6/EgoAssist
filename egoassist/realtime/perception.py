@@ -236,6 +236,9 @@ def ambient_prompt(context: AmbientFrameContext | Mapping[str, Any]) -> str:
     ]
     references = deepcopy(value.reference_context)
     if references:
+        goal_sources = {item['sourceId'] for item in references.get('reminderGoals', [])}
+        references['questionHistory'] = [item for item in references.get('questionHistory', [])
+            if not item.get('notification') or set(item.get('reminderGoalSourceIds', [])) == goal_sources]
         for item in references.get("userMessages", []):
             item["sourceId"] = item.get("referenceId", item["sourceId"])
         for item in references.get("memory", []):
@@ -262,7 +265,10 @@ def ambient_prompt(context: AmbientFrameContext | Mapping[str, Any]) -> str:
                 "unknownLocationId": UNKNOWN_LOCATION,
                 "risk": value.risk,
                 "capturedAt": value.frame_captured_at.isoformat(),
-                "previousObservation": value.previous_observation,
+                # Prior spoken proposals are in the source-bound history above.
+                # The visual comparison must not copy an old reminder message.
+                "previousObservation": {key: item for key, item in (value.previous_observation or {}).items()
+                                        if key not in {'notification', 'clarification'}} or None,
                 "referenceContext": references,
             },
             ensure_ascii=False,
@@ -307,6 +313,11 @@ def parse_ambient_hypothesis(raw: str | Mapping[str, Any], *, open_observation=F
     visible = value.get("visible_evidence", value.get("visibleEvidence", []))
     if not isinstance(visible, list):
         raise ValueError("visible_evidence must be a list")
+    uncertainties = value.get("uncertainties", [])
+    if isinstance(uncertainties, str):
+        # Providers sometimes return one prose caveat instead of a one-item
+        # array. Preserve it verbatim without changing observation authority.
+        uncertainties = [uncertainties] if uncertainties.strip() else []
     return AmbientObservationHypothesis(
         activity_id=str(value.get("activity_id") or value.get("activityId") or NONE_OBSERVED),
         observed=value.get("observed", False),
@@ -315,7 +326,7 @@ def parse_ambient_hypothesis(raw: str | Mapping[str, Any], *, open_observation=F
         summary=" ".join(str(value.get("summary") or value.get("scene_summary") or "").split())[:500],
         visible_evidence=[" ".join(str(item).split())[:300] for item in visible[:8] if str(item).strip()],
         hazards=hazards,
-        uncertainties=value.get("uncertainties", []),
+        uncertainties=uncertainties,
         clarification=value.get("clarification") or None,
         salient_change=value.get("salient_change", True),
         reference_check=value.get("reference_check"),

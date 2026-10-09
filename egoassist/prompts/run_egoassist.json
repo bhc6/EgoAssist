@@ -22,5 +22,6 @@
   "request_memory_speech.1": "A confirmed preference is available in a separate low-trust data item. ",
   "_secondary_instruction.1": "State plainly that this additional subtask cannot run in the background because no durable background executor is connected; do not imply it was started: ",
   "_secondary_instruction.2": "Ask only for the missing information needed by this additional subtask: ",
-  "_secondary_instruction.3": "Answer only this additional subtask from the current compound user turn, without repeating answers to its other subtasks: "
+  "_secondary_instruction.3": "Answer only this additional subtask from the current compound user turn, without repeating answers to its other subtasks: ",
+  "skill_transition": "The following accepted runtime transition is authoritative for THIS user turn. When acknowledging deactivation, use its before.skill (or a generic exit acknowledgement), never an older task from history. Do not resume or report completion of a deactivated task. Transition data: "
 }

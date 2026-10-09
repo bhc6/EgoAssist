@@ -74,7 +74,7 @@ class _ResponseRequest:
     output_mode: str = "audio"
     purpose: str = "conversation"
     origin: dict[str, Any] | None = None
-    # Text adapter requests are rebuilt asynchronously; retain the exact
+    # HTTP adapter requests are rebuilt asynchronously; retain the exact
     # provider context captured when the request entered the response lane.
     context_items: tuple[dict[str, Any], ...] | None = None
 
@@ -1247,7 +1247,10 @@ class OmniBrowserBridge:
         with self._response_lock:
             self._response_sequence += 1
             context_items = None
-            if output_mode == "text" and getattr(self, "_context_harness", None) is not None:
+            if (getattr(self, "_context_harness", None) is not None
+                    and (output_mode == "text" or getattr(self, "backend", "modular") == "modular"
+                         or (origin or {}).get("preparedAnswer")
+                         or (origin or {}).get("inputChannel") == "explicit-control")):
                 context_items = tuple(
                     deepcopy(item)
                     for item in self._context_harness.provider_replay_items(compact_timestamps=True)
@@ -2197,9 +2200,13 @@ class OmniBrowserBridge:
             self._response_conversation = self.conversation
             self._trace("response.dispatched", {"sequence": request.sequence, "priority": request.priority, "speechPolicy": request.speech_policy, "outputMode": request.output_mode, "purpose": request.purpose,
                                                 "instructions": request.instructions, "origin": dict(request.origin or {})})
+            context_options = {}
+            if getattr(self, "backend", "modular") == "modular" and request.context_items is not None:
+                context_options["context_items"] = request.context_items
             self.conversation.create_response(
                 instructions=request.instructions,
                 output_modalities=[self.modalities.TEXT] if request.output_mode == "text" else [self.modalities.AUDIO, self.modalities.TEXT],
+                **context_options,
             )
             self._schedule_response_watchdog(
                 "create", request.sequence, getattr(self, "_dialogue_generation", 0),

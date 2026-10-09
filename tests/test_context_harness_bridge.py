@@ -123,6 +123,8 @@ def test_async_tool_loop_lifecycle(tmp_path, monkeypatch, mode):
                     if mode == "identity-reuse":
                         return {"tool_calls": [{"id": "call-1", "function": {"name": "action", "arguments": '{"index":9}'}}]}
                     return {"content": "completed"}
+                if mode == "batch":
+                    harness.record_user('future question during tool selection', source='test')
                 return {"tool_calls": [{"id": "call-" + str(i), "function": {"name": "action", "arguments": json.dumps({"index": i})}}
                                        for i in (1, 2, 1)]}
 
@@ -170,6 +172,11 @@ def test_async_tool_loop_lifecycle(tmp_path, monkeypatch, mode):
             assert deliveries == [("result-call-1", "pending"), ("result-call-2", "pending")]
             if mode == "identity-reuse":
                 assert any(e["type"] == "tool.selection.finished" and e["status"] == "failed" for e in harness.journal.entries())
+            else:
+                context = bridge.conversation.responses[0]['context_items']
+                assert 'recovered_tool_result' in str(context)
+                assert 'call-1' in str(context) and 'call-2' in str(context)
+                assert 'future question' not in str(context)
         elif mode == "budget":
             assert len(executions) == len(results) == 1
             assert any(e["type"] == "tool.deferred" for e in harness.journal.entries())

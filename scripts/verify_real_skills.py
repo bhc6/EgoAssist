@@ -52,7 +52,7 @@ async def verify(output, model):
                             assert payload.get("lanes", {}).get("dialogue", {}).get("connected")
                             break
                         assert payload.get("type") not in {"error", "provider_unavailable"}, payload
-                for text, skill, task, checkpoint, paused in scenarios:
+                async def check_scenario(text, skill, task, checkpoint, paused):
                     result = await turn(ws, output, sid, text)
                     response = await client.get("/api/state?session=" + sid)
                     state = await response.json()
@@ -66,6 +66,9 @@ async def verify(output, model):
                     assert task_state["currentCheckpointId"] == checkpoint, result["state"]
                     assert task_state["paused"] == paused, result["state"]
                     result["passed"] = True
+                    return state
+                for scenario in scenarios:
+                    state = await check_scenario(*scenario)
                 references = [item for item in state.get("toolAudit", []) if item.get("tool") == "show_reference"
                               and item.get("result", {}).get("status") == "resolved"]
                 assert references, "Reference request did not execute the show_reference tool"
@@ -74,6 +77,14 @@ async def verify(output, model):
                 assert response.status == 200, "Resolved artifact cannot be accessed"
                 assert (await response.read()).startswith(b"%PDF"), "Reference is not a PDF"
                 report["referenceVerified"] = True
+                for scenario in [
+                    ('我要做香蕉燕麦粥，请告诉我第一步。', 'kitchen-coach', 'oatmeal', 'measure', False),
+                    ('我要做水果沙拉，请告诉我第一步。', 'kitchen-coach', 'fruit-salad', 'clean', False),
+                    ('我要安装净水壶滤芯，请告诉我第一步。', 'assembly-coach', 'water-filter', 'inspect', False),
+                    ('帮我做两天短途出行打包，请告诉我第一步。', 'packing-coach', 'short-trip-pack', 'scope', False),
+                ]:
+                    await check_scenario(*scenario)
+                report['taskCatalogVerified'] = sorted({r['state']['task']['id'] for r in report['turns']})
                 rows = journal(output, sid)
                 report["routing"] = [r["decision"] for r in rows if r.get("type") == "control_decision"]
                 report["passed"] = True

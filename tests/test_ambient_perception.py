@@ -48,6 +48,46 @@ def test_open_json_fences_and_wrong_gate_schema():
         parse_ambient_hypothesis('{"scene_summary":"book", "speak":false}', open_observation=True)
 
 
+@pytest.mark.parametrize('uncertainties,expected', [
+    ('Identity and purpose unknown', ['Identity and purpose unknown']),
+    ('', []), ('  ', []), (['Unseen actions unknown'], ['Unseen actions unknown']),
+])
+def test_ambient_provider_prose_caveat_preserves_uncertainty(uncertainties, expected):
+    from egoassist.realtime.perception import parse_ambient_hypothesis
+    payload = {'summary': 'Open book on table', 'visible_evidence': ['open book'],
+               'uncertainties': uncertainties, 'salient_change': True}
+    result = parse_ambient_hypothesis(payload, open_observation=True)
+    assert result.uncertainties == expected
+    assert result.visible_evidence == ['open book']
+    assert result.observed
+    assert payload['uncertainties'] == uncertainties
+
+
+def test_ambient_prose_normalization_does_not_accept_malformed_evidence():
+    from egoassist.realtime.perception import parse_ambient_hypothesis
+    payload = {'summary': 'Book', 'visible_evidence': ['open book'],
+               'uncertainties': {'invalid': 'object'}, 'salient_change': True}
+    with pytest.raises(ValidationError):
+        parse_ambient_hypothesis(payload, open_observation=True)
+    payload.update(uncertainties='Purpose unknown', visible_evidence='open book')
+    with pytest.raises(ValueError, match='visible_evidence must be a list'):
+        parse_ambient_hypothesis(payload, open_observation=True)
+
+
+def test_ambient_prompt_excludes_reminders_for_replaced_goal():
+    captured = context(session())
+    captured.previous_observation = {'summary': 'Table and book', 'notification': {'message': 'old reminder text'}}
+    old = {'candidateId': 'old', 'notification': {'message': 'old reminder text'}, 'reminderGoalSourceIds': ['old-goal']}
+    current = {'candidateId': 'current', 'notification': {'message': 'current reminder text'}, 'reminderGoalSourceIds': ['new-goal']}
+    captured.reference_context = {'reminderGoals': [{'sourceId': 'new-goal', 'text': 'new condition'}],
+                                  'questionHistory': [old, current]}
+    prompt = ambient_prompt(captured)
+    assert 'old reminder text' not in prompt
+    assert 'current reminder text' in prompt and 'Table and book' in prompt
+    assert captured.previous_observation['notification']['message'] == 'old reminder text'
+    assert len(captured.reference_context['questionHistory']) == 2
+
+
 CAPTURED = datetime(2026, 7, 30, 8, 0, tzinfo=timezone.utc)
 WATCHLIST = PACKAGE_ROOT / "watchlists" / "medication.json"
 

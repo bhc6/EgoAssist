@@ -124,6 +124,34 @@ def test_history_api_long_import_scope_deletion_and_old_protocol(tmp_path):
     asyncio.run(run())
 
 
+def test_history_http_deletion_preserves_unrelated_snapshot(tmp_path):
+    async def run():
+        app = create_app(str(BUILTIN_SKILLS_ROOT), None, str(tmp_path/'runtime.json'), 'unused', 'Ethan')
+        async with TestClient(TestServer(app)) as client:
+            await client.post('/api/auth/register', json={'username': 'snapshot-user', 'password': 'snapshot-password-123'})
+            snapshots = []
+            for identifier in ('parcel', 'bicycle'):
+                sid = (await (await client.post('/api/sessions')).json())['session']['id']
+                response = await client.post('/api/history/import', json={
+                    'conversation_id': sid, 'events': [event(identifier, identifier+' source detail')]})
+                assert response.status == 201
+                query = {'conversation_id': sid, 'question': identifier}
+                response = await client.post('/api/history/query', json=query)
+                assert response.status == 200
+                packet = await response.json()
+                snapshots.append((query, packet))
+            assert (await client.post('/api/history/delete', json={
+                'conversation_id': snapshots[0][0]['conversation_id'], 'source_id': 'parcel'})).status == 200
+            for index, (query, packet) in enumerate(snapshots):
+                response = await client.post('/api/history/query', json={**query, 'evidence_snapshot_id': packet['snapshotId']})
+                assert response.status == (400 if index == 0 else 200)
+                if index:
+                    assert await response.json() == packet
+            cache = next((tmp_path/'users').glob('*/source-index.sqlite3'))
+            assert b'parcel source detail' not in cache.read_bytes()
+    asyncio.run(run())
+
+
 def test_source_calendar_hints_keep_unknown_timezone_and_per_expression_dates():
     from egoassist.memory.source_time import annotate
     source = {'sourceAt': '2023-05-08T17:00:00', 'timezone': None,

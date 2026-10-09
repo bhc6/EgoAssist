@@ -89,7 +89,6 @@ async def verify(output, base_url=None, image_path=None, goal=None, delay_second
                 async def settings(goal, enabled=True):
                     await page.locator('#ambientReminderGoal').fill(goal)
                     await page.locator('#ambientInterval').fill('2')
-                    await page.locator('#ambientQuestionCooldown').fill('1')
                     await page.locator('#ambientReminders').set_checked(enabled)
                     await page.locator('#ambientSave').click()
                     await page.wait_for_function('!ambientPanel.busy && !ambientPanel.dirty')

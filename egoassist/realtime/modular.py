@@ -498,15 +498,24 @@ class ModularConversation:
             self.item_ids.discard(old)
             self._audit({"stage": "context", "status": "evicted-oldest-item", "apiCalls": 0, "cost": None})
 
-    def create_response(self, *, instructions, output_modalities, prepared_answer=None):
-        self._on_loop(self._start_response, instructions, list(output_modalities), prepared_answer)
+    def create_response(self, *, instructions, output_modalities, prepared_answer=None, context_items=None):
+        self._on_loop(self._start_response, instructions, list(output_modalities), prepared_answer,
+                      deepcopy(context_items))
 
-    def _start_response(self, instructions, modalities, prepared_answer=None):
+    def _start_response(self, instructions, modalities, prepared_answer=None, context_items=None):
         if self.closed:
             return
         if self.response and not self.response.done():
             self._event("error", error={"message": "conversation already has an active response"})
             return
+        if context_items is not None:
+            # The journal owns accepted user turns and committed answers. The
+            # live adapter alone retains only its own outputs, and queued turns
+            # must not read input that arrived after their request was captured.
+            self.items.clear()
+            self.item_ids.clear()
+            for item in context_items:
+                self._store_item(item)
         sid = "modular-" + uuid4().hex
         self.active_response_id = sid
         self.active_context_item_ids = [item_id for item_id, _ in self.items]
@@ -539,9 +548,9 @@ class ModularConversation:
                 text = await self.provider.observe(instructions, context['image'])
                 self._event("response.text.done", response_id=sid, text=text)
             else:
-                messages = [{"role": "system", "content": context['instructions']}]
+                messages = [{"role": "system", "content": context['instructions']},
+                            {"role": "system", "content": instructions}]
                 messages += context['messages']
-                messages.append({"role": "system", "content": instructions})
                 audio = Modalities.AUDIO in modalities
                 async def tokens():
                     if prepared_answer:

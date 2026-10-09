@@ -52,6 +52,7 @@ class ToolCallRunner:
         origin = dict(request.origin or {})
         selection_id = "selection-" + uuid4().hex
         result_ids = []
+        history = []
         outcome = "selection-finished"
 
         def current():
@@ -64,7 +65,20 @@ class ToolCallRunner:
                 if not current():
                     return
                 updated_origin = {**origin, "resultIds": result_ids} if result_ids else origin
-                request = replace(request, instructions=instructions, origin=updated_origin)
+                context_items = request.context_items
+                if context_items is not None:
+                    # Add only receipts committed by this selection. Rebuilding
+                    # from the live journal here would leak later user turns.
+                    receipts = tuple({
+                        "id": "item_" + uuid4().hex, "type": "message", "role": "user",
+                        "content": [{"type": "input_text", "text":
+                            '<recovered_tool_result trust="untrusted-data">\n'
+                            + json.dumps(item, ensure_ascii=False)
+                            + '\n</recovered_tool_result>'}],
+                    } for item in history if item.get("role") == "tool")
+                    context_items = (*context_items, *receipts)
+                request = replace(request, instructions=instructions, origin=updated_origin,
+                                  context_items=context_items)
                 bridge._inflight_response = request
             bridge._send_response_direct(request)
 
@@ -75,7 +89,7 @@ class ToolCallRunner:
                               "tool": bridge.tool_model.model, "status": "selecting", "origin": origin})
             from egoassist.core.settings import tool_settings
             budget = tool_settings()
-            history, receipts = [], {}
+            receipts = {}
             calls_used = 0
             selection = {}
             for round_index in range(budget["maxRounds"]):

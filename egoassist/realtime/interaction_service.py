@@ -279,6 +279,7 @@ class InteractionService:
         )
         runtime_changed = False
         matched_task = None
+        lifecycle_payload = None
         if skill_control == "deactivate":
             before = self.runtime_checkpoint(active_runtime)
             previous_skill = before["skill"]
@@ -610,6 +611,7 @@ class InteractionService:
             "control": speech_control,
             "taskControl": task_control,
             "skillControl": skill_control,
+            "skillTransition": lifecycle_payload,
             "semanticDecision": semantic_decision,
             "timelineWrite": timeline_write,
             "memoryResponse": memory_response,

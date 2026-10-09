@@ -104,7 +104,25 @@ class EvidenceService:
         if self.readers:
             await asyncio.gather(*tuple(self.readers), return_exceptions=True)
 
-    def invalidate_user(self, user):
+    def invalidate_user(self, user, *, preserve_valid_snapshots=False):
+        if preserve_valid_snapshots:
+            # Prune packets whose originals changed, then rebuild the cache so
+            # erased text cannot remain in freed SQLite/FTS pages. Preserve
+            # valid packets from unrelated sources across that rebuild.
+            index = SourceIndex(self.root / user)
+            try:
+                index.sync()
+                with index.db() as db:
+                    snapshots = [tuple(row) for row in db.execute('SELECT id,session,body FROM snapshots')]
+                index.path.unlink(missing_ok=True)
+                index.sync()
+                with index.db() as db:
+                    db.executemany('INSERT INTO snapshots VALUES(?,?,?)', snapshots)
+                return
+            except Exception:
+                # Never leave a potentially stale cache after failed maintenance.
+                (self.root / user / 'source-index.sqlite3').unlink(missing_ok=True)
+                raise
         # All originals remain in journals; this cache and its snapshots are disposable.
         path = self.root / user / 'source-index.sqlite3'
         path.unlink(missing_ok=True)

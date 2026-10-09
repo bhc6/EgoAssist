@@ -286,7 +286,7 @@ def test_history_delete_waits_for_worker_before_invalidating_index(tmp_path):
                 release.set()
                 response = await deletion
                 assert response.status == 200, await response.text()
-                assert not index.path.exists() and not service.readers and not service.paused
+                assert not service.readers and not service.paused
                 assert service.index('me').events('case') == []
             finally:
                 release.set()

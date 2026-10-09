@@ -53,7 +53,7 @@ def mount(app, *, identity, user_key, journal_for, evidence, answers):
         finally:
             if maintenance:
                 try:
-                    evidence.invalidate_user(uid)
+                    evidence.invalidate_user(uid, preserve_valid_snapshots=request.path == '/api/history/delete')
                 finally:
                     evidence.resume_user(uid)
 

@@ -1612,6 +1612,9 @@ def create_app(
         )
         instructions += prompt_text("run_egoassist/grounded_user_instructions.2")
         instructions += prompt_text("interaction/responsive_answer")
+        if result.get("skillTransition"):
+            instructions += '\n' + prompt_text("run_egoassist/skill_transition") + json.dumps(
+                result["skillTransition"], ensure_ascii=False)
         from egoassist.product.answer_time import localize_evidence, time_instructions
         instructions += time_instructions(clock)
         active_runtime = target_runtime or runtime

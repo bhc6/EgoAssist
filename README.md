@@ -18,6 +18,15 @@ EgoAssist 可作为科研工程基座；新的机制对照与评分由独立项�
 
 ## 启动
 
+完整功能演示使用[演示指南](docs/DEMO_GUIDE.md)：统一启动检查、独立演示数据、四种 Skill、七个任务入口、语音、视觉、记忆和日/周/月回顾。
+
+```powershell
+.\.venv\Scripts\python.exe scripts/demo.py check
+.\.venv\Scripts\python.exe scripts/demo.py start
+```
+
+首次使用先完成下面的依赖和密钥配置；演示入口另需 `.[modular]` 与 `playwright`，具体安装命令见指南。
+
 云端 Demo 不需要 GPU。主要本地验证环境为 Windows、Python 3.13、Edge。
 
 以下 PowerShell 命令在项目根目录执行，本工作区为 `D:\DEMO\EgoAssist`。首次使用先创建虚拟环境并安装依赖；已经完成安装时可直接运行后面的启动命令。
