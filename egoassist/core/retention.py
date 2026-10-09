@@ -3,7 +3,7 @@
 from collections import defaultdict, deque
 from datetime import datetime, timezone
 
-from .events import owned_identifiers, references, retention_category
+from .events import owned_identifiers, references, retention_categories
 
 
 def erase_expired(journal, cutoffs, *, source_ids=()):
@@ -33,7 +33,8 @@ def erase_expired(journal, cutoffs, *, source_ids=()):
                 erased.update(row.get("erasedIds", []))
                 turns.update(row.get("turnIds", []))
                 continue
-            cutoff = cutoffs.get(retention_category(row))
+            applicable = [cutoffs[category] for category in retention_categories(row) if category in cutoffs]
+            cutoff = max(applicable) if applicable else None
             timestamp = datetime.fromisoformat(row["timestamp"].replace("Z", "+00:00"))
             if timestamp.tzinfo is None:
                 timestamp = timestamp.replace(tzinfo=timezone.utc)

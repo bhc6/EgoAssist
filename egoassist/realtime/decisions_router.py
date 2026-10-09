@@ -374,7 +374,7 @@ class DecisionsTurnRouter(SemanticTurnRouter):
 
     async def _request_decisions(self, payload, audit):
         started = time.perf_counter()
-        deadline = asyncio.get_running_loop().time() + self.timeout_seconds
+        deadline = self._deadline.get() or (asyncio.get_running_loop().time() + self.timeout_seconds)
         attempts = 0
         retry_transport = False
         try:
@@ -393,6 +393,10 @@ class DecisionsTurnRouter(SemanticTurnRouter):
                                       "totalSeconds": self.timeout_seconds}
             while True:
                 attempts += 1
+                audit["attempts"] = attempts
+                attempt = {"attempt": attempts, "transport": {}}
+                audit.setdefault("attemptDetails", []).append(attempt)
+                audit["transport"] = attempt["transport"]
                 attempt_started = asyncio.get_running_loop().time()
                 remaining = deadline - asyncio.get_running_loop().time()
                 if remaining <= 0:
@@ -410,11 +414,12 @@ class DecisionsTurnRouter(SemanticTurnRouter):
                         async with request_session.post(
                             DECISIONS_URL, json=payload, allow_redirects=False,
                             headers={"Authorization": "Bearer " + self.decisions_key},
-                            trace_request_ctx=audit.setdefault("transport", {}),
+                            trace_request_ctx=attempt["transport"],
                             timeout=aiohttp.ClientTimeout(total=None, connect=stage_timeout,
                                                           sock_read=stage_timeout),
                         ) as response:
                             audit["httpStatus"] = response.status
+                            attempt["httpStatus"] = response.status
                             raw = (await response.text()).replace(self.decisions_key, "[REDACTED]")
                             audit["rawResponse"] = raw
                             if response.status != 200:
@@ -426,12 +431,14 @@ class DecisionsTurnRouter(SemanticTurnRouter):
                             audit["attempts"] = attempts
                             return answers
                 except ProviderRequestError as exc:
+                    attempt["error"] = exc.public()
                     if not (exc.retryable and attempts == 1 and
                             deadline - asyncio.get_running_loop().time() > 0):
                         raise
                     retry_transport = False
                     audit["retry"] = {"attempt": 2, "reason": exc.public()}
                 except (aiohttp.ClientError, TimeoutError, asyncio.TimeoutError) as exc:
+                    attempt["error"] = type(exc).__name__
                     attempt_elapsed = asyncio.get_running_loop().time() - attempt_started
                     # A stage timeout consumed most of the allowance; retrying
                     # would only duplicate a doomed request and violate the
@@ -442,13 +449,20 @@ class DecisionsTurnRouter(SemanticTurnRouter):
                         raise
                     retry_transport = True
                     audit["retry"] = {"attempt": 2, "reason": type(exc).__name__}
+                except asyncio.CancelledError:
+                    attempt["error"] = "deadline-exceeded" if asyncio.get_running_loop().time() >= deadline else "cancelled"
+                    raise
                 finally:
+                    attempt["latencyMs"] = round((asyncio.get_running_loop().time() - attempt_started) * 1000, 1)
                     if retry_session is not None:
                         await retry_session.close()
         except ProviderRequestError as exc:
             if exc.account_blocked:
                 self._decisions_failure = exc
             audit["providerError"] = exc.public()
+            raise
+        except BaseException as exc:
+            audit["error"] = "deadline-exceeded" if isinstance(exc, asyncio.CancelledError) and asyncio.get_running_loop().time() >= deadline else type(exc).__name__
             raise
         finally:
             audit["latencyMs"] = round((time.perf_counter() - started) * 1000, 1)

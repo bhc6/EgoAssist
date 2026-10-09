@@ -1,5 +1,6 @@
 """Shared scene evidence independent of skills, with immutable question-time media."""
 from __future__ import annotations
+from egoassist.core.model_audit import record_request, record_output
 
 import asyncio
 import base64
@@ -22,7 +23,7 @@ from .speakers import MODELS, SpeakerRegistry
 from .visual_question import VisualQuestions
 from .visual_history import VisualHistory
 from egoassist.memory.long_events import LongEvents
-from .interaction_window import BUFFER_SECONDS, BUFFER_BYTES, device_clock, select_frames
+from .interaction_window import BUFFER_SECONDS, BUFFER_BYTES, LOOKBACK_SECONDS, device_clock, select_frames
 from uuid import uuid4
 from egoassist.core.settings import asr_settings
 
@@ -231,7 +232,7 @@ class SharedScene:
     def observation_context(self, before):
         boundary = datetime.fromisoformat(before)
         candidates = [row for row in self.observations
-                      if datetime.fromisoformat(row["capturedAt"]) <= boundary]
+                      if 0 <= (boundary - datetime.fromisoformat(row["capturedAt"])).total_seconds() <= LOOKBACK_SECONDS]
         latest = max(candidates, key=lambda row: datetime.fromisoformat(row["capturedAt"]), default=None)
         return deepcopy(latest)
 
@@ -314,19 +315,20 @@ class SharedScene:
                 wav.writeframes(pcm[segment["startMs"] * 32:segment["endMs"] * 32])
             ref = self._save(output.getvalue(), ".wav", "audio/wav")
             request = {"turnId": turn_id, "audio": ref, "segment": segment, **self.asr, "prompt": prompt_text("scene/asr")}
-            self.journal.append("scene.transcription.request", request)
+            request_entry = self.journal.append("scene.transcription.request", request)
             started = time.perf_counter()
             try:
                 import dashscope
                 async with asyncio.timeout(self.asr["timeoutSeconds"]), self.transcription_limit:
                     async with self.http().post(dashscope.base_http_api_url.rstrip("/") + "/services/aigc/multimodal-generation/generation",
                         timeout=aiohttp.ClientTimeout(total=self.asr["timeoutSeconds"]),
-                        headers={"Authorization": "Bearer " + self.api_key}, json={"model": request["model"],
+                        headers={"Authorization": "Bearer " + self.api_key}, json=record_request(self.journal, request_entry, {"model": request["model"],
                         "input": {"messages": [{"role": "system", "content": [{"text": request["prompt"]}]},
                                                 {"role": "user", "content": [{"audio": "data:audio/wav;base64," + base64.b64encode(output.getvalue()).decode()}]}]},
-                        "parameters": {"asr_options": {"enable_itn": True}}}) as response:
+                        "parameters": {"asr_options": {"enable_itn": True}}})) as response:
                         response.raise_for_status()
                         payload = await response.json()
+                        record_output(self.journal, request_entry, payload)
                 content = payload["output"]["choices"][0]["message"]["content"]
                 text = content if isinstance(content, str) else "".join(c.get("text", "") for c in content)
                 result = {**segment, "audio": ref, "status": "transcribed", "text": text,
@@ -334,7 +336,7 @@ class SharedScene:
             except Exception as exc:
                 result = {**segment, "audio": ref, "status": "unavailable", "text": None, "error": type(exc).__name__}
             result["latencyMs"] = round((time.perf_counter() - started) * 1000, 1)
-            self.journal.append("scene.transcription.result", {"turnId": turn_id, **result})
+            self.journal.append("scene.transcription.result", {"turnId": turn_id, **result, "requestEventId": request_entry["id"]}, parent_id=request_entry["id"])
             return result
 
         utterances = await asyncio.gather(*(transcribe(s) for s in segments))
@@ -364,7 +366,7 @@ class SharedScene:
             started = time.perf_counter()
             model = os.getenv("EGOASSIST_SCENE_MODEL", "qwen3-vl-flash")
             request = {"frame": ref, "model": model, "prompt": prompt_text("scene/observe")}
-            self.journal.append("scene.request", request)
+            request_entry = self.journal.append("scene.request", request)
             try:
                 import dashscope
                 messages = [{"role": "system", "content": [{"text": request["prompt"]}]},
@@ -373,10 +375,11 @@ class SharedScene:
                 async with asyncio.timeout(8):
                     async with self.http().post(dashscope.base_http_api_url.rstrip("/") + "/services/aigc/multimodal-generation/generation",
                         timeout=aiohttp.ClientTimeout(total=8),
-                        headers={"Authorization": "Bearer " + self.api_key}, json={"model": model, "input": {"messages": messages},
-                        "parameters": {"temperature": 0, "enable_thinking": False, "max_tokens": 600, "response_format": {"type": "json_object"}}}) as response:
+                        headers={"Authorization": "Bearer " + self.api_key}, json=record_request(self.journal, request_entry, {"model": model, "input": {"messages": messages},
+                        "parameters": {"temperature": 0, "enable_thinking": False, "max_tokens": 600, "response_format": {"type": "json_object"}}})) as response:
                         response.raise_for_status()
                         payload = await response.json()
+                        record_output(self.journal, request_entry, payload)
                 content = payload["output"]["choices"][0]["message"]["content"]
                 raw = content if isinstance(content, str) else "".join(c.get("text", "") for c in content)
                 value = json.loads(raw)
@@ -390,7 +393,7 @@ class SharedScene:
             except Exception as exc:
                 result = {"status": "unavailable", "frame": ref, "error": type(exc).__name__ + ": " + str(exc)[:150]}
             result.update(model=model, latencyMs=round((time.perf_counter() - started) * 1000, 1))
-            self.journal.append("scene.result", result)
+            self.journal.append("scene.result", {**result, "requestEventId": request_entry["id"]}, parent_id=request_entry["id"])
             self.last_vision = (time.monotonic(), result)
             if result["status"] == "observed":
                 self.vision_by_frame[ref["frameId"]] = result

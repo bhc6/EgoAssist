@@ -58,12 +58,13 @@ function renderTurnWorkflow() {
     row("接收到完整回答", answer?.inputToCompleteMs != null ? answer.inputToCompleteMs + " ms" : "尚未完成") +
     row("回答耗时", answer?.durationMs != null ? answer.durationMs + " ms" : answer?.generationMs != null ? answer.generationMs + " ms（响应创建至完成）" : "尚未完成测量") +
     (answer?.error ? row("失败原因", answer.error) : "") +
-    (semantic ? "<details data-disclosure='semantic'><summary>JEV 路由明细与分类依据</summary><pre>" + esc(jevRouteDetails(semantic) + "\n\n" + JSON.stringify(semantic, null, 2)) + "</pre></details>" : "") +
+    (semantic ? "<details data-disclosure='semantic'><summary>JEV 判断题、全部选项与概率</summary>" + jevAuditPanel(turn) + "</details>" : "") +
     "<details data-disclosure='events'><summary>本问题运行记录（" + events.length + "）</summary><ol class='workflow-event-list'>" +
     events.map(e => "<li><time>" + esc(eventTime(e)) + "</time> <button type='button' data-workflow-event='" + esc(e.eventId) + "'>" + esc(e.eventType || e.payload?.eventType || e.type) +
       "</button>" + (e.latencyMs != null ? " · " + esc(e.latencyMs) + " ms" : "") + "</li>").join("") +
     "</ol></details>";
   updateDisclosureHTML(root, html, selectedSessionId + ":" + turn.turnId);
+  bindJevAudit(root, turn);
   const followButton = root.querySelector("#workflowFollowLatest");
   if (followButton) followButton.onclick = () => { inspectedTurnId = null; renderTurnWorkflow(); };
   root.querySelectorAll("[data-workflow-event]").forEach(button => button.onclick = () => {

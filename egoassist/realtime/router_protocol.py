@@ -27,7 +27,11 @@ def expand_decision(parsed):
         events = result.pop('memoryEvents')
         if not isinstance(events, list) or not isinstance(result.get('memoryAtoms', []), list):
             raise ValueError('memory events and atoms must be lists')
-        if any(not isinstance(item, dict) or set(item) - {'scope', 'consent', 'context', 'text'} for item in events):
+        # Some providers repeat the implied event kind. Accept that exact
+        # redundancy without allowing a different kind or extra memory fields.
+        if any(not isinstance(item, dict)
+               or set(item) - {'scope', 'consent', 'context', 'text', 'kind'}
+               or item.get('kind', 'event') != 'event' for item in events):
             raise ValueError('invalid memory event envelope')
         result['memoryAtoms'] = [*result.get('memoryAtoms', []), *[{'kind': 'event', **item} for item in events]]
     query = result.get('memoryQuery')

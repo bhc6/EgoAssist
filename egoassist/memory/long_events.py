@@ -56,12 +56,7 @@ def projection(journal):
 
 
 def pending(state):
-    observations = [s for s in state['sources'].values() if s['kind'] == 'sampled-observation']
-    if not observations:
-        return []
-    start = min(datetime.fromisoformat(s['at']) for s in observations)
-    return sorted((s for s in state['sources'].values() if s['sourceId'] not in state['processed']
-                   and datetime.fromisoformat(s['at']) >= start),
+    return sorted((s for s in state['sources'].values() if s['sourceId'] not in state['processed']),
                   key=lambda s: (datetime.fromisoformat(s['at']), s['sourceId']))
 
 
@@ -71,6 +66,31 @@ def next_batch(state):
         if (datetime.fromisoformat(rows[index]['at']) - datetime.fromisoformat(rows[index-1]['at'])).total_seconds() > 1800:
             return rows[:index]
     return rows
+
+
+def candidate_events(state, batch):
+    """Offer open projects across days without merging separate visual occurrences.
+
+    Time admits candidates, never proves identity. The model receives their raw
+    evidence and must establish continuity from the new source statements.
+    """
+    start, end = (datetime.fromisoformat(batch[i]['at']) for i in (0, -1))
+    statements = any(s['kind'] == 'user-statement' for s in batch)
+    nearby, ongoing = [], []
+    for event in state['events'].values():
+        if any(ref not in state['sources'] for ref in event['sourceIds']):
+            continue
+        if datetime.fromisoformat(event['coverage']['firstEvidenceAt']) > end:
+            continue
+        gap = (start - datetime.fromisoformat(event['coverage']['lastEvidenceAt'])).total_seconds()
+        if gap <= 1800:
+            nearby.append(event)
+        elif statements and event['status'] != 'completed' and gap <= 30 * 86400:
+            ongoing.append(event)
+    key = lambda e: datetime.fromisoformat(e['coverage']['lastEvidenceAt'])
+    # Preserve the existing recent-scene budget; older open projects fill spare slots.
+    nearby = sorted(nearby, key=key, reverse=True)[:16]
+    return nearby + sorted(ongoing, key=key, reverse=True)[:16-len(nearby)]
 
 
 def coverage(refs, sources, *, gap_seconds=30):
@@ -116,7 +136,7 @@ def validate_updates(value, state, batch):
         refs = list(dict.fromkeys(refs))
         all_refs = list(dict.fromkeys(previous.get('sourceIds', []) + refs))
         cov = coverage(all_refs, state['sources'])
-        phase = {'description': update['phase'], 'status': update['status'], 'sourceIds': refs,
+        phase = {'description': update['phase'], 'title': update['title'], 'status': update['status'], 'sourceIds': refs,
                  'at': max((state['sources'][r]['at'] for r in refs), key=datetime.fromisoformat)}
         result.append({**update, 'eventId': eid or 'event-' + uuid4().hex[:16],
                        'sourceIds': all_refs, 'phases': previous.get('phases', []) + [phase],
@@ -166,16 +186,18 @@ class LongEvents:
                 if not batch:
                     return
                 self.last_attempt = time.monotonic()
-                recent = sorted(state['events'].values(), key=lambda e: datetime.fromisoformat(e['coverage']['lastEvidenceAt']))[-16:]
-                # Do not allow a surviving derived summary to resurrect erased evidence.
-                recent = [e for e in recent if all(r in state['sources'] for r in e['sourceIds'])]
-                recent = [e for e in recent if 0 <= (datetime.fromisoformat(batch[0]['at']) -
-                          datetime.fromisoformat(e['coverage']['lastEvidenceAt'])).total_seconds() <= 1800]
+                recent = candidate_events(state, batch)
                 model_state = {**state, 'events': {e['eventId']: e for e in recent}}
                 messages = [{'role': 'system', 'content': prompt_text('long_events/derive')},
-                            {'role': 'user', 'content': json.dumps({'events': [
+                            {'role': 'user', 'content': json.dumps({'historicalContextOnly': True, 'events': [
                                 {**{k: e[k] for k in ('eventId', 'title', 'summary', 'status', 'coverage', 'uncertainties')},
-                                 'phases': [{k:v for k,v in p.items() if k != 'sourceIds'} for p in e['phases'][-6:]]} for e in recent],
+                                 'phases': e['phases'][-6:],
+                                 'sources': [{**state['sources'][ref], 'text': state['sources'][ref]['text'][:1200],
+                                              'textTruncated': len(state['sources'][ref]['text']) > 1200}
+                                             for ref in list(dict.fromkeys(e['sourceIds'][:1] + e['sourceIds'][-3:]))],
+                                 'sourcesTruncated': len(e['sourceIds']) > 4} for e in recent]}, ensure_ascii=False)},
+                            {'role': 'user', 'content': json.dumps({
+                                'task': '仅根据本条消息的新证据判断本批事件变化；历史摘要不能覆盖新证据。',
                                 'sources': [{**s, 'text': s['text'][:2000], 'textTruncated': len(s['text']) > 2000} for s in batch]}, ensure_ascii=False)}]
                 deps = tuple(dict.fromkeys([s['sourceId'] for s in batch] + [ref for e in recent for ref in e['sourceIds']])) + ((state['revision'],) if state['revision'] else ())
                 request = self.journal.append('long_event.request', {'model': self.service.model, 'messages': messages,
@@ -183,9 +205,13 @@ class LongEvents:
                 self.journal.append('long_event.job', {'status': 'running', 'requestId': request['id']})
                 started = time.perf_counter()
                 try:
-                    payload = await self.service.complete(messages, model=self.service.model, parameters={
+                    from egoassist.core.model_audit import record_request, record_output
+                    parameters = {
                         'temperature': 0, 'enable_thinking': False, 'max_tokens': 3000,
-                        'result_format': 'message', 'response_format': {'type': 'json_object'}})
+                        'result_format': 'message', 'response_format': {'type': 'json_object'}}
+                    record_request(self.journal, request, {'model': self.service.model, 'input': {'messages': messages}, 'parameters': parameters})
+                    payload = await self.service.complete(messages, model=self.service.model, parameters=parameters)
+                    record_output(self.journal, request, payload)
                     choice = payload['output']['choices'][0]
                     raw = choice['message']['content']
                     self.journal.append('long_event.response', {'requestId': request['id'], 'providerRequestId': payload.get('request_id'),
@@ -239,7 +265,7 @@ class LongEvents:
                 'automaticRetryPaused': state['failures'] >= 3,
                 'meaning': '按采样证据推断的事件；中断不等于结束，跨度不等于持续时长。'}
 
-    def evidence(self, event_id, *, offset=0, limit=24):
+    def evidence(self, event_id, *, offset=0, limit=24, source_ids=None):
         if type(offset) is not int or offset < 0 or type(limit) is not int or not 1 <= limit <= 100:
             raise ValueError('invalid evidence page')
         state = projection(self.journal)
@@ -247,6 +273,11 @@ class LongEvents:
         if not event or any(ref not in state['sources'] for ref in event['sourceIds']):
             raise ValueError('event evidence unavailable')
         refs = event['sourceIds']
+        if source_ids is not None:
+            if (not isinstance(source_ids, list) or not 1 <= len(source_ids) <= 100
+                    or any(not isinstance(ref, str) or ref not in refs for ref in source_ids)):
+                raise ValueError('source does not belong to this event')
+            refs = list(dict.fromkeys(source_ids))
         selected = refs[offset:offset+limit]
         return {'eventId': event_id, 'sources': [state['sources'][ref] for ref in selected],
                 'total': len(refs), 'nextOffset': offset+len(selected) if offset+len(selected) < len(refs) else None}

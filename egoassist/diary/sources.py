@@ -91,6 +91,7 @@ def collect(root: Path, timeline_path: Path, user_id: str, period: dict):
                                     at.isoformat(), source['receivedAt'], sessionId=path.stem,
                                     externalId=source['externalId'])
                         elif kind == 'message' and row.get('status') == 'completed' and row.get('message', {}).get('role') == 'user':
+                            stamp = (row.get('metadata') or {}).get('sourceRecordedAt') or stamp
                             text = row['message']['content']; kind = 'user-statement'
                         elif kind == 'message' and row.get('status') == 'completed' and row.get('message', {}).get('role') == 'assistant':
                             text = row['message']['content']; kind = 'assistant-delivery'
@@ -125,9 +126,11 @@ def collect(root: Path, timeline_path: Path, user_id: str, period: dict):
             for phase in event.get('phases', []):
                 for ref in phase.get('sourceIds', []):
                     record = by_source.get(path.stem+':'+ref)
-                    if record is not None:
+                    # Later stages may cite an earlier plan for comparison.
+                    # Do not attach their new state or title to that earlier day.
+                    if record is not None and datetime.fromisoformat(phase['at']) < upper:
                         record.setdefault('derivedEventHints', []).append({
-                            'eventId':event['eventId'], 'title':event['title'], 'phase':phase['description'],
+                            'eventId':event['eventId'], 'title':phase.get('title', '事件记录'), 'phase':phase['description'],
                             'statusAtSource':phase['status'], 'claim':'rebuildable-hypothesis; original source takes precedence'})
     if timeline_path.exists():
         # SQLite read-only URI prevents schema creation, migration and writes.

@@ -87,7 +87,7 @@
       html += `${row.error?`<p class="diary-error">${esc(row.error)}</p>`:''}<p>${!active(row)?esc(row.phase || ''):''}</p><div class="actions">${active(row)?'<button class="secondary" data-cancel>取消本次整理</button>':['failed','cancelled'].includes(row.status)?'<button data-retry>继续整理 / 重试</button>':'<button data-regenerate>重新整理</button>'}</div>`;
     }
     if (row.notes?.length) html += '<h3>我的补记</h3>' + row.notes.map(note=>`<div class="claim"><small>${esc(note.day)}</small><p>${esc(note.text)}</p></div>`).join('');
-    if (row.calls?.length) html += `<details data-key="calls"><summary>生成记录 · ${row.calls.length} 次处理</summary><pre>${esc(JSON.stringify(row.calls.map(call=>({stage:call.stage,model:call.model,requestId:call.providerRequestId,latencyMs:call.latencyMs})),null,2))}</pre></details>`;
+    if (row.calls?.length) html += `<details data-key="calls"><summary>生成记录 · ${row.calls.length} 次处理</summary>${row.calls.map((call,index)=>`<details data-key="call-${call.callId || index}"><summary>${esc(call.model)} · ${esc(call.stage)} · ${esc(call.status || '未记录状态')}</summary><p>${call.request?'已保存实际输入；下方包含完整请求、来源映射及已收到的输出。':'历史调用未保存完整输入，无法用当前模板补造。'}</p><pre>${esc(JSON.stringify(call,null,2))}</pre></details>`).join('')}</details>`;
     root.innerHTML = html;
     root.querySelectorAll('[data-key]').forEach(node=>{node.open=openSections.has(node.dataset.key);if(node.dataset.key===focus)node.querySelector('summary')?.focus({preventScroll:true});});
     root.setAttribute('aria-busy', String(active(row)));

@@ -116,12 +116,16 @@ class AnswerService:
             provenance = {'snapshotId': packet['snapshotId'], 'packageEventId': package['id'],
                 'sourceEventIds': list(source_event_ids(journal, packet))}
             for attempt in range(2):
+                from egoassist.core.model_audit import record_request, record_output
                 request = journal.append('evidence.answer.request', {**provenance,
                     'messages': messages, 'model': self.model, 'attempt': attempt + 1}, required_event_ids=(package['id'],))
                 try:
-                    payload = await self.complete(messages, model=self.model, parameters={
+                    parameters = {
                         'temperature': 0, 'enable_thinking': False, 'max_tokens': 2400,
-                        'result_format': 'message', 'response_format': {'type': 'json_object'}})
+                        'result_format': 'message', 'response_format': {'type': 'json_object'}}
+                    record_request(journal, request, {'model': self.model, 'input': {'messages': messages}, 'parameters': parameters})
+                    payload = await self.complete(messages, model=self.model, parameters=parameters)
+                    record_output(journal, request, payload)
                     choice = payload['output']['choices'][0]
                     raw = choice['message']['content']
                     journal.append('evidence.answer.response', {**provenance, 'requestEventId': request['id'],

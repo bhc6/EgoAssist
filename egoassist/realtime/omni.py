@@ -74,6 +74,9 @@ class _ResponseRequest:
     output_mode: str = "audio"
     purpose: str = "conversation"
     origin: dict[str, Any] | None = None
+    # Text adapter requests are rebuilt asynchronously; retain the exact
+    # provider context captured when the request entered the response lane.
+    context_items: tuple[dict[str, Any], ...] | None = None
 
     @property
     def correlation(self) -> dict:
@@ -274,6 +277,9 @@ class _OmniPerceptionLane:
                 event_type = str(response.get("type", ""))
                 if event_type == "pipeline.metrics":
                     lane.trace("provider.pipeline.metrics", {**response, "lane": "perception"})
+                elif event_type == "pipeline.audit":
+                    lane.trace("provider.model." + response['auditEvent'], {**response, "lane": "perception"},
+                               response_id=response.get('responseId'))
                 elif event_type == "pipeline.error":
                     lane.trace("provider.pipeline.error", {**response, "lane": "perception"})
                 if event_type == "response.created":
@@ -649,6 +655,9 @@ class OmniBrowserBridge:
                 event_type = response.get("type", "")
                 if event_type == "pipeline.metrics":
                     bridge._trace("provider.pipeline.metrics", {k: v for k, v in response.items() if k != "type"})
+                elif event_type == "pipeline.audit":
+                    bridge._trace("provider.model." + response['auditEvent'],
+                                  {k: v for k, v in response.items() if k != 'type'}, response_id=response.get('responseId'))
                 elif event_type == "pipeline.warning":
                     bridge._trace("provider.pipeline.warning", response)
                     bridge._schedule({"type": "audio_unavailable", "responseId": response.get("responseId"),
@@ -1237,10 +1246,17 @@ class OmniBrowserBridge:
         should_cancel = False
         with self._response_lock:
             self._response_sequence += 1
+            context_items = None
+            if output_mode == "text" and getattr(self, "_context_harness", None) is not None:
+                context_items = tuple(
+                    deepcopy(item)
+                    for item in self._context_harness.provider_replay_items(compact_timestamps=True)
+                )
             request = _ResponseRequest(
                 instructions, priority, self._response_sequence, speech_policy, reason,
                 time.monotonic(), max(250, min(5000, int(max_protection_ms))), output_mode, purpose,
                 dict(origin) if origin else None,
+                context_items,
             )
             self._trace("response.requested", {"sequence": request.sequence, "priority": priority, "speechPolicy": speech_policy, "reason": reason, "outputMode": output_mode, "purpose": purpose})
             disconnected = not getattr(self, "connected", True)
@@ -2241,9 +2257,11 @@ class OmniBrowserBridge:
                                     instructions=self.instructions + "\n" + HISTORY_STATEMENT_POLICY)
         conversation.items.clear()
         conversation.item_ids.clear()
-        if self._context_harness is not None:
-            for item in self._context_harness.provider_replay_items(compact_timestamps=True):
-                conversation.create_item(item)
+        replay_items = request.context_items
+        if replay_items is None and self._context_harness is not None:
+            replay_items = tuple(self._context_harness.provider_replay_items(compact_timestamps=True))
+        for item in replay_items or ():
+            conversation.create_item(deepcopy(item))
         prepared_answer = (request.origin or {}).get("preparedAnswer")
         self._response_conversation = conversation
         self._trace("response.dispatched", {

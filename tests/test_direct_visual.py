@@ -113,4 +113,4 @@ def test_ui_reports_jev_route_and_probabilities():
     result = subprocess.run(['node', '-e', script], capture_output=True, text=True, encoding='utf8', check=True)
     lines = result.stdout.splitlines()
     assert '回答' in lines[0] and '对助手' in lines[0] and '语音' in lines[0]
-    assert '路由：回答' in result.stdout and 'JEV选择' in result.stdout and '98%' in result.stdout and 'JEV耗时：812.4 ms' in result.stdout
+    assert '路由：回答' in result.stdout and 'JEV选择' in result.stdout and '98%' in result.stdout and '分类总耗时：812.4 ms' in result.stdout

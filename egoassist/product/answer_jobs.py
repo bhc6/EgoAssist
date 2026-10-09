@@ -260,9 +260,18 @@ class AnswerJobs:
         request = journal.append("answer.request", {"turnId": row["turnId"], "model": model,
             "answerJobEventId": row['id'], "evidencePackage": packet, "messages": audit_messages},
             required_event_ids=(row['id'],))
-        payload = await self.answer_service.complete(messages, model=model, endpoint=endpoint,
-            timeout=self.timeout, parameters={"result_format": "message", "temperature": 0,
-                "enable_thinking": False, "max_tokens": 1600})
+        from egoassist.core.model_audit import record_request, record_output
+        parameters = {"result_format": "message", "temperature": 0, "enable_thinking": False, "max_tokens": 1600}
+        record_request(journal, request, {'model': model, 'input': {'messages': messages}, 'parameters': parameters})
+        try:
+            payload = await self.answer_service.complete(messages, model=model, endpoint=endpoint,
+                timeout=self.timeout, parameters=parameters)
+        except BaseException as exc:
+            journal.append('answer.result', {'requestEventId': request['id'], 'model': model,
+                'status': 'cancelled' if isinstance(exc, asyncio.CancelledError) else 'failed',
+                'error': type(exc).__name__}, parent_id=request['id'], required_event_ids=(row['id'], request['id']))
+            raise
+        record_output(journal, request, payload)
         choice = payload["output"]["choices"][0]
         if packet:
             SourceIndex(journal.path.parent.parent).snapshot(packet['snapshotId'], journal.session_id, packet['question'])

@@ -2,6 +2,42 @@
 from __future__ import annotations
 
 
+def conversation_at_turn(journal, turn_id, *, limit=6):
+    """Read only dialogue that existed before this durable input was captured.
+
+    Journal order survives restarted/legacy sequence counters and equal wall
+    timestamps. Filter before taking the tail so a delayed turn cannot lose its
+    history merely because newer turns filled the latest-message window.
+    """
+    def initial():
+        return {"position": 0, "turns": {}, "messages": [], "decisions": []}
+
+    def reduce(state, row):
+        state["position"] += 1
+        position = state["position"]
+        if row.get("type") in {"turn_inbox", "scene.turn"}:
+            state["turns"].setdefault(row["turnId"], position)
+        elif row.get("type") == "message" and row.get("status") in {"completed", "interrupted"}:
+            message = row.get("message") or {}
+            if message.get("role") in {"user", "assistant"}:
+                state["messages"].append((position, {"role": message["role"],
+                    "text": str(message.get("content", ""))[-600:], "sourceId": row["id"],
+                    "recordedAt": (row.get("metadata") or {}).get("sourceRecordedAt") or row["timestamp"]}))
+        elif row.get("type") == "control_decision":
+            state["decisions"].append((position, {"turnId": row.get("turnId"), "text": row.get("input"),
+                "interaction": (row.get("decision") or {}).get("interaction")}))
+
+    def select(state):
+        boundary = state["turns"].get(str(turn_id))
+        if boundary is None:
+            return {"priorTurnIds": [], "messages": [], "interactions": []}
+        return {"priorTurnIds": [key for key, position in state["turns"].items() if position < boundary],
+            "messages": [row for position, row in state["messages"] if position < boundary][-limit:],
+            "interactions": [row for position, row in state["decisions"] if position < boundary][-4:]}
+
+    return journal.project("conversation-at-turn-v1", initial, reduce, select=select)
+
+
 def retrieval_text(transcript, semantic):
     """Use a literal single question span for ranking, never an invented rewrite.
 

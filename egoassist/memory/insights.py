@@ -12,6 +12,7 @@ from pathlib import Path
 
 import aiohttp
 
+from egoassist.core.model_audit import record_request, record_output
 from egoassist.prompts import prompt_text
 from .temporal import ClockContext
 
@@ -162,14 +163,15 @@ class InsightGenerator:
                 if progress:
                     progress("waiting-provider")
                 async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=self.timeout), trust_env=True) as session:
-                    async with session.post(url, headers={"Authorization": "Bearer " + self.api_key}, json={
+                    async with session.post(url, headers={"Authorization": "Bearer " + self.api_key}, json=record_request(journal, request, {
                         "model": self.model, "input": {"messages": messages},
                         "parameters": {"result_format": "message", "temperature": 0, "enable_thinking": False,
                                        "max_tokens": 2400, "response_format": {"type": "json_object"}},
-                    }) as response:
+                    })) as response:
                         if response.status != 200:
                             raise RuntimeError(f"insight provider HTTP {response.status}")
                         payload = await response.json()
+                        record_output(journal, request, payload)
                 result["rawOutput"] = payload["output"]["choices"][0]["message"]["content"]
                 result["providerRequestId"] = payload.get("request_id")
                 result["usage"] = payload.get("usage", {})

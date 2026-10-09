@@ -1,5 +1,6 @@
 """Question-specific visual evidence, independent from background scene descriptions."""
 from __future__ import annotations
+from egoassist.core.model_audit import record_request, record_output
 
 import asyncio
 import json
@@ -57,12 +58,8 @@ class VisualQuestions:
         timeout = float(os.getenv('EGOASSIST_INTERACTION_VISION_TIMEOUT', '8')) if sequence else self.timeout
         if not .1 <= timeout <= 10:
             raise ValueError('interaction vision timeout must be between 0.1 and 10 seconds')
-        turn = self.scene.turns[turn_id]
-        boundary = turn.get('capturedAt', turn['timestamp'])
-        dialogue = [{'role': r['message']['role'], 'text': r['message']['content'][:600], 'sourceId': r['id']}
-                    for r in self.scene.journal.entries(types={'message'}, tail=12)
-                    if r.get('timestamp', '') <= boundary and r.get('status') == 'completed'
-                    and r.get('message', {}).get('role') in {'user', 'assistant'}][-6:]
+        from .router_context import conversation_at_turn
+        dialogue = conversation_at_turn(self.scene.journal, turn_id)['messages']
         request = self.scene.journal.append("scene.question.request", {
             "turnId": turn_id, "frame": frame, "frames": frames, "interactionWindow": window,
             "dialogue": dialogue, "model": model, "prompt": prompt, "question": question})
@@ -85,13 +82,14 @@ class VisualQuestions:
                 self.progress[turn_id]['status'] = 'waiting-provider'
                 async with self.scene.http().post(dashscope.base_http_api_url.rstrip("/") + "/services/aigc/multimodal-generation/generation",
                     timeout=aiohttp.ClientTimeout(total=timeout),
-                    headers={"Authorization": "Bearer " + self.scene.api_key}, json={"model": model,
+                    headers={"Authorization": "Bearer " + self.scene.api_key}, json=record_request(self.scene.journal, request, {"model": model,
                     "input": {"messages": [{"role": "system", "content": [{"text": prompt}]},
                         {"role": "user", "content": content}]},
                     "parameters": {"temperature": 0, "enable_thinking": False, "max_tokens": 700 if sequence else 500,
-                                   'response_format': {'type': 'json_object'}}}) as response:
+                                   'response_format': {'type': 'json_object'}}})) as response:
                     response.raise_for_status()
                     payload = await response.json()
+                    record_output(self.scene.journal, request, payload)
                 result['providerMs'] = round((time.perf_counter() - provider_started) * 1000, 1)
             choice = payload["output"]["choices"][0]
             content = choice["message"]["content"]

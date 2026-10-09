@@ -1,5 +1,9 @@
 """Bounded hierarchical compression. Every source chunk is processed or the job fails."""
 from collections import defaultdict
+from contextvars import ContextVar
+from datetime import datetime, timezone
+from uuid import uuid4
+import asyncio
 import json
 import os
 import re
@@ -11,6 +15,7 @@ from egoassist.prompts import prompt_text
 from .sources import chunks, digest
 
 SECTIONS = ('overview','life','work','changes','pending','suggestions')
+_audit_sink = ContextVar('diary_call_audit', default=None)
 
 
 class InvalidDiaryResponse(ValueError):
@@ -83,13 +88,17 @@ class DiaryGenerator:
         messages = [{'role':'system','content':self.policy}, {'role':'user','content':json.dumps(
             {'stage':stage,'period':period,'providedSourceIds':list(aliases.values()),'inputs':project(inputs)},ensure_ascii=False)}]
         started = time.perf_counter()
+        request = {'model': self.model, 'input': {'messages': messages},
+            'parameters': {'result_format':'message','temperature':0,'enable_thinking':False,
+                           'max_tokens':4000,'response_format':{'type':'json_object'}}}
         receipt={'model':self.model,'stage':stage,'inputHash':digest(messages),
-                 'sourceIds':sorted(allowed),'sourceMap':{v:k for k,v in aliases.items()}}
+                 'sourceIds':sorted(allowed),'sourceMap':{v:k for k,v in aliases.items()},
+                 'callId': uuid4().hex, 'timestamp': datetime.now(timezone.utc).isoformat(),
+                 'status': 'awaiting-output', 'request': request}
+        if _audit_sink.get(): _audit_sink.get()(receipt)
         async with aiohttp.ClientSession(trust_env=True, timeout=aiohttp.ClientTimeout(total=90)) as client:
             async with client.post(dashscope.base_http_api_url.rstrip('/')+'/services/aigc/text-generation/generation',
-                headers={'Authorization':'Bearer '+self.key},json={'model':self.model,'input':{'messages':messages},
-                'parameters':{'result_format':'message','temperature':0,'enable_thinking':False,
-                              'max_tokens':4000,'response_format':{'type':'json_object'}}}) as response:
+                headers={'Authorization':'Bearer '+self.key},json=request) as response:
                 if response.status != 200:
                     try:
                         error = await response.json(content_type=None)
@@ -98,6 +107,7 @@ class DiaryGenerator:
                     receipt['latencyMs'] = round((time.perf_counter()-started)*1000)
                     raise DiaryProviderError(response.status, error, receipt)
                 payload = await response.json()
+        receipt['response'] = payload
         choice = payload['output']['choices'][0]
         raw = choice['message']['content']
         receipt.update({'providerRequestId':payload.get('request_id'),
@@ -127,12 +137,26 @@ class DiaryGenerator:
             if key in cached: return cached[key]
             if len(audit)>=500: raise ValueError('本次整理达到请求上限；分块结果已保存')
             row['phase'] = stage; save(row)
+            current = None
+            def persist(receipt):
+                nonlocal current
+                if current is not receipt:
+                    audit.append(receipt)
+                    current = receipt
+                save(row)
+            token = _audit_sink.set(persist)
             try:
                 body, receipt = await self.call(stage,row['period'],inputs,allowed)
-            except (InvalidDiaryResponse, DiaryProviderError) as exc:
-                audit.append(exc.receipt);save(row)
+            except BaseException as exc:
+                if isinstance(exc, (InvalidDiaryResponse, DiaryProviderError)):
+                    persist(exc.receipt)
+                elif current is not None:
+                    current.update(status='cancelled' if isinstance(exc, asyncio.CancelledError) else 'failed', error=type(exc).__name__)
+                    save(row)
                 raise
-            cached[key] = body; audit.append(receipt); save(row)
+            finally:
+                _audit_sink.reset(token)
+            cached[key] = body; persist(receipt)
             return body
 
         async def reduce(nodes, label):
@@ -163,7 +187,23 @@ class DiaryGenerator:
                 parts.append(await infer(day+f' · 整理分块 {index+1}',part,{r['sourceId'] for r in part}))
             daily.append({'date':day,'body':await reduce(parts,day),'sourceCount':len(evidence)})
         body = await reduce([{**day['body'],'title':(day['date']+' '+day['body']['title'])[:80]} for day in daily], '周期回顾')
+        # Recheck cited originals at the final compression boundary. Summaries
+        # alone can amplify counts or retain plans superseded later in the period.
+        full_originals_fit = sum(len(r['text']) for r in records) <= 12000
+        cited = {r['sourceId'] for r in records} if full_originals_fit else references(body)
+        originals, remaining = [], 12000
+        for record in reversed(records):
+            if record['sourceId'] not in cited or remaining <= 0:
+                continue
+            excerpt = record['text'][:remaining if full_originals_fit else min(1200, remaining)]
+            originals.append({**{k: record[k] for k in ('sourceId', 'kind', 'occurredAt', 'localDate') if k in record},
+                              'text': excerpt, 'textTruncated': len(excerpt) < len(record['text'])})
+            remaining -= len(excerpt)
+        originals.reverse()
         # Final framing is required even when a period happens to contain just one day.
+        final_inputs = ([] if full_originals_fit else [body]) + [{'originalEvidence': originals,
+                    'omittedOriginalSources': len(cited - {r['sourceId'] for r in originals}),
+                    'instruction': '核对这些原始摘录后生成周期回顾。原文没有的次数或进展不得从旧摘要推断，按最新证据更新待办和建议。'}]
         body = await infer('完成'+row['period']['kind']+'：只总结有证据的日期，不声称未覆盖的生活',
-            [body],references(body))
+            final_inputs, cited)
         return body,daily

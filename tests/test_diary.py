@@ -52,6 +52,8 @@ def test_diary_provider_error_preserves_checkpoints_and_safe_diagnostics(tmp_pat
             receipt=saved['calls'][0]
             assert receipt['status']=='provider-error' and receipt['httpStatus']==status
             assert receipt['inputHash'] and receipt['sourceIds'] and receipt['stage']
+            assert receipt['request'] == requests[0]
+            assert receipt['callId'] and receipt['timestamp']
             assert 'private' not in json.dumps(saved) and 'secret-key' not in json.dumps(saved)
             if status==400 and payload.get('code')=='DataInspectionFailed':
                 assert receipt['providerCode']=='DataInspectionFailed'
@@ -118,6 +120,46 @@ def test_hierarchical_pipeline_processes_all_chunks_and_reuses_checkpoints():
         await generator.generate(row,{'records':records},lambda row:None)
         assert len(seen)==count
         validate(result,{r['sourceId'] for r in records})
+    asyncio.run(run())
+
+
+def test_final_small_period_uses_originals_without_repeating_derived_summary():
+    async def run():
+        generator = DiaryGenerator('unused')
+        calls = []
+        async def call(stage, period, inputs, allowed):
+            calls.append((stage, inputs, allowed))
+            return body(allowed), {'stage': stage, 'providerRequestId': 'fixture'}
+        generator.call = call
+        records = [{'sourceId': 'one', 'localDate': '2026-09-21', 'kind': 'user-statement',
+                    'occurredAt': '2026-09-21T10:00:00+08:00', 'text': 'Only one practice is documented.'}]
+        row = {'period': period_for('monthly', '2026-09-21', 'Asia/Shanghai')}
+        await generator.generate(row, {'records': records}, lambda _: None)
+        stage, inputs, allowed = calls[-1]
+        assert stage.startswith('完成') and allowed == {'one'}
+        assert len(inputs) == 1 and 'overview' not in inputs[0]
+        assert inputs[0]['originalEvidence'][0]['text'] == records[0]['text']
+        assert inputs[0]['omittedOriginalSources'] == 0
+    asyncio.run(run())
+
+
+def test_final_large_period_original_recheck_is_bounded_and_reports_omissions():
+    async def run():
+        generator = DiaryGenerator('unused')
+        calls = []
+        async def call(stage, period, inputs, allowed):
+            calls.append((stage, inputs, allowed))
+            return body(allowed), {'stage': stage, 'providerRequestId': 'fixture'}
+        generator.call = call
+        records = [{'sourceId': str(i), 'localDate': '2026-09-21', 'text': 'x' * 2000} for i in range(12)]
+        row = {'period': period_for('monthly', '2026-09-21', 'Asia/Shanghai')}
+        await generator.generate(row, {'records': records}, lambda _: None)
+        final = calls[-1][1]
+        assert len(final) == 2 and 'overview' in final[0]
+        originals = final[1]['originalEvidence']
+        assert sum(len(r['text']) for r in originals) <= 12000
+        assert all(r['textTruncated'] for r in originals)
+        assert final[1]['omittedOriginalSources'] == len(calls[-1][2] - {r['sourceId'] for r in originals})
     asyncio.run(run())
 
 

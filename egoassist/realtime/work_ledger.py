@@ -612,7 +612,10 @@ class CaseWorkLedger:
             if entry.get("type") == "control_decision" and entry.get("turnId"):
                 decision = entry.get("decision") or {}
                 visible = {k: v for k, v in decision.items()
-                           if k not in {"requestMetrics", "rawOutput"}}
+                           if k not in {"requestMetrics", "rawOutput", "sourceScene"}}
+                if "sourceScene" in decision:
+                    visible["sourceSceneAvailable"] = True
+                visible["auditEventId"] = entry["id"]
                 # Keep the finite JEV decision visible without exposing the
                 # large request/context payload that belongs in the audit log.
                 metrics = decision.get("requestMetrics") or {}

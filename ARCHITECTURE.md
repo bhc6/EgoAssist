@@ -40,11 +40,11 @@ flowchart LR
 
 `run_egoassist.py` 只处理命令行启动。`application/composition.py` 组装服务与生命周期，HTTP 适配按身份、任务、记忆和证据分组；`RealtimeConnection` 管理连接及媒体收发，`TurnCoordinator` 管理分类、排队和执行。前端渲染 `runtimeLanes`。模型连接数和链路数量不同：观察可有开放环境与任务检查两个连接，交互可有路由、工具与回答多个模型，记忆可有恢复与报告多个作业。
 
-共享底座的事件契约、`SessionJournal`、投影和配置放在 `core/`，该包不能依赖 `application/`、`realtime/`、`memory/` 或 `product/`；测试检查这条规则。原有导入路径保留兼容导出。Timeline 索引由记忆模块拥有，产品数据库是派生投影；删除必须先作用于来源并让缓存失效，不能只删除投影。Skill 是交互链路可加载的能力包，携带观察要求与记忆需求；不成为第四条主链路。浏览器和未来眼镜是采集/输出适配器，不承担核心任务状态。
+共享底座的事件契约、`SessionJournal`、投影、模型调用审计和配置放在 `core/`，该包不能依赖 `application/`、`realtime/`、`memory/` 或 `product/`；测试检查这条规则。`core/model_audit.py` 记录实际请求/输出，并按显式调用 ID 构建审计视图；`realtime/model_audit.py` 保留兼容导出，记忆层直接使用 core 实现。Timeline 索引由记忆模块拥有，产品数据库是派生投影；删除必须先作用于来源并让缓存失效，不能只删除投影。Skill 是交互链路可加载的能力包，携带观察要求与记忆需求；不成为第四条主链路。浏览器和未来眼镜是采集/输出适配器，不承担核心任务状态。
 
 ## 运行原则
 
-实时模型传输可通过 `--realtime-backend omni|modular` 切换。默认保留 Omni；模块化方案在 `realtime/modular.py` 中组合 VAD 分段 ASR、VL、文本生成和流式 TTS，复用现有桥接层的权限、调度、工具、上下文重放与播放控制。模型拆分不改变三链路职责，语义路由和记忆服务继续独立运行。模型配置、真实对照及已知限制见[模块化实时后端](docs/MODULAR_REALTIME_2026-09-14.md)。
+实时模型传输可通过 `--realtime-backend omni|modular` 切换。默认使用 modular，Omni 保留为显式对照；模块化方案在 `realtime/modular.py` 中组合 VAD 分段 ASR、VL、文本生成和流式 TTS，复用现有桥接层的权限、调度、工具、上下文重放与播放控制。模型拆分不改变三链路职责，语义路由和记忆服务继续独立运行。模型配置、真实对照及已知限制见[模块化实时后端](docs/MODULAR_REALTIME_2026-09-14.md)与[2026-09-26 语音后端对照](docs/VOICE_BACKEND_COMPARISON_2026-09-26.md)。
 
 1. 回答生成、暂停播报和取消某个问题，不自动关闭观察。
 2. 模型推理与后台加工不得持有跨链路共享锁；短状态提交可使用事务或锁。

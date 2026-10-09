@@ -7,7 +7,7 @@
   <link rel="icon" href="data:,">
   <link rel="stylesheet" href="styles.css">
   <link rel="stylesheet" href="responsive.css?v=20260925-cleanup">
-  <link rel="stylesheet" href="memory-controls.css?v=20260926-speech-permission">
+  <link rel="stylesheet" href="memory-controls.css?v=20260929-model-audit">
   <link rel="stylesheet" href="lanes.css?v=20260925-lanes">
   <link rel="stylesheet" href="ambient.css?v=20260925-reminders">
 </head>
@@ -229,8 +229,16 @@
     <details class="inspector-panel panel"><summary>运行事件详情</summary>
       <div class="panel-head"><h2>事件详情</h2><b id="eventCount">0 events</b></div>
       <div id="eventInspector" class="event-inspector"><p>尚未选择事件</p></div>
-      <details class="context-details"><summary>当前模型上下文</summary><pre id="promptContext"></pre></details>
+      <details class="context-details"><summary>当前应用上下文（各模型实际输入见下方调用审计）</summary><pre id="promptContext"></pre></details>
     </details>
+    <section id="modelAudit" class="panel model-audit" aria-labelledby="modelAuditTitle">
+      <div class="panel-head"><h2 id="modelAuditTitle">各模型上下文与输出</h2><button type="button" data-model-refresh>刷新调用</button></div>
+      <p>展示当前会话中每个模型最近一次调用。上下文以实际留存的输入为准，未记录的历史不会补造；不包含模型内部隐藏状态。</p>
+      <p data-model-status role="status"></p><div data-model-latest class="model-call-list"></div>
+      <details><summary>调用历史 · 按模型筛选</summary><label>模型 <select data-model-filter><option value="">全部模型</option></select></label><div data-model-calls class="model-call-list"></div><button type="button" data-model-more hidden>加载更早调用</button></details>
+      <div data-model-detail></div>
+      <p>个人日记的跨会话整理调用，保留在日记详情的“生成记录”中。</p>
+    </section>
     <section class="prompt-audit-panel panel" aria-labelledby="promptAuditTitle">
       <div class="panel-head"><h2 id="promptAuditTitle">提示词与真实请求</h2><button id="refreshPromptAudit" type="button">刷新</button></div>
       <details id="promptAuditDetails"><summary>已发送请求、证据与原始输出</summary><p id="promptAuditCount"></p><div id="memoryRecoveryJobs"></div><details><summary>实际模型与资源配置</summary><pre id="modelConfiguration"></pre></details><div id="actualPromptRequests"></div><button id="olderPromptRequests" type="button" hidden>加载更早记录</button></details>
@@ -299,13 +307,15 @@
   <script src="workspace.js?v=20260925-lanes"></script>
   <script src="lanes.js?v=20260925-reminders"></script>
   <script src="memory_view.js?v=20260909"></script>
-  <script src="model_stages.js?v=20260926-direct-visual-jev-route"></script>
+  <script src="model_stages.js?v=20260929-jev-audit"></script>
+  <script src="jev_audit.js?v=20260929-jev-audit"></script>
   <script src="speech_permission.js?v=20260926-provenance"></script>
-  <script src="workflow.js?v=20260926-direct-visual"></script>
+  <script src="workflow.js?v=20260929-jev-audit"></script>
   <script src="request.js?v=20260926-recovery"></script>
   <script src="tool_activity.js?v=20260910"></script>
   <script src="ambient.js?v=20260926-connect"></script>
-  <script src="app.js?v=20260926-speech-permission"></script>
+  <script src="app.js?v=20260929-model-audit"></script>
+  <script src="model_audit.js?v=20260929-model-audit"></script>
   <script src="conversation_history.js?v=20260926-speaker-attribution"></script>
 </body>
 </html>

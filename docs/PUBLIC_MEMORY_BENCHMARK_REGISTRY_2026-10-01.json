@@ -1,0 +1,509 @@
+{
+  "schema_version": "public-memory-benchmark-plan.v1",
+  "created_date": "2026-10-01",
+  "status": "sample_ids_created_not_frozen_not_evaluated",
+  "protocol_file": "PUBLIC_MEMORY_BENCHMARK_PLAN_2026-10-01.md",
+  "mechanism_controls": "MEMORY_MECHANISM_CAUSAL_PROTOCOL_2026-10-01.md",
+  "replaces_default_schedule_of": "MEMORY_MECHANISM_CAUSAL_REGISTRY_2026-10-01.json",
+  "model_calls_performed": 0,
+  "production_changed": false,
+  "is_executable_model_runner_config": false,
+  "selection": {
+    "seed": 20261001,
+    "method": "Hamilton quotas with lexical ties; SHA256 rank by seed/revision/stratum/sample ID",
+    "record_count": 300,
+    "manifest_path": "outputs/benchmark-sampling-20261001/pilot-300-manifest.json",
+    "manifest_sha256": "f8abd88591a38604795aabbf7584947be5871820894511ca8587d8942e313c60",
+    "sampler_path": "scripts/prepare_memory_benchmark_pilot.py",
+    "sampler_sha256": "8c4728e962ddd59d3b0a7335419e883014db8e57d0636e4e0b9f91c866d15739",
+    "uses_answers_or_model_scores": false,
+    "preserves_full_original_history": true,
+    "does_not_claim_300_independent_questions": true
+  },
+  "datasets": [
+    {
+      "name": "LongMemEval-S cleaned",
+      "upstream_revision": "98d7416c24c778c2fee6e6f3006e7a073259d48f",
+      "population_questions": 500,
+      "selected_questions": 100,
+      "strata": [
+        {
+          "stratum": "knowledge-update|abstention",
+          "population": 6,
+          "sample": 1
+        },
+        {
+          "stratum": "knowledge-update|answerable",
+          "population": 72,
+          "sample": 15
+        },
+        {
+          "stratum": "multi-session|abstention",
+          "population": 12,
+          "sample": 3
+        },
+        {
+          "stratum": "multi-session|answerable",
+          "population": 121,
+          "sample": 24
+        },
+        {
+          "stratum": "single-session-assistant|answerable",
+          "population": 56,
+          "sample": 11
+        },
+        {
+          "stratum": "single-session-preference|answerable",
+          "population": 30,
+          "sample": 6
+        },
+        {
+          "stratum": "single-session-user|abstention",
+          "population": 6,
+          "sample": 1
+        },
+        {
+          "stratum": "single-session-user|answerable",
+          "population": 64,
+          "sample": 13
+        },
+        {
+          "stratum": "temporal-reasoning|abstention",
+          "population": 6,
+          "sample": 1
+        },
+        {
+          "stratum": "temporal-reasoning|answerable",
+          "population": 127,
+          "sample": 25
+        }
+      ]
+    },
+    {
+      "name": "MemoryAgentBench",
+      "upstream_revision": "7ea066982b140a19337e17e60d45d4076e042faf",
+      "population_questions": 3671,
+      "selected_questions": 200,
+      "strata": [
+        {
+          "capability": "Accurate_Retrieval",
+          "source": "eventqa_131072",
+          "population": 500,
+          "sample": 27
+        },
+        {
+          "capability": "Accurate_Retrieval",
+          "source": "eventqa_65536",
+          "population": 500,
+          "sample": 27
+        },
+        {
+          "capability": "Accurate_Retrieval",
+          "source": "eventqa_full",
+          "population": 500,
+          "sample": 27
+        },
+        {
+          "capability": "Accurate_Retrieval",
+          "source": "longmemeval_s*",
+          "population": 300,
+          "sample": 16
+        },
+        {
+          "capability": "Accurate_Retrieval",
+          "source": "ruler_qa1_197K",
+          "population": 100,
+          "sample": 6
+        },
+        {
+          "capability": "Accurate_Retrieval",
+          "source": "ruler_qa2_421K",
+          "population": 100,
+          "sample": 6
+        },
+        {
+          "capability": "Conflict_Resolution",
+          "source": "factconsolidation_mh_262k",
+          "population": 100,
+          "sample": 6
+        },
+        {
+          "capability": "Conflict_Resolution",
+          "source": "factconsolidation_mh_32k",
+          "population": 100,
+          "sample": 6
+        },
+        {
+          "capability": "Conflict_Resolution",
+          "source": "factconsolidation_mh_64k",
+          "population": 100,
+          "sample": 6
+        },
+        {
+          "capability": "Conflict_Resolution",
+          "source": "factconsolidation_mh_6k",
+          "population": 100,
+          "sample": 6
+        },
+        {
+          "capability": "Conflict_Resolution",
+          "source": "factconsolidation_sh_262k",
+          "population": 100,
+          "sample": 5
+        },
+        {
+          "capability": "Conflict_Resolution",
+          "source": "factconsolidation_sh_32k",
+          "population": 100,
+          "sample": 5
+        },
+        {
+          "capability": "Conflict_Resolution",
+          "source": "factconsolidation_sh_64k",
+          "population": 100,
+          "sample": 5
+        },
+        {
+          "capability": "Conflict_Resolution",
+          "source": "factconsolidation_sh_6k",
+          "population": 100,
+          "sample": 5
+        },
+        {
+          "capability": "Long_Range_Understanding",
+          "source": "detective_qa",
+          "population": 71,
+          "sample": 4
+        },
+        {
+          "capability": "Long_Range_Understanding",
+          "source": "infbench_sum_eng_shots2",
+          "population": 100,
+          "sample": 5
+        },
+        {
+          "capability": "Test_Time_Learning",
+          "source": "icl_banking77_5900shot_balance",
+          "population": 100,
+          "sample": 6
+        },
+        {
+          "capability": "Test_Time_Learning",
+          "source": "icl_clinic150_7050shot_balance",
+          "population": 100,
+          "sample": 6
+        },
+        {
+          "capability": "Test_Time_Learning",
+          "source": "icl_nlu_8296shot_balance",
+          "population": 100,
+          "sample": 5
+        },
+        {
+          "capability": "Test_Time_Learning",
+          "source": "icl_trec_coarse_6600shot_balance",
+          "population": 100,
+          "sample": 5
+        },
+        {
+          "capability": "Test_Time_Learning",
+          "source": "icl_trec_fine_6400shot_balance",
+          "population": 100,
+          "sample": 5
+        },
+        {
+          "capability": "Test_Time_Learning",
+          "source": "recsys_redial_full",
+          "population": 200,
+          "sample": 11
+        }
+      ]
+    }
+  ],
+  "overlap_audit": {
+    "mab_selected_question_ids_present_in_full_lme": 16,
+    "mab_selected_question_ids_present_in_selected_lme": 5,
+    "overlapping_ids": [
+      "ef66a6e5",
+      "8e91e7d9",
+      "0edc2aef",
+      "dd2973ad",
+      "6cb6f249",
+      "b29f3365",
+      "a1eacc2a",
+      "c5e8278d",
+      "2a1811e2",
+      "gpt4_468eb064",
+      "c9f37c46",
+      "e3fc4d6e",
+      "4fd1909e",
+      "830ce83f",
+      "gpt4_ab202e7f",
+      "gpt4_31ff4165"
+    ],
+    "independent_replication_claim_allowed": false,
+    "history_family_and_near_duplicate_audit_complete": false
+  },
+  "stages": [
+    {
+      "id": "A_mechanism",
+      "factors": [
+        300,
+        4
+      ],
+      "logical_answer_calls": 1200,
+      "status": "not_run",
+      "arms": [
+        "M00",
+        "M10",
+        "M01",
+        "M11"
+      ]
+    },
+    {
+      "id": "A_external",
+      "factors": [
+        100,
+        2
+      ],
+      "logical_answer_calls": 200,
+      "status": "adapters_pending",
+      "arms": [
+        "LightMem_shared_input_adapter",
+        "StructMem_transfer_adapter"
+      ]
+    },
+    {
+      "id": "B_LongMemEval_full",
+      "factors": [
+        500,
+        4
+      ],
+      "logical_answer_calls": 2000,
+      "prior_stage_reusable_calls": 400,
+      "new_answer_calls": 1600,
+      "status": "not_run",
+      "arms": [
+        "M00",
+        "M10",
+        "LightMem_shared_input_adapter",
+        "StructMem_transfer_adapter"
+      ]
+    },
+    {
+      "id": "B_MAB_conflict_full",
+      "factors": [
+        800,
+        4
+      ],
+      "logical_answer_calls": 3200,
+      "prior_stage_reusable_calls": 176,
+      "new_answer_calls": 3024,
+      "status": "not_run",
+      "arms": [
+        "M00",
+        "M10",
+        "M01",
+        "M11"
+      ]
+    }
+  ],
+  "first_stage_max_reader_calls": 1400,
+  "additional_formal_reader_calls_if_requests_unchanged": 4624,
+  "combined_unique_condition_answers": 6024,
+  "counts_exclude": [
+    "development_P0",
+    "ingestion",
+    "representation",
+    "embedding",
+    "judge",
+    "retries",
+    "extra_native_recipe_reproduction",
+    "mechanism_negative_controls",
+    "length_coupled_and_oracle_diagnostics",
+    "local_repair",
+    "raw_media"
+  ],
+  "comparison_tracks": {
+    "mechanism": "Identical data, message scope, candidates, automatic representation, reader, budget and scorer; intervene G/V only",
+    "matched_subset_methods": "Public methods rerun on exactly the selected IDs and declared common conditions",
+    "published_table_replication": "Full official task/split, matching release, message scope, reader, prompt and evaluator",
+    "mini_score_minus_published_full_score_allowed": false,
+    "lightmem_table_2_message_scope": "user_only",
+    "full_message_lightmem_must_be_labeled_adapter": true,
+    "structmem_transfer_not_claimed_native_published_result": true
+  },
+  "primary_contrasts_pending_final_freeze": [
+    {
+      "hypothesis": "G",
+      "dataset": "LongMemEval-S cleaned full 500",
+      "contrast": "M10-M00",
+      "metric": "official QA correctness"
+    },
+    {
+      "hypothesis": "V",
+      "dataset": "MemoryAgentBench Conflict_Resolution full 800",
+      "contrast": "M11-M10",
+      "metric": "official substring exact match",
+      "aggregation": "equal official configuration weights",
+      "independent_units_not_800": "only eight supplied context streams; family dependence still under audit"
+    }
+  ],
+  "statistics": {
+    "same_paired_grouped_and_familywise_controls_as_mechanism_protocol": true,
+    "claim_power_for_5pp": false,
+    "incompatible_metrics_merged_into_total_accuracy": false,
+    "small_set_role": "Blinded first evaluation stage after development, with parameters unchanged for continuation",
+    "if_tuned_after_pilot": "Relabel pilot as development; do not claim the whole benchmark was independent holdout",
+    "weight_compatible_metric_estimates_by_original_stratum_distribution": true
+  },
+  "freeze_pending": [
+    "S-file ID and data-hash check",
+    "project exposure and near-duplicate audit",
+    "history-family grouping",
+    "models/prompts/scorer/chunking pins",
+    "cost caps and analysis freeze",
+    "native-recipe and shared-input adapter validation",
+    "reader/judge resolved model versions",
+    "actual token and ingestion cost caps",
+    "matched-length and structural-negative-control call budget",
+    "EgoLife source release and exposure audit",
+    "wearer-visible annotation and media alignment",
+    "egocentric IDs and available official category counts",
+    "archive/frame budgets and perception model pins",
+    "three-endpoint family if egocentric headline"
+  ],
+  "official_sources": [
+    {
+      "id": "lightmem_readme",
+      "url": "https://raw.githubusercontent.com/zjunlp/LightMem/main/README.md",
+      "retrieved_date": "2026-10-01",
+      "sha256": "5c70a2078e9cb0de3565508d341683b096434759c2191a0117163af3fd5553e9",
+      "snapshot_path": "outputs\\benchmark-sampling-20261001\\lightmem_readme.md"
+    },
+    {
+      "id": "lightmem_longmemeval_recipe",
+      "url": "https://raw.githubusercontent.com/zjunlp/LightMem/main/experiments/longmemeval/readme.md",
+      "retrieved_date": "2026-10-01",
+      "sha256": "c0c5a61566ecc38a18eae996017e26f32609d4423d9e020efdc591f717513c73",
+      "snapshot_path": "outputs\\benchmark-sampling-20261001\\lightmem_longmemeval_recipe.md"
+    },
+    {
+      "id": "structmem",
+      "url": "https://raw.githubusercontent.com/zjunlp/LightMem/main/StructMem.md",
+      "retrieved_date": "2026-10-01",
+      "sha256": "533a5d58ec8c62c3c13369f12b49e1a3a896f8a82974be72b9d9de855bdb6745",
+      "snapshot_path": "outputs\\benchmark-sampling-20261001\\structmem.md"
+    },
+    {
+      "id": "mab_readme",
+      "url": "https://raw.githubusercontent.com/HUST-AI-HYZ/MemoryAgentBench/main/README.md",
+      "retrieved_date": "2026-10-01",
+      "sha256": "a71d5730d1ada9e0471cbb3e2cd2d36e343d751298a69e3d368af878753eab7f",
+      "snapshot_path": "outputs\\benchmark-sampling-20261001\\mab_readme.md"
+    },
+    {
+      "id": "longmemeval_readme",
+      "url": "https://raw.githubusercontent.com/xiaowu0162/LongMemEval/main/README.md",
+      "retrieved_date": "2026-10-01",
+      "sha256": "c4ff45676683d9e2f7cf7d9099d26426f14635ec110dbb1da818d1019a142573",
+      "snapshot_path": "outputs\\benchmark-sampling-20261001\\longmemeval_readme.md"
+    },
+    {
+      "id": "egolife_project",
+      "url": "https://egolife-ai.github.io/",
+      "checked_date": "2026-10-01",
+      "verification": "official project describes cross-hour/day first-person QA"
+    },
+    {
+      "id": "egolife_qa_directory",
+      "url": "https://huggingface.co/datasets/lmms-lab/EgoLife/tree/main/EgoLifeQA",
+      "checked_date": "2026-10-01",
+      "verification": "directory lists EgoLifeQA_A1_JAKE.json only; not a six-person QA inventory"
+    },
+    {
+      "id": "ego4d_episodic_memory",
+      "url": "https://ego4d-data.org/docs/benchmarks/episodic-memory/",
+      "checked_date": "2026-10-01",
+      "verification": "NLQ temporal localization, VQ last-seen object localization, MQ activity windows"
+    }
+  ],
+  "freeze": {
+    "at": null,
+    "manifest_sha256": null
+  },
+  "results": [],
+  "egocentric_track": {
+    "role": "required_for_egocentric_or_smart_glasses_headline_claims",
+    "status": "planned_ids_not_selected_exposure_and_media_audit_pending",
+    "planned_unique_questions": 100,
+    "selection_manifest": null,
+    "selection_preserves_official_type_and_date_distribution": true,
+    "official_qa_directory_checked_on": "2026-10-01",
+    "official_qa_files_observed": [
+      "EgoLifeQA_A1_JAKE.json"
+    ],
+    "six_participant_recordings_imply_six_participant_qa": false,
+    "cross_participant_generalization_claim_allowed": false,
+    "conditions": [
+      {
+        "id": "D_memory",
+        "input": "shared_wearer_available_caption_asr",
+        "arms": [
+          "M00",
+          "M10"
+        ],
+        "factors": [
+          100,
+          2
+        ],
+        "max_answer_calls": 200,
+        "claim": "memory over first-person event representations"
+      },
+      {
+        "id": "D_media",
+        "input": "same_raw_wearer_video_audio_prefix",
+        "arms": [
+          "M00",
+          "M10"
+        ],
+        "factors": [
+          100,
+          2
+        ],
+        "max_answer_calls": 200,
+        "claim": "controlled perception-memory-answer system validation"
+      }
+    ],
+    "same_questions_across_conditions": true,
+    "shared_candidate_pool_required_for_pure_mechanism_claim": true,
+    "wearer_view_no_unavailable_cross_view_evidence": true,
+    "no_future_frames_gold_timestamps_or_answer_driven_preprocessing": true,
+    "archive_reaccess_policy_equal_and_charged": true,
+    "additional_max_answer_calls": 400,
+    "counts_exclude": [
+      "perception",
+      "embedding",
+      "memory_construction",
+      "judge",
+      "retries"
+    ],
+    "ego4d_optional": {
+      "task": "NLQ evidence temporal localization",
+      "sample_size": null,
+      "status": "not_selected_not_downloaded",
+      "do_not_merge_localization_and_QA_scores": true
+    },
+    "confirmatory_endpoint_if_egocentric_headline": {
+      "id": "H_E",
+      "contrast": "M10-M00",
+      "condition": "D_memory",
+      "metric": "official EgoLife QA correctness",
+      "multiple_testing": "add to G/V family before freeze; three endpoints; power assessment required"
+    },
+    "results": []
+  },
+  "combined_unique_condition_answers_scope": "text benchmark A+B only; existing value remains 6024",
+  "first_stage_with_planned_egocentric_max_reader_calls": 1800,
+  "combined_with_planned_egocentric_unique_condition_answers": 6424
+}

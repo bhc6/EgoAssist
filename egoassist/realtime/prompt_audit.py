@@ -1,5 +1,25 @@
 """Cursor-based model audit projection; new model-bearing events are discoverable."""
 
+from egoassist.prompts import compact_audit_payload
+
+
+def decision_audit(row):
+    """Keep the actual per-call questions, without replaying media or model context."""
+    result = compact_audit_payload(row['type'], row)
+    decision = dict(result.get('decision') or {})
+    decision.pop('rawOutput', None)
+    metrics = dict(decision.get('requestMetrics') or {})
+    original = (row.get('decision') or {}).get('requestMetrics') or {}
+    for name in ('decisions', 'taskControlCheck', 'cancellationCheck'):
+        if name not in original:
+            continue
+        stage = dict(metrics.get(name) or {})
+        stage['questions'] = (original[name].get('request') or {}).get('questions') or {}
+        metrics[name] = stage
+    decision['requestMetrics'] = metrics
+    result['decision'] = decision
+    return result
+
 
 def is_model_event(row):
     kind = row.get("eventType") or row.get("type", "")

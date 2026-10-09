@@ -42,6 +42,9 @@ const jevLabel = value => ({
   other: '旁听记录', uncertain: '不确定', none: '无', assistant: '对助手',
   'foreground-dialogue': '回答对话', 'no-match': '未匹配', classified: '已分类',
   user: '对本人', speech: '语音', silent: '不插话', text_only: '仅文字',
+  unavailable: '分类服务不可用', invalid: '分类结果无效', listen: '只记录，不插话',
+  'live-window': '当前声画窗口', 'stored-memory': '已保存记忆', 'temporal-history': '时间范围内的历史证据',
+  explicit: '明确授权保存', source: '普通来源陈述', forbid: '禁止保存', mixed: '混合保存范围', draft: '补全保存草稿',
 }[value] || value || '未返回');
 
 function jevAnswer(semantic, key) {
@@ -50,15 +53,16 @@ function jevAnswer(semantic, key) {
 
 function jevRouteSummary(semantic) {
   if (!semantic) return '';
-  const route = semantic.jevRoute || jevAnswer(semantic, 'route').choice || semantic.route || semantic.intentKind;
+  if (['unavailable', 'invalid'].includes(semantic.status)) return jevLabel(semantic.status) + ' · 未形成有效路由';
+  const route = semantic.jevRoute || semantic.requestMetrics?.decisions?.route || jevAnswer(semantic, 'route').choice || semantic.route || semantic.intentKind;
   const interaction = semantic.interaction || {};
   const parts = [jevLabel(route)];
   if (interaction.audience || interaction.action || interaction.output) {
     parts.push([interaction.audience, interaction.action, interaction.output]
       .filter(Boolean).map(jevLabel).join(' · '));
   }
-  if (semantic.memoryQuery || semantic.memoryQuerySpec || semantic.memoryKind) parts.push('记忆检索');
-  if (semantic.memoryText || (semantic.memoryEvents && semantic.memoryEvents.length)) parts.push('记忆候选');
+  if (semantic.memoryQuery || semantic.memoryQuerySpec) parts.push('记忆检索');
+  if (semantic.memoryText || semantic.memoryAtoms?.length || semantic.memoryEvents?.length) parts.push('记忆候选');
   if (semantic.selectedSkill || semantic.skillControl) parts.push('技能：' + (semantic.selectedSkill || semantic.skillControl));
   if (semantic.taskControl || semantic.selectedTask) parts.push('任务控制');
   if (semantic.speechControl) parts.push('语音控制');
@@ -84,7 +88,7 @@ function jevRouteDetails(semantic) {
     choices.length ? 'JEV选择：' + choices.join('；') : '',
     semantic.skillStatus ? '技能匹配：' + jevLabel(semantic.skillStatus) : '',
     semantic.jevStructuredReason ? '转结构化处理：' + semantic.jevStructuredReason : '',
-    semantic.latencyMs != null ? 'JEV耗时：' + semantic.latencyMs + ' ms' : '',
+    semantic.latencyMs != null ? '分类总耗时：' + semantic.latencyMs + ' ms' : '',
     semantic.componentErrors?.length ? '组件错误：' + semantic.componentErrors.join('；') : '',
   ].filter(Boolean).join('\n');
 }

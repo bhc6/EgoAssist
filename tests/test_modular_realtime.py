@@ -300,6 +300,12 @@ def test_text_sse_failures_propagate_and_are_audited(failure):
                 with pytest.raises((ValueError, RuntimeError)):
                     async for _ in provider.text_stream([{"role": "user", "content": "q"}]): pass
                 assert audit[-1]["status"] == "failed"
+                captured = next(row for row in audit if row.get('auditEvent') == 'request')
+                output = next(row for row in audit if row.get('auditEvent') == 'response')
+                assert captured['request']['input']['messages'] == [{'role':'user','content':'q'}]
+                assert output['callId'] == captured['callId']
+                assert output['output']['events']
+                assert output['output']['text'] == ('' if failure == 'error' else 'part')
             finally: await provider.close()
     asyncio.run(run())
 
@@ -365,6 +371,13 @@ def test_tts_prefetch_is_bounded_waits_for_handshake_and_cancels(monkeypatch, ca
                     assert len(audio) == 1 and stream_closed.is_set()
                     assert audit[-1]["firstTextReadyMs"] < audit[-1]["sessionReadyMs"]
                     assert audit[-1]["status"] == "completed"
+                    captured = next(row for row in audit if row.get('auditEvent') == 'request')
+                    output = next(row for row in audit if row.get('auditEvent') == 'response')
+                    assert [row['text'] for row in audit if row.get('auditEvent') == 'input'] == ['first','second']
+                    assert output['callId'] == captured['callId']
+                    import io, wave
+                    with wave.open(io.BytesIO(base64.b64decode(output['output']['audio'].split(',')[1]))) as wav:
+                        assert wav.readframes(wav.getnframes()) == bytes(4)
             finally:
                 allow_ready.set()
                 if not task.done():

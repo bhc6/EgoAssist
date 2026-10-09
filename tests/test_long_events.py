@@ -12,6 +12,81 @@ from egoassist.realtime.long_events import LongEvents, projection, pending, next
 from run_egoassist import create_app
 
 
+def statement(journal, text, stamp):
+    return journal.append_message('user', text, source='test', metadata={'sourceRecordedAt': stamp})
+
+
+def test_text_only_cross_day_event_has_raw_candidate_evidence_and_phase_sources(tmp_path):
+    async def run():
+        root = tmp_path / 'me'
+        journal = SessionJournal(root / 'sessions' / 'case.jsonl', session_id='case')
+        a = statement(journal, '周五去星河科技面试，目前还在准备。', '2026-09-21T10:00:00+08:00')
+        assert [s['sourceId'] for s in pending(projection(journal))] == [a['id']]
+        event = commit(journal, [update([a['id']], phase='计划参加面试')])[0]
+        b = statement(journal, '还是星河科技那次面试，改到下周二了。', '2026-09-24T10:00:00+08:00')
+        tracker = LongEvents(SessionJournal(journal.path), 'test')
+        async def complete(messages, **kwargs):
+            value = json.loads(messages[1]['content'])
+            candidate = value['events'][0]
+            assert candidate['eventId'] == event['eventId']
+            assert candidate['sources'][0]['text'] == a['message']['content']
+            assert candidate['phases'][0]['sourceIds'] == [a['id']]
+            return {'output': {'choices': [{'message': {'content': json.dumps({'updates': [
+                update([b['id']], event['eventId'], phase='用户自述面试改期，仍在准备')
+            ]})}, 'finish_reason': 'stop'}]}}
+        tracker.service.complete = complete
+        try:
+            await tracker.run()
+            saved = tracker.snapshot()['events'][0]
+            assert saved['eventId'] == event['eventId'] and saved['totalPhases'] == 2
+            assert saved['coverage']['statementCount'] == 2 and saved['coverage']['sampleCount'] == 0
+            assert tracker.evidence(event['eventId'], source_ids=[b['id']])['sources'][0]['text'] == b['message']['content']
+            with pytest.raises(ValueError, match='belong'):
+                tracker.evidence(event['eventId'], source_ids=['another-event-source'])
+            diary = collect(root, tmp_path/'absent.sqlite3', 'me', period_for('daily', '2026-09-21', 'Asia/Shanghai'))
+            assert len(diary['records']) == 1
+            assert diary['records'][0]['occurredAt'] == '2026-09-21T10:00:00+08:00'
+            assert diary['records'][0]['derivedEventHints'][0]['phase'] == '计划参加面试'
+            assert '改期' not in str(diary['records'])
+            journal.append('long_event.reset', {})
+            assert len(pending(projection(journal))) == 2
+        finally:
+            await tracker.close()
+    asyncio.run(run())
+
+
+def test_distant_visual_occurrences_and_closed_events_are_not_cross_day_candidates(tmp_path):
+    from egoassist.memory.long_events import candidate_events
+    journal = SessionJournal(tmp_path/'case.jsonl')
+    a = observe(journal, '桌上有食材', '2026-09-21T10:00:00+08:00')
+    event = commit(journal, [update([a['id']])])[0]
+    observe(journal, '桌上又有食材', '2026-09-24T10:00:00+08:00')
+    state = projection(journal)
+    assert candidate_events(state, next_batch(state)) == []
+    b = statement(journal, '继续之前的项目', '2026-09-24T10:01:00+08:00')
+    state = projection(journal)
+    assert [e['eventId'] for e in candidate_events(state, next_batch(state))] == [event['eventId']]
+    state['events'][event['eventId']]['status'] = 'completed'
+    assert candidate_events(state, next_batch(state)) == []
+    state['events'][event['eventId']]['status'] = 'ongoing'
+    del state['sources'][a['id']]
+    assert candidate_events(state, [state['sources'][b['id']]]) == []
+
+
+def test_later_event_title_and_correction_do_not_leak_into_earlier_diary(tmp_path):
+    root = tmp_path/'me'
+    journal = SessionJournal(root/'sessions'/'case.jsonl', session_id='case')
+    first = statement(journal, '下周计划面试。', '2026-09-21T10:00:00+08:00')
+    event = commit(journal, [{**update([first['id']]), 'title': '计划参加面试'}])[0]
+    last = statement(journal, '面试已完成。', '2026-09-29T10:00:00+08:00')
+    commit(journal, [{**update([first['id'], last['id']], event['eventId'], 'completed', '面试已经完成'),
+                      'title': '已完成面试'}])
+    early = collect(root, tmp_path/'absent.sqlite3', 'me', period_for('daily', '2026-09-21', 'Asia/Shanghai'))
+    hints = early['records'][0]['derivedEventHints']
+    assert len(hints) == 1 and hints[0]['title'] == '计划参加面试'
+    assert hints[0]['statusAtSource'] == 'ongoing'
+
+
 def observe(journal, text, stamp):
     return journal.append('ambient_observation', {'status':'accepted', 'timestamp':stamp,
         'evidence':{'capturedAt':stamp, 'visibleEvidence':[text], 'uncertainties':[]}})
@@ -122,6 +197,37 @@ def test_old_only_update_is_noop_not_unsupported_new_stage(tmp_path):
     observe(journal,'新画面','2026-09-01T10:01:00+08:00')
     assert commit(journal,[update([first['id']],event['eventId'],'completed')])==[]
     assert projection(journal)['events'][event['eventId']]['status']=='ongoing'
+
+
+def test_delayed_transcript_can_extend_the_existing_event(tmp_path):
+    async def run():
+        journal = SessionJournal(tmp_path / 'case.jsonl')
+        a = observe(journal, '食材', '2026-09-01T10:00:00+08:00')
+        b = observe(journal, '翻炒', '2026-09-01T10:02:00+08:00')
+        event = commit(journal, [update([a['id'], b['id']])])[0]
+        # ASR arrives later but its source time is inside the existing event.
+        late = journal.append('message', {'timestamp': '2026-09-01T10:03:00+08:00',
+            'status': 'completed', 'metadata': {'sourceRecordedAt': '2026-09-01T10:01:00+08:00'},
+            'message': {'role': 'user', 'content': '我在做晚饭'}})
+        tracker = LongEvents(journal, 'test')
+        requests = []
+        async def complete(messages, **kwargs):
+            payload = json.loads(messages[1]['content'])
+            requests.append(payload)
+            return {'output': {'choices': [{'finish_reason': 'stop', 'message': {
+                'content': json.dumps({'updates': [update([late['id']], event['eventId'], phase='用户补充正在做晚饭')]})}}]}}
+        tracker.service.complete = complete
+        try:
+            await tracker.run()
+            assert [e['eventId'] for e in requests[0]['events']] == [event['eventId']]
+            saved = tracker.snapshot()
+            assert saved['job']['status'] == 'completed'
+            assert saved['totalEvents'] == 1 and saved['pendingSources'] == 0
+            assert saved['events'][0]['totalSources'] == 3
+            assert saved['events'][0]['coverage']['evidenceSpanSeconds'] == 120
+        finally:
+            await tracker.close()
+    asyncio.run(run())
 
 
 def test_erasing_raw_evidence_cascades_to_event_and_answer(tmp_path):

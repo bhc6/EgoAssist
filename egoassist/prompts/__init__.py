@@ -79,6 +79,11 @@ def compact_audit_payload(kind: str, payload: dict) -> dict:
             decision["requestMetrics"] = metrics
             value["decision"] = decision
     fields = {
+        "provider.model.request": ("request",),
+        "provider.model.response": ("output",),
+        "provider.model.input": ("text",),
+        "model.request.body": ("body",),
+        "model.response.body": ("body",),
         "model.prompt": ("instructions", "tools"),
         "response.dispatched": ("instructions",),
         "insight.request": ("messages",),

@@ -1,5 +1,6 @@
 """Revisit bounded, source-linked historical frames for a paused video question."""
 from __future__ import annotations
+from egoassist.core.model_audit import record_request, record_output
 
 import asyncio
 import base64
@@ -120,11 +121,12 @@ class VisualHistory:
             async with asyncio.timeout(35), self.limit:
                 async with self.scene.http().post(dashscope.base_http_api_url.rstrip('/') + '/services/aigc/multimodal-generation/generation',
                     headers={'Authorization': 'Bearer ' + self.scene.api_key}, timeout=aiohttp.ClientTimeout(total=30),
-                    json={'model': model, 'input': {'messages': [
+                    json=record_request(self.scene.journal, request, {'model': model, 'input': {'messages': [
                         {'role': 'system', 'content': [{'text': prompt}]}, {'role': 'user', 'content': content}]},
                         'parameters': {'temperature': 0, 'enable_thinking': False, 'max_tokens': 1000,
-                                       'response_format': {'type': 'json_object'}}}) as response:
+                                       'response_format': {'type': 'json_object'}}})) as response:
                     response.raise_for_status();payload = await response.json()
+                    record_output(self.scene.journal, request, payload)
             choice = payload['output']['choices'][0];value = choice['message']['content']
             raw = value if isinstance(value, str) else ''.join(v.get('text', '') for v in value)
             parsed = json.loads(raw)

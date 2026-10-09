@@ -2,6 +2,7 @@
 
 ## 当前使用
 
+- [2026-10-09 回归修复与提交验证](REGRESSION_FIXES_2026-10-09.md)：共享审计归入 core、更新过期测试夹具与默认后端说明；1,004 项确定性测试及 Edge 桌面/手机页面验证通过，未新增真实模型调用。
 - [主动播报权限与免打扰恢复](SPEECH_PERMISSION_2026-09-26.md)：解释持久静音来源、显式解除入口、当前权限传入观察模型；真实新画面提醒取得播放回执，保留前两轮失败。
 - [Omni 与模块化语音对照](VOICE_BACKEND_COMPARISON_2026-09-26.md)：两轮共 12 次真实问答、2 次语音停止全部通过；模块化已成为默认，首音频中位数快约 0.26 秒。
 - [视觉答案复用与实际模型阶段](DIRECT_VISUAL_ANSWERS_2026-09-26.md)：简单看图省去文字模型改写，直接播报；复杂记忆问题保留综合回答，前端展示实际调用。
@@ -41,7 +42,7 @@
 
 | 场景 | 推荐入口或实现 | 选择依据 |
 | --- | --- | --- |
-| 日常语音、摄像头与工具 | 主控制台 `/`，默认 Omni | 现有端到端路径；模块化后端仍作为可选方案 |
+| 日常语音、摄像头与记忆 | 主控制台 `/`，默认模块化 | ASR、视觉、文字回答和 TTS 分工；Omni 保留为显式对照 |
 | 个人日记、周/月回顾 | `/diary.html`，`egoassist/diary/` | 账户级持久归档、分层压缩、来源引用和恢复 |
 | 历史原文导入与文字问答 | `/api/history/*` | 原文可检索性不依赖结构化抽取成功 |
 | 实时记忆卡片、当前建议 | 现有 Timeline 和 `/api/insights` | 仍有实际调用和持久任务，尚未被新证据服务完整替代 |
@@ -52,6 +53,15 @@
 
 ## 演示与研究
 
+- [产品与独立科研边界](RESEARCH_BOUNDARY.md)：新 G/V 实验代码在独立 MemoryMechanismLab 仓库，显式离线复用 EgoAssist SourceIndex；产品与研究各自构建发布，既有实验路径保留。
+- [记忆机制实验启动检查（2026-10-07）](MEMORY_EXPERIMENT_READINESS_2026-10-07.md)：保留启动前的 28 项数据/抽样核验与 38 项既有评测测试；开发运行器后续已在独立 MemoryMechanismLab 实现，当前边界见上项，正式评测条件仍需另行验收。
+- [2026 顶会对接与公开基准 Mini-300](PUBLIC_MEMORY_BENCHMARK_PLAN_2026-10-01.md)：LongMemEval 100 题与 MemoryAgentBench 200 题已按比例抽样；智能眼镜定位另设 EgoLife 正式轨，目标新增 100 题，分共享感知与原始媒体条件，清单待审计。含官方指标、跨库重叠和论文输入差异；未运行模型。附[登记](PUBLIC_MEMORY_BENCHMARK_REGISTRY_2026-10-01.json)。
+- [记忆机制偏置的受控实验方案](MEMORY_MECHANISM_CAUSAL_PROTOCOL_2026-10-01.md)：同候选/表示/reader 下的证据组合与版本一致性 2×2、长度耦合、关系打乱及局部修复独立对照；含数据门槛、功效边界和分阶段执行，尚未实现或运行。附[机器可读登记](MEMORY_MECHANISM_CAUSAL_REGISTRY_2026-10-01.json)。
+- [记忆机制具体实验计划](MEMORY_EXPERIMENT_PLAN_2026-09-27.md)：预注册草案，明确长对话、持续事件、变更修复三组实验的样本、强基线、消融、统计与全成本账本；主张受结果约束，尚未启动新评测。附[机器可读登记](MEMORY_EXPERIMENT_REGISTRY_2026-09-27.json)。
+- [19 篇论文的数据集、涨点机制与证据矩阵](MEMORY_PAPER_RESEARCH_MATRIX_2026-09-27.md)：补入 Zep、AriGraph、Adaptive-RAG、ReasoningBank，区分整体对照、消融与解释，收窄创新边界；附[官方元数据核验的 BibTeX](references/memory_research_2026-09-27.bib)及[来源与哈希](MEMORY_PAPER_SOURCES_2026-09-27.json)。
+- [论文机制与已实现工作的逐项对照](MEMORY_PAPERS_VS_IMPLEMENTATION_2026-09-27.md)：区分默认、研究路径和验证程度；纠正向量/事件/缺口/修订等“从零新增”的误判，复核 LoCoMo 与 EgoLife 已有结果，列出真正剩余的集成和科研差距。
+- [通用记忆论文分析与科研假设](MEMORY_PAPER_FINDINGS_2026-09-27.md)：核对 15 篇论文的方法、消融和限制，覆盖事件记忆、检索、纠错、程序性经验、跨会话任务及神经记忆；分析跨生活与工作场景的机制，不将外部论文分数与本地实验直接比较。
+- [人物识别、环境建模、记忆与助老产品完整调研](PERSON_ENVIRONMENT_MEMORY_SURVEY_2026-09-27.md)：大公司、智能眼镜、视觉辅助、养老产品及研究方法；区分产品能力、原型与未公开机制，附 [57 项来源核验记录](PERSON_ENVIRONMENT_MEMORY_SOURCES_2026-09-27.json)。
 - [OpenRouter Decisions 接入与实测](OPENROUTER_DECISIONS_2026-09-24.md)：12 个中文开发案例、36 次真实调用，窄判断实验；不代表完整路由替代。
 - [已有实验结果与重要案例汇总](EXPERIMENTS_AND_CASES_SUMMARY_2026-09-23.md)：汇总检索指标、真实链路案例、失败边界与下一轮记忆研究建议；明确区分模型评测、工程回归、合成测试和演示。
 - [最新 EgoLife 原文证据复测](EGOLIFE_SOURCE_RETEST_2026-09-17.md)：30 题、180 次真实回答；新路径 32.22%，本轮旧路径 28.89%，尚未证明稳定提升。

@@ -135,7 +135,7 @@ class RealtimeConnection:
         if owner.interaction is None:
             owner.interaction = InteractionState(owner.journal)
         interaction_state = owner.interaction
-        interaction_state.grants.clear()
+        interaction_state.reset_playback()
         resumed_response_ids = {}
 
         async def emit(payload):
@@ -947,14 +947,13 @@ class RealtimeConnection:
                 name=f"egoassist-turn-worker:{session_id}:{connection_epoch}",
             )
             ledger = owner.work_ledger or CaseWorkLedger(harness.journal)
-            recoverable = ledger.recoverable_turns()
-            if recoverable:
-                owner.turn_sequence = max(
-                    owner.turn_sequence,
-                    max((int(item.get("sequence") or 0) for item in recoverable)),
-                )
-                for pending_turn in recoverable:
-                    enqueue_persisted_turn(pending_turn)
+            # Completed turns also own sequence numbers. Restoring only pending
+            # work reset this counter to one after every clean server restart.
+            owner.turn_sequence = max(owner.turn_sequence,
+                max((int(item.get('sequence') or 0) for item in ledger.turns().values()), default=0))
+            owner.latest_input_sequence = max(owner.latest_input_sequence, owner.turn_sequence)
+            for pending_turn in ledger.recoverable_turns():
+                enqueue_persisted_turn(pending_turn)
             bridge = self.OmniBrowserBridge(
                 api_key,
                 self.model,
@@ -1368,4 +1367,5 @@ class RealtimeConnection:
                 if owns_reservation:
                     self.live_harnesses.pop(session_id, None)
                     owner.transitioning = False
+                    interaction_state.reset_playback()
         return ws

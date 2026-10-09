@@ -10,7 +10,7 @@ from datetime import datetime
 from dataclasses import dataclass
 from copy import deepcopy
 from egoassist.memory.service import MemoryQuery, PreparedMemory
-from egoassist.realtime.router_context import retrieval_text
+from egoassist.realtime.router_context import retrieval_text, conversation_at_turn, project_task
 from typing import Any
 
 from egoassist.product.answer_jobs import answer_jobs, answer_job_summaries
@@ -22,7 +22,6 @@ from egoassist.realtime import (
     platform_capability_available,
 )
 from egoassist.realtime.routed_tools import execute_reference_request
-from egoassist.realtime.router_context import project_task
 
 
 @dataclass
@@ -1342,8 +1341,8 @@ class TurnCoordinator:
                        and (row.get("origin") or {}).get("generation") == generation
                        for row in snapshot.get("queued") or [])
 
-    async def classify_with_retry_budget(self, text: str, turn_id: str) -> dict:
-        started = time.perf_counter()
+    async def classify_with_retry_budget(self, text: str, turn_id: str, *, started=None) -> dict:
+        started = time.perf_counter() if started is None else started
         semantic = await self.classify_semantic_turn(text, turn_id)
         remaining = self.semantic_router.timeout_seconds - (time.perf_counter() - started)
         if (semantic.get("status") not in {"unavailable", "invalid"}
@@ -1394,7 +1393,21 @@ class TurnCoordinator:
                 self.owner.scene.resolve_speaker(turn_id)
             )
             try:
-                semantic = await self.classify_with_retry_budget(text, turn_id)
+                started = time.perf_counter()
+                with self.semantic_router.classification_budget():
+                    scene_turn = self.owner.scene.turns.get(turn_id) or {}
+                    wait_started = time.perf_counter()
+                    if (scene_turn.get("speaker") or {}).get("status") == "pending":
+                        # Warm speaker inference normally finishes in this window.
+                        # A cold/slow resolver keeps running for scene enrichment;
+                        # it may consume at most 10% of the classification budget.
+                        await asyncio.wait({speaker_task}, timeout=min(
+                            .25, self.semantic_router.timeout_seconds * .1))
+                    speaker_wait_ms = round((time.perf_counter() - wait_started) * 1000, 1)
+                    speaker_pending = ((self.owner.scene.turns.get(turn_id) or {}).get("speaker") or {}).get("status") == "pending"
+                    semantic = await self.classify_with_retry_budget(text, turn_id, started=started)
+                semantic.setdefault("requestMetrics", {}).update(
+                    speakerWaitMs=speaker_wait_ms, speakerWaitTimedOut=speaker_pending)
                 if (semantic.get("providerError") or {}).get("accountBlocked"):
                     await self.emit({"type": "provider_unavailable", "lane": "router",
                                      "reason": semantic["providerError"]["message"], "retryable": False})
@@ -1693,19 +1706,9 @@ class TurnCoordinator:
             turn_clock = turn_clock.at_source(
                 (source_message.get("metadata") or {}).get("sourceRecordedAt") or source_message.get("timestamp"))
         turns = ledger.turns()
-        previous = None
-        current_sequence = int(turns.get(str(turn_id), {}).get("sequence") or 0)
-        if turn_id:
-            previous = max(
-                (
-                    item
-                    for item in turns.values()
-                    if str(item.get("turnId")) != str(turn_id)
-                    and int(item.get("sequence") or 0) < current_sequence
-                ),
-                key=lambda item: int(item.get("sequence") or 0),
-                default=None,
-            )
+        history = conversation_at_turn(self.harness.journal, turn_id)
+        prior_ids = [key for key in history['priorTurnIds'] if key in turns and not turns[key].get('supersededBy')]
+        previous = turns[prior_ids[-1]] if prior_ids else None
         # Supply actual writable cards even when there is no visual observation.
         policy = self.current_memory_policy()["components"]["timeline"]
         memory_candidates = [
@@ -1729,55 +1732,22 @@ class TurnCoordinator:
                     label = {"subject": card["subject"], "predicate": card["predicate"]}
                     if label not in vocabulary:
                         vocabulary.append(label)
-        prior_answers = list(answer_job_summaries(self.harness.journal).values())
+        saved_answers = answer_job_summaries(self.harness.journal)
+        prior_answers = [saved_answers[key] for key in prior_ids if key in saved_answers
+                         and saved_answers[key]['status'] != 'cancelled']
+        answer_context = [
+            {"turnId": item["turnId"], "text": item["question"], "status": item["status"]}
+            for item in prior_answers[-24:]
+        ]
         self.semantic_router.set_turn_context(
             clock_context=turn_clock.prompt_payload(),
             memory_draft=self.memory_service.pending_draft(
                 self.user_id, self.session_id
             ),
             previous_turn=previous,
-            previous_answer=next(
-                (
-                    {
-                        "turnId": item["turnId"],
-                        "text": item["question"],
-                        "status": item["status"],
-                    }
-                    for item in reversed(
-                        prior_answers
-                    )
-                    if item["turnId"] != turn_id
-                    and item["status"] != "cancelled"
-                    and (
-                        int(turns.get(item["turnId"], {}).get("sequence") or 0)
-                        < current_sequence
-                    )
-                ),
-                None,
-            ),
-            answers=[
-                {
-                    "turnId": item["turnId"],
-                    "text": item["question"],
-                    "status": item["status"],
-                }
-                for item in prior_answers[-24:]
-                if item["turnId"] != turn_id
-                and item["status"] != "cancelled"
-                and (
-                    int(turns.get(item["turnId"], {}).get("sequence") or 0)
-                    < current_sequence
-                )
-            ],
-            recent_messages=[
-                {
-                    "role": item.get("message", {}).get("role"),
-                    "text": str(item.get("message", {}).get("content", ""))[-600:],
-                    "sourceId": item.get("id"),
-                    "recordedAt": (item.get("metadata") or {}).get("sourceRecordedAt") or item.get("timestamp"),
-                }
-                for item in self.harness.journal.entries(types={'message'}, tail=6)
-            ],
+            previous_answer=dict(answer_context[-1]) if answer_context else None,
+            answers=answer_context,
+            recent_messages=history['messages'],
             playback=self.interaction_state.playback_context(),
             output_permission=self.interaction_state.snapshot(),
             scene=self.owner.scene.turns.get(turn_id),
@@ -1785,10 +1755,7 @@ class TurnCoordinator:
             memory_vocabulary=vocabulary,
             active_task=project_task(task),
             input_channel=turns.get(str(turn_id), {}).get("source"),
-            recent_interactions=[{"turnId": row.get("turnId"), "text": row.get("input"),
-                "interaction": (row.get("decision") or {}).get("interaction")}
-                for row in self.harness.journal.entries(types={"control_decision"}, tail=8)
-                if int(turns.get(row.get("turnId"), {}).get("sequence") or 0) < current_sequence][-4:],
+            recent_interactions=history['interactions'],
         )
         preparation_ms = round((time.perf_counter() - preparation_started) * 1000, 1)
         result = await self.semantic_router.classify(text, catalog)

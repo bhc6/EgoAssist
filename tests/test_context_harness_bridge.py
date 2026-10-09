@@ -5,7 +5,7 @@ import pytest
 from collections import deque
 
 from egoassist.realtime import ContextHarness, ContextSettings, SessionJournal
-from egoassist.realtime.omni import OmniBrowserBridge
+from egoassist.realtime.omni import OmniBrowserBridge, _ResponseRequest
 
 
 class Modalities:
@@ -78,7 +78,6 @@ def harness_at(path):
 
 
 def test_text_replay_includes_shared_timestamp_policy_once(tmp_path):
-    from types import SimpleNamespace
     from egoassist.memory.grounding import HISTORY_STATEMENT_POLICY
     harness = harness_at(tmp_path / 'text.jsonl')
     harness.record_user('Yesterday I finished.', source='test')
@@ -87,7 +86,7 @@ def test_text_replay_includes_shared_timestamp_policy_once(tmp_path):
     conversation.item_ids = set()
     conversation.model = 'test-text'
     bridge._text_conversation = conversation
-    request = SimpleNamespace(sequence=1, purpose='conversation', output_mode='text',
+    request = _ResponseRequest(priority=1, sequence=1, purpose='conversation', output_mode='text',
                               instructions='Answer current question.', origin={})
     bridge._inflight_response = request
     bridge._start_text_response(request)

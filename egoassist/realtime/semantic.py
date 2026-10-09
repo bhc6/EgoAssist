@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+from contextlib import contextmanager
 from contextvars import ContextVar
 import json
 import os
@@ -177,6 +178,7 @@ class SemanticTurnRouter:
         self._turn_context: ContextVar[dict[str, Any]] = ContextVar(
             f"semantic-turn-context-{id(self)}", default={}
         )
+        self._deadline = ContextVar(f"semantic-turn-deadline-{id(self)}", default=None)
 
     def set_turn_context(
         self,
@@ -215,15 +217,31 @@ class SemanticTurnRouter:
 
     # ── Main classifier ─────────────────────────────────────────────────────
 
+    @contextmanager
+    def classification_budget(self):
+        """Share one deadline across context preparation, classification and retries."""
+        deadline = asyncio.get_running_loop().time() + self.timeout_seconds
+        inherited = self._deadline.get()
+        token = self._deadline.set(min(deadline, inherited) if inherited is not None else deadline)
+        try:
+            yield
+        finally:
+            self._deadline.reset(token)
+
     async def classify(self, text: str, skill_catalog: list[dict[str, str]]) -> dict[str, Any]:
+        with self.classification_budget():
+            return await self._classify(text, skill_catalog)
+
+    async def _within_deadline(self, awaitable):
+        remaining = self._deadline.get() - asyncio.get_running_loop().time()
+        return await asyncio.wait_for(awaitable, timeout=max(0, remaining))
+
+    async def _classify(self, text: str, skill_catalog: list[dict[str, str]]) -> dict[str, Any]:
         started = time.perf_counter()
         request_metrics = {}
         raw = None
         try:
-            raw = await asyncio.wait_for(
-                self._classify_request(str(text), skill_catalog, request_metrics),
-                timeout=self.timeout_seconds,
-            )
+            raw = await self._within_deadline(self._classify_request(str(text), skill_catalog, request_metrics))
             wire_decision = json.loads(raw)
             request_metrics['generationMs'] = round((time.perf_counter() - started) * 1000, 1)
             parsed = expand_decision(wire_decision)
@@ -233,7 +251,7 @@ class SemanticTurnRouter:
                 parsed.get("taskControl") == "confirm-step"
                 or (parsed.get("interaction") or {}).get("action") in {"pause", "resume"}
             ):
-                review = await self._verify_task_control(str(text), parsed, request_metrics)
+                review = await self._within_deadline(self._verify_task_control(str(text), parsed, request_metrics))
                 task_reviewed = True
                 if parsed.get("taskControl") == "confirm-step" and review.get("taskControl") != "confirm-step":
                     parsed["taskControl"] = "none"
@@ -349,7 +367,7 @@ class SemanticTurnRouter:
             from .interaction import normalize_interaction
             interaction = normalize_interaction(parsed.get("interaction"), self._turn_context.get(), str(text))
             if interaction and interaction["action"] == "cancel":
-                valid = await self._verify_cancel(str(text), interaction["targetTurnId"], request_metrics)
+                valid = await self._within_deadline(self._verify_cancel(str(text), interaction["targetTurnId"], request_metrics))
                 if not valid:
                     interaction = {**interaction, "action": "reply" if parsed.get("intents") else "uncertain"}
                     interaction.pop("targetTurnId", None)
@@ -376,6 +394,10 @@ class SemanticTurnRouter:
             )
             if compound_stop:
                 speech_control = "none"
+            # A blocked event loop can delay its timeout callback. Never accept
+            # a late result merely because it won the callback scheduling race.
+            if asyncio.get_running_loop().time() >= self._deadline.get():
+                raise TimeoutError("Classification deadline exceeded")
             return {
                 "method": TURN_ROUTER_POLICY_VERSION,
                 "model": self.model,
@@ -427,7 +449,7 @@ class SemanticTurnRouter:
             }
         except Exception as exc:
             if isinstance(exc, (TimeoutError, asyncio.TimeoutError)):
-                request_metrics['deadlineOverrunMs'] = round(max(0, (time.perf_counter() - started - self.timeout_seconds) * 1000), 1)
+                request_metrics['deadlineOverrunMs'] = round(max(0, (asyncio.get_running_loop().time() - self._deadline.get()) * 1000), 1)
             return {
                 "method": TURN_ROUTER_POLICY_VERSION,
                 "model": self.model,
@@ -560,16 +582,11 @@ class SemanticTurnRouter:
         catalog = [{"name": str(item["name"]), "description": str(item["description"])}
                    for item in skill_catalog]
         context = self._turn_context.get()
-        context_data = ({"clock": context.get("clock"),
-                         "pendingMemoryDraft": context.get("memoryDraft"),
-                         "previousTurn": context.get("previousTurn"),
-                         "previousAnswer": context.get("previousAnswer"),
-                         "answers": context.get("answers"), "recentMessages": context.get("recentMessages"),
-                         "playback": context.get("playback"), "outputPermission": context.get("outputPermission"),
-                         "scene": context.get("scene"), "memoryCandidates": context.get("memoryCandidates"),
-                         "memoryVocabulary": context.get("memoryVocabulary"),
-                         "activeTask": context.get("activeTask")}
-                        if any(context.values()) else {})
+        # Both routing stages receive the same context. Only the draft's name
+        # differs in the structured protocol; do not drop newer context fields.
+        context_data = dict(context) if any(context.values()) else {}
+        if context_data:
+            context_data["pendingMemoryDraft"] = context_data.pop("memoryDraft", None)
         from .router_context import project_context
         metrics["contextOriginalChars"] = len(json.dumps(context_data, ensure_ascii=False))
         context_data = project_context(context_data) if context_data else {}

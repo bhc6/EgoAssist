@@ -224,7 +224,7 @@ def test_observation_memory_failure_preserves_source_and_suppresses_clarificatio
     from egoassist.realtime.observation_interaction import ObservationInteraction
     from egoassist.core.lane_contracts import AcceptedObservation
     journal = SessionJournal(tmp_path / 'case.jsonl', session_id='case')
-    entry = journal.append('ambient_observation', {'status': 'accepted'})
+    entry = journal.append('ambient_observation', {'status': 'accepted', 'observation_id': 'observation'})
     clock = ClockContext.current()
     captured = SimpleNamespace(observation_mode='open', previous_observation=None,
         frame_captured_at=clock.now_utc, frame_id='frame', media=None)
@@ -239,7 +239,10 @@ def test_observation_memory_failure_preserves_source_and_suppresses_clarificatio
     consumer.session_runtime = SimpleNamespace(skill=None)
     consumer.current_memory_policy = default_memory_policy
     consumer.memory_service = SimpleNamespace(remember_observation=unavailable, pending_draft=unavailable)
-    consumer.owner = SimpleNamespace(scene=SimpleNamespace(events=SimpleNamespace(schedule=lambda: None)))
+    consumer.owner = SimpleNamespace(
+        scene=SimpleNamespace(events=SimpleNamespace(schedule=lambda: None)),
+        lanes=SimpleNamespace(reviews=SimpleNamespace(rows={})),
+    )
     result = consumer.ambient(AcceptedObservation(captured, hypothesis, evidence, entry, 'accepted'))
     assert result['accepted'] and result['speech'] is None
     assert journal.entries_by_id([entry['id']])[entry['id']] == entry

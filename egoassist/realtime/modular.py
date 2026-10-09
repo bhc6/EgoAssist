@@ -67,7 +67,7 @@ class SpeechSegments:
                 import webrtcvad
             except ImportError as exc:
                 raise RuntimeError("Modular audio requires pip install -e '.[modular]'") from exc
-            vad = webrtcvad.Vad(2)
+            vad = webrtcvad.Vad(3)
         self.vad, self.on_start, self.on_end = vad, on_start, on_end
         self.max_frames = max_seconds * 50
         self.pending = bytearray()
@@ -88,7 +88,10 @@ class SpeechSegments:
             if self.segment_id is None:
                 self.preroll.append(frame)
                 self.speech_run = self.speech_run + 1 if speech else 0
-                if self.speech_run >= 3:
+                # A 60 ms impulse was enough to trigger an ASR request on
+                # background noise. Require sustained speech; keep pre-roll
+                # so the first phoneme is not lost when onset is confirmed.
+                if self.speech_run >= 6:
                     self.segment_id = "asr-" + uuid4().hex
                     self.frames = list(self.preroll)
                     self.preroll.clear()
@@ -109,6 +112,12 @@ class ModularProvider:
         self.api_key, self.config, self.audit = api_key, config, audit
         self.session = None
 
+    def audit_request(self, stage, model, request):
+        call_id = uuid4().hex
+        self.audit({'auditEvent': 'request', 'callId': call_id, 'stage': stage,
+                    'model': model, 'request': deepcopy(request)})
+        return call_id
+
     def http(self):
         if self.session is None or self.session.closed:
             self.session = aiohttp.ClientSession(
@@ -124,6 +133,8 @@ class ModularProvider:
     async def _json(self, stage, model, body, timeout):
         started = time.perf_counter()
         result = {"stage": stage, "model": model, "apiCalls": 1, "cacheHits": 0, "cost": None}
+        call_id = self.audit_request(stage, model, {"model": model, **body})
+        payload = None
         try:
             async with self.http().post(self.url("/services/aigc/multimodal-generation/generation"),
                                         json={"model": model, **body}, timeout=aiohttp.ClientTimeout(total=timeout)) as response:
@@ -138,6 +149,8 @@ class ModularProvider:
             result.update(status="cancelled" if isinstance(exc, asyncio.CancelledError) else "failed", error=type(exc).__name__)
             raise
         finally:
+            self.audit({'auditEvent': 'response', 'callId': call_id, **result, 'output': payload,
+                        'latencyMs': (time.perf_counter() - started) * 1000})
             self.audit({**result, "latencyMs": (time.perf_counter() - started) * 1000})
 
     async def transcribe(self, pcm):
@@ -172,6 +185,9 @@ class ModularProvider:
         body = {"model": self.config["textModel"], "input": {"messages": messages}, "parameters": {
             "result_format": "message", "temperature": 0, "enable_thinking": False,
             "incremental_output": True, "max_tokens": 1200}}
+        call_id = self.audit_request('text', self.config['textModel'], body)
+        output_parts = []
+        provider_events = []
         try:
             async with self.http().post(self.url("/services/aigc/text-generation/generation"),
                                         json=body, headers={"X-DashScope-SSE": "enable"}) as response:
@@ -184,6 +200,8 @@ class ModularProvider:
                     if data == "[DONE]":
                         break
                     event = json.loads(data)
+                    provider_events.append(event)
+                    result['requestId'] = event.get('request_id', result.get('requestId'))
                     if event.get("code"):
                         raise RuntimeError("text provider error: " + str(event["code"]))
                     choices = event.get("output", {}).get("choices", [])
@@ -191,11 +209,13 @@ class ModularProvider:
                     if not choices:
                         continue
                     choice = choices[0]
+                    text = message_text(choice.get("message", {}).get("content"))
+                    if text:
+                        output_parts.append(text)
                     finish = choice.get("finish_reason")
                     if finish not in (None, "null", "stop"):
                         raise ValueError("text response was truncated")
                     terminal = terminal or finish == "stop"
-                    text = message_text(choice.get("message", {}).get("content"))
                     if text:
                         if result["firstTokenMs"] is None:
                             result["firstTokenMs"] = (time.perf_counter() - started) * 1000
@@ -207,6 +227,10 @@ class ModularProvider:
             result.update(status="cancelled" if isinstance(exc, asyncio.CancelledError) else "failed", error=type(exc).__name__)
             raise
         finally:
+            self.audit({'auditEvent': 'response', 'callId': call_id, **result,
+                        'output': {'text': ''.join(output_parts), 'events': provider_events} if provider_events else None,
+                        'latencyMs': (time.perf_counter() - started) * 1000,
+                        'outputFormat': 'provider-json-events-and-assembled-text'})
             self.audit({**result, "latencyMs": (time.perf_counter() - started) * 1000})
 
     async def speak_stream(self, text_iterator, emit_audio):
@@ -219,6 +243,10 @@ class ModularProvider:
         ready = asyncio.Event()
         ws = None
         result["textPrefetch"] = self.config.get("ttsPrefetch", True)
+        session_config = {"voice": self.config["voice"], "mode": "server_commit",
+                          "response_format": "pcm", "sample_rate": 24000}
+        call_id = self.audit_request('tts', self.config['ttsModel'], {'session': session_config})
+        output_audio = bytearray()
 
         async def send(kind, **payload):
             await ws.send_json({"event_id": uuid4().hex, "type": kind, **payload})
@@ -232,6 +260,8 @@ class ModularProvider:
                         result["firstTextReadyMs"] = (time.perf_counter() - started) * 1000
                     await ready.wait()
                     await send("input_text_buffer.append", text=text)
+                    self.audit({'auditEvent': 'input', 'callId': call_id, 'stage': 'tts',
+                                'model': self.config['ttsModel'], 'text': text})
                     if result["firstTextSentMs"] is None:
                         result["firstTextSentMs"] = (time.perf_counter() - started) * 1000
                 await ready.wait()
@@ -246,8 +276,7 @@ class ModularProvider:
                     TTS_URL,
                     params={"model": self.config["ttsModel"]}, heartbeat=15, max_msg_size=4 * 1024 * 1024) as ws:
                     result["connectMs"] = (time.perf_counter() - started) * 1000
-                    await send("session.update", session={"voice": self.config["voice"], "mode": "server_commit",
-                                                          "response_format": "pcm", "sample_rate": 24000})
+                    await send("session.update", session=session_config)
                     # Wait for session.updated before submitting text. Propagate a
                     # producer failure immediately instead of waiting on the socket.
                     finished = False
@@ -283,6 +312,7 @@ class ModularProvider:
                                 if result["firstTextSentMs"] is not None:
                                     result["firstTextToAudioMs"] = result["firstAudioMs"] - result["firstTextSentMs"]
                             result["audioBytes"] += len(audio)
+                            output_audio.extend(audio)
                             emit_audio(payload["delta"])
                         elif kind == "error":
                             raise RuntimeError("TTS provider error: " + str(payload.get("error", {}).get("code", "unknown")))
@@ -303,6 +333,16 @@ class ModularProvider:
                 if not producer.done():
                     producer.cancel()
                 await asyncio.gather(producer, return_exceptions=True)
+            wav_output = io.BytesIO()
+            with wave.open(wav_output, 'wb') as wav:
+                wav.setnchannels(1)
+                wav.setsampwidth(2)
+                wav.setframerate(24000)
+                wav.writeframes(output_audio)
+            self.audit({'auditEvent': 'response', 'callId': call_id, **result,
+                        'output': {'audio': 'data:audio/wav;base64,' + base64.b64encode(wav_output.getvalue()).decode()} if output_audio else None,
+                        'latencyMs': (time.perf_counter() - started) * 1000,
+                        'outputFormat': 'received-pcm-wrapped-as-wav'})
             self.audit({**result, "latencyMs": (time.perf_counter() - started) * 1000})
 
     async def close(self):
@@ -332,7 +372,10 @@ class ModularConversation:
         self.segmenter = None
         self.text_only = text_only
         self.active_response_id = None
+        self.active_context_item_ids = []
         self.response_usage = None
+        self.audit_calls = {}
+        self.active_asr_id = None
 
     def _event(self, kind, **data):
         if not self.closed:
@@ -340,6 +383,16 @@ class ModularConversation:
 
     def _audit(self, row):
         # Audit terminal cancelled requests as well; no credentials in events.
+        if row.get('auditEvent'):
+            if row['auditEvent'] == 'request':
+                self.audit_calls[row['callId']] = ({'itemId': self.active_asr_id} if row.get('stage') == 'asr'
+                                                  else {'responseId': self.active_response_id,
+                                                        'contextItemIds': list(self.active_context_item_ids)})
+            context = self.audit_calls.get(row['callId'], {})
+            self.callback.on_event({'type': 'pipeline.audit', **row, **context})
+            if row['auditEvent'] == 'response':
+                self.audit_calls.pop(row['callId'], None)
+            return
         if row.get("stage") in {"text", "vision", "tts"}:
             row = {**row, "responseId": self.active_response_id}
             if row["stage"] in {"text", "vision"} and isinstance(row.get("usage"), dict):
@@ -389,6 +442,7 @@ class ModularConversation:
     async def _transcribe(self):
         while not self.closed and not self.asr_queue.empty():
             sid, pcm = self.asr_queue.get_nowait()
+            self.active_asr_id = sid
             try:
                 text = (await self.provider.transcribe(pcm)).strip()
                 # The application's transcript handler owns context insertion.
@@ -399,6 +453,7 @@ class ModularConversation:
                 self._event("conversation.item.input_audio_transcription.completed", item_id=sid, transcript="")
                 self._event("pipeline.error", stage="asr", reason=type(exc).__name__, itemId=sid)
             finally:
+                self.active_asr_id = None
                 self.asr_queue.task_done()
 
     def append_audio(self, audio):
@@ -454,9 +509,15 @@ class ModularConversation:
             return
         sid = "modular-" + uuid4().hex
         self.active_response_id = sid
+        self.active_context_item_ids = [item_id for item_id, _ in self.items]
         self.response_usage = None
         response_model = prepared_answer["model"] if prepared_answer else self.model
-        self.response = self._task(self._respond(sid, instructions, modalities, prepared_answer))
+        # Freeze before yielding or publishing response.created. New frames,
+        # input items and session updates must belong to the next response.
+        context = {'visual': not prepared_answer and not self.session.get('enable_input_audio_transcription'),
+                   'image': self.image, 'instructions': self.session.get('instructions', ''),
+                   'messages': [deepcopy(value) for _, value in self.items]}
+        self.response = self._task(self._respond(sid, instructions, modalities, context, deepcopy(prepared_answer)))
         def before_start_cancelled(task):
             if task.cancelled():
                 if self.response is task:
@@ -465,21 +526,21 @@ class ModularConversation:
         self.response.add_done_callback(before_start_cancelled)
         self._event("response.created", response={"id": sid, "model": response_model})
 
-    async def _respond(self, sid, instructions, modalities, prepared_answer=None):
+    async def _respond(self, sid, instructions, modalities, context, prepared_answer=None):
         started = time.perf_counter()
         status = "completed"
         audio_available = None
         text_parts = []
-        visual = not prepared_answer and not self.session.get("enable_input_audio_transcription")
+        visual = context['visual']
         try:
             # Allow an immediate cancellation from response.created to propagate.
             await asyncio.sleep(0)
             if visual:
-                text = await self.provider.observe(instructions, self.image)
+                text = await self.provider.observe(instructions, context['image'])
                 self._event("response.text.done", response_id=sid, text=text)
             else:
-                messages = [{"role": "system", "content": self.session.get("instructions", "")}]
-                messages += [dict(value) for _, value in self.items]
+                messages = [{"role": "system", "content": context['instructions']}]
+                messages += context['messages']
                 messages.append({"role": "system", "content": instructions})
                 audio = Modalities.AUDIO in modalities
                 async def tokens():

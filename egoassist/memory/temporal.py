@@ -220,7 +220,10 @@ def resolve_time_semantics(text: str, clock: ClockContext, *, kind: str | None) 
         hour, minute = clock_value or (clock.local_now.hour, clock.local_now.minute)
         local_point = _local_datetime(target_date, (hour, minute), clock)
         effective_at = local_point.astimezone(timezone.utc)
-    elif kind in {"event", "state", "observation", "scene", "tool-effect"}:
+    # A reported occurrence without a date need not have happened when spoken.
+    # Observations and current states retain their source-clock semantics;
+    # callers with a measured event timestamp can pass it explicitly.
+    elif kind in {"state", "observation", "scene", "tool-effect"}:
         effective_at = clock.now_utc
 
     return {

@@ -79,15 +79,17 @@ function memoryCardHTML(card, injected) {
   const evidence = card.evidenceContext || card.metadata?.evidenceContext || {};
   const field = (label, value) => "<dt>" + esc(label) + "</dt><dd>" + esc(value) + "</dd>";
   const sources = card.sourceIds || [];
+  const eventTime = card.effectiveAt ? memoryTime(card.effectiveAt, card.timezone) +
+    (card.effectiveEnd ? " 至 " + memoryTime(card.effectiveEnd, card.timezone) + "（不含）" : "") : "时间未确定";
+  const timeLabel = card.effectiveEnd ? "时间范围" : "发生或生效时间";
+  const recordedTime = memoryTime(card.recordedAt || card.timestamp, card.timezone);
   return "<details class='memory-record' data-disclosure='" + esc(card.id) + "'><summary><span class='memory-record-meta'><b>" +
-    esc(memoryKinds[card.kind] || card.kind || "记录") + "</b><time>" + esc(memoryTime(card.happenedAt || card.recordedAt || card.timestamp, card.timezone)) +
+    esc(memoryKinds[card.kind] || card.kind || "记录") + "</b><time>" + esc(card.effectiveAt ? eventTime : "记录于 " + recordedTime + " · 时间未确定") +
     "</time><span>" + esc(memoryScopeLabel(card.scope)) + "</span>" + (injected ? "<strong>最近检索已选用</strong>" : "") +
     "</span><span class='memory-record-preview'>" + esc(card.text || card.summary || "无文本记录") + "</span></summary>" +
     "<div class='memory-record-body'><h3>保存文本</h3><p class='memory-original'>" + esc(card.text || card.summary || "无文本记录") + "</p><dl>" +
     field("提及对象", (evidence.entities || []).join("、") || "未提取") + field("场景", evidence.scene || "未提取") +
-    field("发生时间", memoryTime(card.happenedAt, card.timezone)) + field("记录时间", memoryTime(card.recordedAt || card.timestamp, card.timezone)) +
-    field("生效时间", memoryTime(card.effectiveAt, card.timezone)) +
-    (card.effectiveEnd ? field("结束时间", memoryTime(card.effectiveEnd, card.timezone)) : "") +
+    field(timeLabel, eventTime) + field("记录时间", recordedTime) +
     (evidence.times || []).map(item => field(item.relation || "时间关系", [item.expression, item.start ? memoryTime(item.start, card.timezone) : "时间待解析", item.status === "resolved" ? "已解析" : item.reason || "未解析"].filter(Boolean).join(" · "))).join("") +
     field("来源记录", sources.join(" · ") || "无来源标识") + "</dl>" +
     "<details data-disclosure='raw-" + esc(card.id) + "'><summary>完整数据与来源标识</summary><pre>" + esc(JSON.stringify(card, null, 2)) +

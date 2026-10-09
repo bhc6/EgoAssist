@@ -9,19 +9,21 @@ function renderLongEvents(value) {
   const status = {ongoing:'进行中（据最近证据）', paused:'已暂停', completed:'已结束（据引用证据）', uncertain:'进展待确认'};
   const job = {running:'正在整理', failed:'整理未完成，可重试', queued:'等待恢复', completed:'已整理'};
   const events = value?.events || [];
-  const html = '<p>' + esc(job[value?.job?.status] || '等待连续观察证据') + ' · 待整理 ' + (value?.pendingSources || 0) + ' 条</p>' +
+  const html = '<p>' + esc(job[value?.job?.status] || '等待对话或观察记录') + ' · 待整理 ' + (value?.pendingSources || 0) + ' 条</p>' +
     '<p>记录有来源的阶段变化。采样间隔内的行为未知；证据跨度不等于持续活动时长。</p>' +
     events.map(e => '<article><h3>' + esc(e.title) + '</h3><p>' + esc(status[e.status]) +
       (e.observationStale && e.status !== 'completed' ? ' · 暂无近期证据，不能确认仍在进行' : '') + '</p><p>' + esc(e.summary) + '</p>' +
       '<small>证据跨度：' + esc(new Date(e.coverage.firstEvidenceAt).toLocaleString()) + ' — ' + esc(new Date(e.coverage.lastEvidenceAt).toLocaleString()) +
       ' · ' + e.coverage.sampleCount + ' 次画面观察 / ' + e.coverage.statementCount + ' 条自述</small>' +
-      '<ol>' + e.phases.map(p => '<li>' + esc(new Date(p.at).toLocaleTimeString()) + ' · ' + esc(p.description) + '</li>').join('') + '</ol>' +
+      '<ol>' + e.phases.map((p, index) => '<li>' + esc(new Date(p.at).toLocaleString()) + ' · ' + esc(p.description) +
+        '<details data-disclosure="event-' + esc(e.eventId) + '-phase-' + index + '"><summary>本阶段依据</summary><div class="event-sources"></div>' +
+        '<button type="button" data-event-evidence="' + esc(e.eventId) + '" data-offset="0" data-source-ids="' + esc(JSON.stringify(p.sourceIds)) + '">查看原话与观察</button></details></li>').join('') + '</ol>' +
       (e.coverage.gapCount ? '<p>存在 ' + e.coverage.gapCount + ' 段较长证据间隔，期间进展未知。</p>' : '') +
       (e.totalPhases > e.phases.length ? '<p>展示最近 ' + e.phases.length + ' 个阶段，共 ' + e.totalPhases + ' 个。</p>' : '') +
       (e.uncertainties.length ? '<p>待确认：' + esc(e.uncertainties.join('；')) + '</p>' : '') +
       '<details data-disclosure="event-' + esc(e.eventId) + '"><summary>查看原始依据（共 ' + e.totalSources + ' 条）</summary>' +
       '<div class="event-sources">' + eventEvidenceHTML(e.sources) + '</div><button type="button" data-event-evidence="' + esc(e.eventId) + '" data-offset="0">从头查看全部依据</button></details></article>').join('') +
-    (!events.length ? '<p>尚未形成有依据的事件。开启环境观察后会自动整理，也可以整理本会话已有记录。</p>' : '') +
+    (!events.length ? '<p>尚未形成有依据的事件。可以整理本会话已有对话，无需开启摄像头；环境观察记录也会参与整理。</p>' : '') +
     (value?.truncated ? '<p>当前展示最近 ' + events.length + ' 个事件，其余仍保存在记录中。</p>' : '');
   updateDisclosureHTML(root, html, selectedSessionId);
 }
@@ -31,8 +33,10 @@ document.getElementById('longEvents').addEventListener('click', async event => {
   button.disabled = true;
   const session = selectedSessionId;
   try {
+    const refs = button.dataset.sourceIds ? JSON.parse(button.dataset.sourceIds) : [];
     const response = await fetch('/api/scene/events/evidence?session=' + encodeURIComponent(session) +
-      '&eventId=' + encodeURIComponent(button.dataset.eventEvidence) + '&offset=' + button.dataset.offset);
+      '&eventId=' + encodeURIComponent(button.dataset.eventEvidence) + '&offset=' + button.dataset.offset +
+      refs.map(ref => '&sourceId=' + encodeURIComponent(ref)).join(''));
     if (!response.ok) throw new Error('证据暂不可读取');
     const page = await response.json();
     if (selectedSessionId !== session || !button.isConnected) return;

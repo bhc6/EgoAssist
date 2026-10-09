@@ -1,0 +1,295 @@
+{
+  "schema_version": "memory-experiment-plan.v1",
+  "created_date": "2026-09-27",
+  "status": "draft_not_frozen_not_run",
+  "is_executable_runner_config": false,
+  "scope": "General long-term interaction memory across daily life and work",
+  "source_code_baseline": "2baed4c",
+  "production_defaults_changed": false,
+  "new_paid_evaluation_calls_in_this_turn": 0,
+  "research_questions": [
+    {
+      "id": "H1",
+      "claim": "Evidence-group selection improves correctness under a fixed token budget",
+      "target_difference_pp": 5,
+      "required_difference_ci_lower_pp": 0,
+      "multiple_testing": "Holm over E1 and E2 primary endpoints"
+    },
+    {
+      "id": "H2",
+      "claim": "Local repair preserves revision correctness at lower maintenance cost",
+      "noninferiority_margin_pp": 2,
+      "target_maintenance_cost_reduction_fraction": 0.3
+    },
+    {
+      "id": "H3",
+      "claim": "The deployed workload offers a quality-total-cost advantage",
+      "noninferiority_margin_pp": 2,
+      "target_total_cost_reduction_fraction": 0.2
+    }
+  ],
+  "primary_metrics": {
+    "E1": "Official LongMemEval QA correctness",
+    "E2": "Answer correct AND supported by sufficient valid evidence; official MCQ accuracy also reported",
+    "E3": "Revision-probe correctness and maintenance cost; stale risk, history preservation and coverage also reported"
+  },
+  "baselines": [
+    {
+      "id": "R0",
+      "name": "Frozen production-memory policy adapter",
+      "code_ref": "2baed4c"
+    },
+    {
+      "id": "R1",
+      "name": "Raw-source BM25"
+    },
+    {
+      "id": "R2",
+      "name": "Raw-source dense/BM25 RRF"
+    },
+    {
+      "id": "R3",
+      "name": "Fact-augmented keys and time-aware queries; adapted recipe"
+    },
+    {
+      "id": "R4",
+      "name": "Official Graphiti with shared reader adapter",
+      "repository": "https://github.com/getzep/graphiti",
+      "commit": null
+    },
+    {
+      "id": "R5",
+      "name": "Official LightMem with shared reader adapter",
+      "repository": "https://github.com/zjunlp/LightMem",
+      "commit": null
+    },
+    {
+      "id": "M",
+      "name": "Proposed evidence-group selection and version-aware local repair",
+      "implementation_status": "planned"
+    },
+    {
+      "id": "F",
+      "name": "Full raw history within supported context limit",
+      "main_datasets": [
+        "E1"
+      ]
+    }
+  ],
+  "repair_comparison_conditions": [
+    "valid_raw_rrf",
+    "graphiti",
+    "invalidate_hide_only",
+    "same_representation_full_rebuild",
+    "proposed_local_repair"
+  ],
+  "retrieval_ablations": [
+    "event_nomination_replaced_by_adjacent_windows",
+    "no_raw_source_expansion",
+    "group_selection_replaced_by_ranking_or_mmr"
+  ],
+  "repair_ablations": [
+    "no_read_time_version_check",
+    "invalidate_without_local_reconstruction"
+  ],
+  "datasets": [
+    {
+      "id": "D0",
+      "role": "development_only",
+      "exposed_sets": [
+        "LoCoMo 304 retrieval packets",
+        "EgoLife historical 30 questions"
+      ],
+      "additional_calibration_questions": 60
+    },
+    {
+      "id": "D1",
+      "name": "LongMemEval-S",
+      "planned_test_questions": 500,
+      "release_sha256": null,
+      "test_ids_sha256": null,
+      "exposure_audit": "pending"
+    },
+    {
+      "id": "D2",
+      "name": "EgoLife",
+      "planned_development_questions": 80,
+      "planned_test_questions": 400,
+      "target_new_test_participants_minimum": 3,
+      "test_ids_sha256": null,
+      "availability": "inventory_pending",
+      "double_evidence_annotation_fraction": 1.0,
+      "split_unit": "participant and recording/day/event family",
+      "population_generalization_claim": false
+    },
+    {
+      "id": "D3",
+      "name": "Source revision challenge",
+      "planned_development_trajectories": 20,
+      "planned_test_trajectories": 80,
+      "change_families": 10,
+      "probes_per_trajectory": 6,
+      "test_template_sha256": null,
+      "status": "not_created"
+    }
+  ],
+  "experiment_blocks": [
+    {
+      "id": "P0",
+      "purpose": "calibration",
+      "planned_queries": 60,
+      "condition_multiplier": 8,
+      "planned_answer_calls": 480,
+      "status": "not_run"
+    },
+    {
+      "id": "E1",
+      "purpose": "longmemeval_s",
+      "planned_queries": 500,
+      "condition_multiplier": 8,
+      "planned_answer_calls": 4000,
+      "status": "not_run"
+    },
+    {
+      "id": "E2",
+      "purpose": "egolife_memory_only",
+      "planned_queries": 400,
+      "condition_multiplier": 7,
+      "planned_answer_calls": 2800,
+      "status": "not_run"
+    },
+    {
+      "id": "E3",
+      "purpose": "revision_trajectories",
+      "planned_queries": 480,
+      "condition_multiplier": 5,
+      "planned_answer_calls": 2400,
+      "status": "not_run"
+    },
+    {
+      "id": "A1",
+      "purpose": "retrieval_ablation",
+      "planned_queries": 300,
+      "condition_multiplier": 3,
+      "planned_answer_calls": 900,
+      "status": "not_run"
+    },
+    {
+      "id": "A2",
+      "purpose": "repair_ablation",
+      "planned_queries": 480,
+      "condition_multiplier": 2,
+      "planned_answer_calls": 960,
+      "status": "not_run"
+    },
+    {
+      "id": "C1",
+      "purpose": "additional_token_budgets",
+      "planned_queries": 900,
+      "condition_multiplier": 6,
+      "planned_answer_calls": 5400,
+      "status": "not_run"
+    }
+  ],
+  "primary_answer_calls": 9200,
+  "core_answer_calls": 16940,
+  "optional_answer_calls": {
+    "raw_media_track": 360,
+    "streammembench_paired_reuse": 640,
+    "two_extra_seed_checks": 600,
+    "native_recipe_calibration": 120
+  },
+  "all_listed_answer_calls": 18660,
+  "counts_exclude": [
+    "construction",
+    "extraction",
+    "embedding",
+    "update",
+    "judge",
+    "retries",
+    "FactConsolidation extension",
+    "2x2 development mechanism screening"
+  ],
+  "controls": {
+    "evidence_token_budgets": [
+      2048,
+      4096,
+      8192
+    ],
+    "primary_evidence_token_budget": 4096,
+    "metadata_included_in_evidence_budget": true,
+    "reader_temperature": 0,
+    "primary_seed_repetitions": 1,
+    "reader_resolved_model": null,
+    "reader_prompt_sha256": null,
+    "reader_max_output_tokens": null,
+    "embedding_resolved_model": null,
+    "judge_resolved_model": null,
+    "judge_prompt_sha256": null,
+    "tokenizer": null,
+    "shared_query_parser": true,
+    "gold_available_to_retriever": false,
+    "future_data_available": false,
+    "static_answers_written_to_memory": false
+  },
+  "statistics": {
+    "paired": true,
+    "bootstrap_draws": 10000,
+    "cluster_unit": "source-history family / recording group / revision trajectory",
+    "independent_sample_equivalent_claimed": false,
+    "noninferiority_requires_ci": true,
+    "illustrative_power": {
+      "alpha": 0.05,
+      "power": 0.8,
+      "discordance_fraction": 0.2,
+      "difference_pp": 5,
+      "approx_independent_pairs": 628,
+      "not_adjusted_for": [
+        "clustering",
+        "multiple_testing"
+      ],
+      "is_power_guarantee": false
+    }
+  },
+  "cost": {
+    "ledger_required": true,
+    "prices_frozen_at_run_time": true,
+    "stage_usd_caps": null,
+    "query_counts_per_1000_source_appends": [
+      1,
+      10,
+      100,
+      1000
+    ],
+    "update_counts_per_1000_source_appends": [
+      0,
+      10,
+      100
+    ],
+    "primary_illustrative_tokens": {
+      "reader_input": 109700000,
+      "reader_output": 2760000,
+      "judge_input": 18400000,
+      "judge_output": 1380000
+    },
+    "example_is_measured": false
+  },
+  "required_before_freeze": [
+    "dataset inventory and access",
+    "exposure audit",
+    "baseline commit pins and adapters",
+    "new mechanism implementation",
+    "test IDs and annotation hashes",
+    "models/prompts/tokenizer/output limits",
+    "pilot ledger and power assessment",
+    "stage budgets and retry rules",
+    "statistical analysis script hash",
+    "freeze timestamp and manifest hash"
+  ],
+  "freeze": {
+    "at": null,
+    "manifest_sha256": null,
+    "public_preregistration_url": null
+  },
+  "results": []
+}

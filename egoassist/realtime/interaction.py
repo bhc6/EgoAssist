@@ -62,8 +62,9 @@ class InteractionState:
         self.grants = set()
         self.responses = {}
         self.selected_response = None
-        history = journal.entries(types={"interaction.playback"}, tail=1)
-        self.last_progress = dict(history[-1]) if history else None
+        # Playback belongs to a live device connection. Durable progress is
+        # historical evidence, never proof the device is still playing now.
+        self.last_progress = None
         self.max_samples = int(float(os.getenv("EGOASSIST_PLAYBACK_CACHE_SECONDS", "90")) * 24000)
 
     def snapshot(self):
@@ -196,6 +197,13 @@ class InteractionState:
         return {"responseId": self.selected_response, "turnId": row["origin"].get("answerObligation") or row["origin"].get("turnId"),
                 "playedMs": round(row["playedSamples"] / 24, 1), "generatedMs": round(len(row["pcm"]) / 48, 1),
                 "generatedText": row["text"][-1200:], "complete": row["complete"]}
+
+    def reset_playback(self):
+        """Invalidate device state at a connection boundary, retaining the journal."""
+        self.responses.clear()
+        self.selected_response = None
+        self.last_progress = None
+        self.grants.clear()
 
     def tail(self, turn_id):
         matches = [(key, row) for key, row in self.responses.items()

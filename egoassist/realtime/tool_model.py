@@ -6,6 +6,7 @@ import time
 import aiohttp
 import dashscope
 
+from egoassist.core.model_audit import record_request, record_output
 from egoassist.prompts import prompt_text
 
 
@@ -34,12 +35,13 @@ class ToolModel:
             if self._session is None or self._session.closed:
                 self._session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=self.timeout), trust_env=True)
             async with self._session.post(dashscope.base_http_api_url.rstrip("/") + "/services/aigc/text-generation/generation",
-                    headers={"Authorization": "Bearer " + self.api_key}, json={"model": self.model,
+                    headers={"Authorization": "Bearer " + self.api_key}, json=record_request(harness.journal, request, {"model": self.model,
                         "input": {"messages": messages}, "parameters": {"tools": tools, "tool_choice": "auto",
-                            "result_format": "message", "enable_thinking": False, "temperature": 0}}) as response:
+                            "result_format": "message", "enable_thinking": False, "temperature": 0}})) as response:
                 if response.status != 200:
                     raise RuntimeError(f"Tool model HTTP {response.status}")
                 payload = await response.json()
+                record_output(harness.journal, request, payload)
             message = payload["output"]["choices"][0]["message"]
             calls = message.get("tool_calls") or []
             if not isinstance(calls, list):

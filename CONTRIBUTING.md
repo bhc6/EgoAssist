@@ -10,6 +10,10 @@ Observation, interaction, and memory are the runtime lanes. See
 - `core/` owns shared contracts, journals, and projections without upward imports.
 - `product/` supplies jobs, privacy, artifacts, and external connectors.
 - Offline capture/retrieval/evaluation modules are research tools, not a second runtime.
+- New mechanism studies live in the independent MemoryMechanismLab project. Reuse
+  product capabilities through explicit offline adapters and pinned snapshots;
+  never add a product dependency on the research runner. Existing evaluation
+  modules remain for historical reproduction and product regression.
 
 Keep `run_egoassist.py` limited to startup and compatibility exports. Put domain
 policy in Skills/prompts, validate permissions and time in code, and persist state

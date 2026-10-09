@@ -256,6 +256,34 @@ def test_unsupported_or_invalid_time_is_not_fabricated(text):
     assert result["effectiveAt"] is None
 
 
+@pytest.mark.parametrize("text", ["喝了水", "刚才喝了水"])
+def test_undated_event_survives_restart_and_recall_without_proving_today(tmp_path, text):
+    memory = TimelineMemory(tmp_path / "memory.db")
+    temporal = resolve_time_semantics(text, TODAY, kind="event")
+    card = save(memory, text, recorded_at=temporal["recordedAt"],
+                effective_at=temporal["effectiveAt"], effective_end=temporal["effectiveEnd"],
+                source_ids=["statement"])
+    memory = TimelineMemory(memory.path)
+    restored = memory.cards(user_id="u")[0]
+    assert restored["effectiveAt"] is None
+    assert restored["recordedAt"] == TODAY.now_utc.isoformat(timespec="milliseconds")
+    assert restored["sourceIds"] == ["statement"]
+    history = recall(memory, "喝水", ranking_query=text, min_score=0)
+    assert [row["cardId"] for row in history["selected"]] == [card["id"]]
+    recent = recall(memory, "刚才喝水", ranking_query=text, min_score=0)
+    assert [row["cardId"] for row in recent["selected"]] == [card["id"]]
+    assert recall(memory, "今天喝水", ranking_query=text, min_score=0)["selected"] == []
+
+
+def test_explicit_observation_time_still_supports_dated_recall(tmp_path):
+    memory = TimelineMemory(tmp_path / "memory.db")
+    card = save(memory, "拿起水杯喝水", kind="observation", happened_at=TODAY.now_utc,
+                recorded_at=TODAY.now_utc + timedelta(seconds=30), source_ids=["frame"])
+    result = recall(memory, "今天喝水", ranking_query=card["text"], min_score=0)
+    assert [row["cardId"] for row in result["selected"]] == [card["id"]]
+    assert card["effectiveAt"] != card["recordedAt"]
+
+
 def test_late_mutable_state_does_not_replace_newer_state(tmp_path):
     memory = TimelineMemory(tmp_path / "memory.db")
     current = save(memory, "钥匙在书桌", kind="state", subject="钥匙", predicate="位置", value="书桌", recorded_at=TODAY.now_utc)

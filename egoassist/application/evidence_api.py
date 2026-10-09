@@ -12,7 +12,7 @@ from egoassist.memory.recovery import recovery_jobs
 from egoassist.product import HumanHelpRequest, OutcomeRecord
 from egoassist.prompts import prompt_catalog
 from egoassist.realtime import CaseWorkLedger
-from egoassist.realtime.prompt_audit import audit_page
+from egoassist.realtime.prompt_audit import audit_page, decision_audit
 
 
 @dataclass
@@ -98,7 +98,7 @@ class EvidenceEndpoints:
         self.identity.get_context_session(user_id, session_id)
         tracker = self.case_owner(user_id, session_id).scene.events
         return self.web.json_response(tracker.evidence(str(request.query.get('eventId', '')),
-            offset=int(request.query.get('offset', '0'))))
+            offset=int(request.query.get('offset', '0')), source_ids=request.query.getall('sourceId', None)))
 
     async def post_speaker_merge(self, request):
         user_id = request[self.user_key]['id']
@@ -120,6 +120,24 @@ class EvidenceEndpoints:
         session_id = str(request.query.get("session", "")).strip()
         self.identity.get_context_session(user_id, session_id)
         owner = self.case_owner(user_id, session_id)
+        event_id = request.query.get('event')
+        if request.query.get('modelCalls') or request.query.get('modelCall'):
+            from egoassist.core.model_audit import page, detail
+            try:
+                result = ({'call': detail(owner.journal, request.query['modelCall'])}
+                          if request.query.get('modelCall') else page(owner.journal,
+                              model=request.query.get('model'), before=request.query.get('before'),
+                              limit=request.query.get('limit', '20')))
+            except ValueError as exc:
+                raise self.web.HTTPBadRequest(text=str(exc)) from exc
+            return self.web.json_response({'sessionId': session_id, **result},
+                                          headers={'Cache-Control': 'private, no-store'})
+        if event_id:
+            row = owner.journal.entries_by_id([event_id]).get(event_id)
+            if row is None or row.get('type') != 'control_decision':
+                raise self.web.HTTPNotFound(text='Routing audit not found in this session')
+            return self.web.json_response({'sessionId': session_id, 'entry': decision_audit(row)},
+                                          headers={'Cache-Control': 'private, no-store'})
         rows = owner.journal.entries()
         return self.web.json_response(
             {

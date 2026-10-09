@@ -121,6 +121,24 @@ main { max-width: 1640px; padding: 16px 24px; }
 #turnWorkflowDetails > summary { color: var(--ink); font-size: 14px; }
 #workflowSelection { color: var(--muted); font-size: 12px; }
 .live-workflow { border: 0; background: transparent; }
+.jev-audit { min-width: 0; padding: 8px 0; }
+.jev-note { color: var(--muted); font-size: 12px; line-height: 1.6; }
+.jev-stage { margin: 18px 0; min-width: 0; }
+.jev-stage h4 { margin: 12px 0; }
+.jev-question { border: 1px solid var(--line); border-radius: 8px; padding: 10px; margin: 10px 0; min-width: 0; }
+.jev-question summary { overflow-wrap: anywhere; line-height: 1.7; }
+.jev-instructions { margin: 10px 0; font-size: 12px; }
+.jev-instructions p { white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.7; }
+.jev-table-wrap { overflow-x: auto; }
+.jev-choices { width: 100%; border-collapse: collapse; table-layout: fixed; font-size: 12px; line-height: 1.65; }
+.jev-choices th, .jev-choices td { text-align: left; vertical-align: top; padding: 9px 7px; border-bottom: 1px solid var(--line); overflow-wrap: anywhere; }
+.jev-choices th:first-child { width: 23%; }
+.jev-choices th:last-child { width: 22%; }
+.jev-selected { background: #e5f2ec; }
+.jev-choice-badge { display: block; color: #206548; font-size: 11px; }
+.jev-probability { font-variant-numeric: tabular-nums; }
+.jev-probability-track { display: block; height: 4px; border-radius: 2px; margin-top: 6px; background: #dde5e0; overflow: hidden; }
+.jev-probability-track > span { display: block; height: 100%; background: #428c70; }
 .workflow-fact { grid-template-columns: minmax(90px, 112px) minmax(0, 1fr); padding: 8px 0; min-width: 0; }
 .shared-scene-band { margin-top: 24px; padding: 18px 0; background: transparent; }
 .shared-scene-grid { grid-template-columns: minmax(0, 1fr) minmax(0, 2fr); }
@@ -177,3 +195,14 @@ body > footer { background: transparent; color: var(--muted); border-top: 1px so
   .memory-activity li > span { overflow-wrap: anywhere; word-break: break-word; }
   .workflow-fact { grid-template-columns: minmax(76px, 92px) minmax(0, 1fr); gap: 8px; }
 }
+.model-audit { min-width: 0; }
+.model-call-list { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 300px), 1fr)); gap: 8px; margin: 12px 0; }
+.model-audit .model-call { display: flex; flex-direction: column; gap: 6px; text-align: left; white-space: normal; overflow-wrap: anywhere; }
+.model-audit .model-call[aria-pressed="true"] { outline: 2px solid var(--accent, #3683cf); }
+.model-audit pre { max-height: 520px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
+.model-audit p, .model-audit code { overflow-wrap: anywhere; }
+.model-audit select { max-width: 100%; }
+.model-media { display: flex; flex-wrap: wrap; gap: 10px; }
+.model-media figure { margin: 8px 0; max-width: 100%; }
+.model-media img { max-width: min(100%, 420px); max-height: 320px; object-fit: contain; }
+.model-media audio { max-width: 100%; }

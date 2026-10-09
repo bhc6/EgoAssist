@@ -23,9 +23,28 @@ def retention_category(row):
         return "observation"
     if kind.startswith("memory.") or kind.startswith("long_event."):
         return "memory"
-    if kind in {"runtime_event", "model.prompt", "control_decision"}:
+    if kind in {"runtime_event", "model.prompt", "control_decision", "model.request.body", "model.response.body"}:
         return "operational"
     return None
+
+
+def retention_categories(row):
+    """Raw model audits obey both log and source-content retention limits."""
+    categories = {retention_category(row)} - {None}
+    kind = row.get("eventType") or row.get("type", "")
+    if kind.startswith("provider.model."):
+        categories.update(("operational", "transcript"))
+        if row.get("payload", row).get("stage") == "vision":
+            categories.add("observation")
+    elif kind in {"model.request.body", "model.response.body"}:
+        source_kind = row.get("sourceKind", "")
+        if source_kind.startswith("scene."):
+            categories.add("transcript" if source_kind.startswith("scene.transcription.") else "observation")
+        elif source_kind.startswith(("long_event.", "insight.")):
+            categories.add("memory")
+        else:
+            categories.add("transcript")
+    return categories
 
 
 def references(value):
@@ -78,6 +97,10 @@ def owned_identifiers(row):
         "runtime_event": ("responseId",),
     }.get(kind, ())
     result.update(row[key] for key in keys if row.get(key))
+    if kind == "runtime_event" and row.get("eventType") == "provider.model.request":
+        call_id = row.get("payload", {}).get("callId")
+        if call_id:
+            result.add(call_id)
     if kind == "evidence.package":
         snapshot = (row.get("packet") or {}).get("snapshotId")
         if snapshot:

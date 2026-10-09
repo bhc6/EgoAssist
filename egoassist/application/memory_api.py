@@ -103,16 +103,16 @@ class MemoryEndpoints:
         self.identity.get_context_session(user_id, session_id)
         journal = self.case_owner(user_id, session_id).journal
         self.insight_executor.recover(user_id, session_id, journal)
-        rows = journal.entries()
-        policy = next(
-            (row for row in reversed(rows) if row.get("type") == "insight.policy"), {}
-        )
-        results = [row for row in rows if row.get("type") == "insight.result"]
+        policies = journal.entries(types={"insight.policy"}, tail=1)
+        policy = policies[-1] if policies else {}
+        results = []
         result_id = request.query.get("result")
-        if result_id:
-            results = [row for row in results if row["id"] == result_id]
-        if request.query.get("includeResults") == "false":
-            results = []
+        if request.query.get("includeResults") != "false":
+            if result_id:
+                row = journal.entries_by_id([result_id]).get(result_id)
+                results = [row] if row and row.get("type") == "insight.result" else []
+            else:
+                results = journal.entries(types={"insight.result"}, tail=1)
         return self.web.json_response(
             {
                 "results": results[-1:],
@@ -208,13 +208,13 @@ class MemoryEndpoints:
         episodic_snap = self.timeline.snapshot(
             user_id=user_id, scope="case", case_id=session_id
         )
-        journal_entries = owner.journal.entries()
+        journal_entries = owner.journal.entries(tail=20)
         return self.web.json_response(
             {
                 "sessionId": session_id,
                 "timestamp": time.time(),
                 "workingMemory": {
-                    "entryCount": len(journal_entries),
+                    "entryCount": owner.journal.entry_count,
                     "manifestSnapshot": owner.harness._last_manifest,
                     "recentEntries": journal_entries[-20:],
                 },

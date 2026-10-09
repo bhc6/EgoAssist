@@ -116,6 +116,7 @@ function showLogin() {
   $("#proactiveSuggestions").checked = false;
   $("#insightResults").replaceChildren();
   $("#actualPromptRequests").replaceChildren();
+  if (typeof modelAuditView !== "undefined") modelAuditView.reset();
   promptAuditRows.clear(); promptAuditSession = null; promptAuditCursor = null;
   $("#memoryRecoveryJobs").replaceChildren();
   $("#modelConfiguration").textContent = "";
@@ -1737,6 +1738,7 @@ async function syncInsightSession() {
   $("#insightResultTitle").textContent = "尚未选择报告";
   $("#insightStatus").textContent = "";
   $("#actualPromptRequests").replaceChildren();
+  if (typeof modelAuditView !== "undefined") modelAuditView.reset();
   const local = new Date(Date.now() - new Date().getTimezoneOffset() * 60000);
   $("#insightDate").value = local.toISOString().slice(0, 10);
   try {
