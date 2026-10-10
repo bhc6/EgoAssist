@@ -7,6 +7,7 @@ from aiohttp.test_utils import TestClient, TestServer
 from egoassist.realtime.interaction import InteractionState
 from egoassist.realtime.work_ledger import CaseWorkLedger
 from test_ambient_console import ambient_app, register_client
+from tests.support import run_node
 
 
 def test_resume_speech_endpoint_is_scoped_guarded_and_durable(tmp_path, monkeypatch):
@@ -54,7 +55,7 @@ console.log(JSON.stringify([
   speechPermissionText({quiet:false,paused:true}),
   observationPermissionText({reason:'stale-frame'}, {quiet:true}),
 ]));'''
-    result = subprocess.run(['node', '-e', script], capture_output=True, encoding='utf8', check=True)
+    result = run_node(script, via_stdin=False)
     values = json.loads(result.stdout)
     assert '上个厕所。' in values[0] and '未设置到期' in values[0]
     assert '当时' in values[1] and '已解除' in values[1] and '不会自动补播' in values[1]

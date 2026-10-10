@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import re
@@ -38,13 +39,16 @@ class _ClosingConnection:
             self._connection.close()
 
 
-TIMELINE_SCHEMA_VERSION = 3
+TIMELINE_SCHEMA_VERSION = 4
 MEMORY_KINDS = {
     "fact", "event", "state", "preference", "task-preference",
     "scene", "observation", "tool-effect", "capture", "legacy",
 }
 RETRIEVABLE_KINDS = MEMORY_KINDS - {"capture"}
-DEFAULT_RETRIEVABLE_KINDS = RETRIEVABLE_KINDS - {"legacy", "scene"}
+# Scene cards were written by the realtime visual gate but excluded here, so
+# they were write-only: visible in the UI list, never recalled. They are now
+# ordinary evidence. Legacy rows stay out of default recall.
+DEFAULT_RETRIEVABLE_KINDS = RETRIEVABLE_KINDS - {"legacy"}
 # Minimum lexical score for a candidate to be selected. Calibrated for the
 # CLEAN pure-lexical P2 baseline: the score IS the raw lexical similarity
 # (Jaccard ∪ BM25 in [0, 1]), with NO structured/recency bias inflating it.
@@ -62,6 +66,7 @@ MEMORY_TIERS = {"short", "long"}
 
 _LATIN = re.compile(r"[a-z0-9]+", re.I)
 _CJK = re.compile(r"[\u4e00-\u9fff\u3400-\u4dbf\u3040-\u309f\u30a0-\u30ff\uac00-\ud7a3]")
+_CJK_RUN = re.compile(r"[\u4e00-\u9fff\u3400-\u4dbf\u3040-\u309f\u30a0-\u30ff\uac00-\ud7a3]+")
 _QUESTION_PREFIXES = (
     "who", "what", "where", "when", "why", "how", "which", "can you", "do you",
     "谁", "什么", "哪里", "哪儿", "何时", "什么时候", "为什么", "怎么", "如何",
@@ -113,8 +118,32 @@ class ScoringWeights:
     # Minimum score for a candidate to be included in ``selected``
     min_score: float = DEFAULT_RETRIEVAL_MIN_SCORE
 
+    # Optional dense channel (only active when an embedder is configured).
+    # Cosine below ``semantic_min_cosine`` is no evidence; above it the score
+    # rises linearly to ``semantic_weight`` at cosine 1. The final score is
+    # max(lexical, semantic), so the dense channel can rescue a paraphrase but
+    # never lowers an exact lexical match.
+    semantic_min_cosine: float = 0.5
+    semantic_weight: float = 0.6
+
 
 _DEFAULT_WEIGHTS: ScoringWeights = ScoringWeights()
+
+
+# Reference handling is a policy, not a constant. An unresolved deictic is
+# still weaker evidence than a source-scoped statement, but treating it as
+# permanently unretrievable removes whole runs of real transcript from recall
+# (an egocentric corpus is mostly pronouns). The default keeps the historical
+# strict behaviour; runs opt in explicitly.
+_UNRESOLVED_REFERENCE_PENALTY = 0.25
+
+
+def reference_policy() -> str:
+    from egoassist.core.settings import DEFAULT_REFERENCE_POLICY, reference_policy as _policy
+    try:
+        return _policy()
+    except ValueError:
+        return DEFAULT_REFERENCE_POLICY
 
 
 def utc_now() -> datetime:
@@ -171,16 +200,44 @@ def _subject_identity(value: str | None) -> str | None:
     return re.sub(r"^(?:我的|my\s+)", "", normalized).strip() or normalized
 
 
-def memory_key_for(subject: str | None, predicate: str | None) -> str | None:
-    """Generate entity-qualified keys at the trusted storage boundary."""
+_PREDICATE_ALIASES = {
+    "location": "location", "located_at": "location", "object.location": "location",
+    "位置": "location", "地点": "location", "放在": "location", "所在": "location", "在哪": "location",
+    "phone": "phone", "telephone": "phone", "contact.phone": "phone",
+    "电话": "phone", "电话号码": "phone", "手机": "phone", "手机号": "phone", "手机号码": "phone",
+}
+# Only explicit possessives: a bare 我家 would turn 我家里的空调 into 里的空调.
+_ENTITY_PREFIX = re.compile(r"^(?:我的|我家的|my\s+)")
 
-    entity = normalize_identity(subject)
+
+def _canonical_entity(value: str | None) -> str | None:
+    """Canonical owner-neutral entity for keys: 我的钥匙 / 钥匙 / my 钥匙 -> 钥匙.
+
+    Named owners are kept (小李的钥匙 stays distinct). Only the account owner's
+    first-person possessive is dropped, mirroring ``_subject_identity``.
+    """
+    entity = normalize_identity(value)
+    if not entity:
+        return None
+    return _ENTITY_PREFIX.sub("", entity).strip() or entity
+
+
+def memory_key_for(subject: str | None, predicate: str | None) -> str | None:
+    """Generate entity-qualified keys at the trusted storage boundary.
+
+    Both sides are canonicalised so that equivalent phrasings of the same claim
+    share one key and therefore supersede each other: 我的钥匙/钥匙 with
+    位置/location/地点 all map to ``location:钥匙``.
+    """
+
+    entity = _canonical_entity(subject)
     relation = normalize_identity(predicate)
     if not entity or not relation:
         return None
-    if relation in {"phone", "telephone", "contact.phone"}:
+    relation = _PREDICATE_ALIASES.get(relation, relation)
+    if relation == "phone":
         return f"contact:{entity}:phone"
-    if relation in {"location", "located_at", "object.location"}:
+    if relation == "location":
         return f"location:{entity}"
     return f"{relation}:{entity}"
 
@@ -209,14 +266,46 @@ def looks_like_question(text: str, hints: LanguageHints | None = None) -> bool:
 
 
 def memory_terms(text: str) -> set[str]:
+    """Latin words plus CJK bigrams/trigrams, computed per contiguous CJK run.
+
+    Runs are split at punctuation, digits and Latin text. Joining every CJK
+    character first manufactured n-grams across sentence boundaries
+    ("门口。小李" -> "口小"), which only matched by accident.
+    """
     normalized = normalize_text(text)
     terms = set(_LATIN.findall(normalized))
-    cjk = "".join(_CJK.findall(normalized))
-    if len(cjk) == 1:
-        terms.add(cjk)
-    terms.update(cjk[index:index + 2] for index in range(max(0, len(cjk) - 1)))
-    terms.update(cjk[index:index + 3] for index in range(max(0, len(cjk) - 2)))
+    runs = _CJK_RUN.findall(normalized)
+    if len(runs) == 1 and len(runs[0]) == 1:
+        # A lone character is the only CJK evidence; keep the historical rule.
+        terms.add(runs[0])
+    for run in runs:
+        terms.update(run[index:index + 2] for index in range(max(0, len(run) - 1)))
+        terms.update(run[index:index + 3] for index in range(max(0, len(run) - 2)))
     return {item for item in terms if item}
+
+
+# Question scaffolding carries no evidence. Left in the query it inflates the
+# Jaccard union (diluting real matches below the 0.05 floor) and creates
+# accidental overlaps with any card that also asks something.
+QUERY_STOP_TERMS = frozenset({
+    "什么", "哪里", "哪儿", "哪个", "哪些", "多少", "怎么", "怎样", "为什", "为什么", "什么时",
+    "么时", "时候", "么时候", "是不", "不是", "有没", "没有", "有没有", "是什", "是什么", "么样",
+    "什么样", "了吗", "的是", "是多", "是多少", "在哪", "在哪里", "放哪", "去哪", "了什", "了什么",
+    "记得", "我记", "你记", "请问", "一下", "知道", "告诉", "告诉我",
+    "what", "where", "when", "which", "who", "how", "why", "did", "does", "do", "is", "are",
+    "was", "were", "the", "a", "an", "i", "my", "me", "you",
+})
+
+
+def query_terms_for(text: str) -> set[str]:
+    terms = memory_terms(text)
+    content = {term for term in terms if term not in QUERY_STOP_TERMS}
+    return content or terms
+
+
+def search_terms_text(text: str) -> str:
+    """Space-joined term index stored per card for the unicode61 FTS channel."""
+    return " ".join(sorted(memory_terms(text)))
 
 
 class TimelineMemory:
@@ -229,6 +318,8 @@ class TimelineMemory:
         current_window_seconds: float = 600.0,
         short_term_capacity: int = 40,
         event_sink: Callable[..., Any] | None = None,
+        embedder: Any | None = None,
+        embed_on_write: bool = True,
     ) -> None:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -241,6 +332,16 @@ class TimelineMemory:
             raise ValueError("invalid timeline memory bounds")
         self._event_sink = event_sink
         self._lock = threading.RLock()
+        if embedder is None:
+            from .semantic import embedder_from_env
+            embedder = embedder_from_env()
+        # Optional dense channel (see memory/semantic.py). None = lexical only.
+        self._embedder = embedder
+        # Bulk importers can defer per-card embedding and call index_vectors().
+        self.embed_on_write = bool(embed_on_write)
+        # Background embeddings started from inside an event loop; referenced
+        # here so they are not garbage-collected before they finish.
+        self._embedding_tasks: set[Any] = set()
         self._initialize()
 
     def _connect(self) -> sqlite3.Connection:
@@ -344,7 +445,7 @@ class TimelineMemory:
                 version = conn.execute(
                     "SELECT value FROM timeline_meta WHERE key='schema_version'"
                 ).fetchone()
-                if version and int(version["value"]) not in {1, 2, TIMELINE_SCHEMA_VERSION}:
+                if version and int(version["value"]) not in {1, 2, 3, TIMELINE_SCHEMA_VERSION}:
                     raise ValueError(f"unsupported timeline schema version: {version['value']}")
                 columns = {
                     str(row["name"])
@@ -369,17 +470,60 @@ class TimelineMemory:
                     "subject": "TEXT",
                     "predicate": "TEXT",
                     "value": "TEXT",
+                    "search_terms": "TEXT",
                 }
                 for column, declaration in migrations.items():
                     if column not in columns:
                         conn.execute(
                             f"ALTER TABLE memory_cards ADD COLUMN {column} {declaration}"
                         )
-                # v2 → v3: drop the write-only embedding columns.  Retrieval scores
-                # purely via FTS5 + Jaccard; the encoder vector was never read back.
-                for column in ("embedding", "embedding_dim"):
-                    if column in columns:
-                        conn.execute(f"ALTER TABLE memory_cards DROP COLUMN {column}")
+                # v3 → v4: per-card term index (CJK bigrams/trigrams + Latin
+                # words) for the unicode61 FTS channel, and canonical keys so
+                # equivalent phrasings of one claim supersede each other.
+                stale = conn.execute(
+                    "SELECT id, text, subject, predicate, memory_key FROM memory_cards WHERE search_terms IS NULL"
+                ).fetchall()
+                rekeyed: set[str] = set()
+                for row in stale:
+                    key = row["memory_key"]
+                    if key and row["subject"] and row["predicate"]:
+                        canonical = memory_key_for(row["subject"], row["predicate"]) or key
+                        if canonical != key:
+                            rekeyed.add(canonical)
+                        key = canonical
+                    conn.execute("UPDATE memory_cards SET search_terms=?, memory_key=? WHERE id=?",
+                                 (search_terms_text(row["text"]), key, row["id"]))
+                # Canonicalising can merge two keys that each had an active
+                # claim (位置:我的钥匙 and location:钥匙). One key may only own
+                # one current claim, so keep the newest and supersede the rest,
+                # exactly as a fresh write under that key would have.
+                for key in rekeyed:
+                    groups = conn.execute(
+                        """SELECT user_id, scope, COALESCE(case_id, '') AS case_key FROM memory_cards
+                           WHERE memory_key=? AND status='active'
+                             AND kind NOT IN ('event', 'scene', 'observation')
+                           GROUP BY user_id, scope, case_key HAVING COUNT(*) > 1""",
+                        (key,),
+                    ).fetchall()
+                    for group in groups:
+                        rows = conn.execute(
+                            """SELECT id FROM memory_cards
+                               WHERE memory_key=? AND status='active' AND user_id=? AND scope=?
+                                 AND COALESCE(case_id, '')=?
+                                 AND kind NOT IN ('event', 'scene', 'observation')
+                               ORDER BY happened_at DESC, id DESC""",
+                            (key, group["user_id"], group["scope"], group["case_key"]),
+                        ).fetchall()
+                        newest = rows[0]["id"]
+                        for older in rows[1:]:
+                            conn.execute(
+                                "UPDATE memory_cards SET status='superseded', updated_at=? WHERE id=?",
+                                (_iso(None), older["id"]),
+                            )
+                        conn.execute(
+                            "UPDATE memory_cards SET supersedes=COALESCE(supersedes, ?) WHERE id=?",
+                            (rows[1]["id"], newest),
+                        )
                 conn.execute(
                     """UPDATE memory_cards
                        SET recorded_at=COALESCE(recorded_at, created_at),
@@ -428,16 +572,59 @@ class TimelineMemory:
                         END;
                     """)
                     # Populate FTS5 from existing rows (first-time or post-migration).
-                    fts_count = conn.execute(
-                        "SELECT count(*) FROM memory_fts"
-                    ).fetchone()[0]
-                    row_count = conn.execute(
-                        "SELECT count(*) FROM memory_cards"
-                    ).fetchone()[0]
-                    if fts_count < row_count:
+                    # count(*) on an external-content FTS table reads the content
+                    # table, so comparing counts never detected a missing index.
+                    # A meta marker records that a rebuild actually happened.
+                    built = conn.execute(
+                        "SELECT value FROM timeline_meta WHERE key='trigram_fts_built'"
+                    ).fetchone()
+                    if built is None:
                         conn.execute("INSERT INTO memory_fts(memory_fts) VALUES('rebuild')")
+                        conn.execute("INSERT OR REPLACE INTO timeline_meta(key, value) VALUES('trigram_fts_built', '1')")
                 except Exception:
                     pass  # FTS5 not compiled in this SQLite build; non-fatal
+                # Term channel: unicode61 over the precomputed n-gram index. The
+                # trigram tokenizer cannot match terms shorter than three
+                # characters, which excluded every two-character Chinese word
+                # (钥匙, 电话, 冰箱) from BM25 entirely.
+                try:
+                    conn.executescript("""
+                    CREATE VIRTUAL TABLE IF NOT EXISTS memory_terms_fts USING fts5(
+                        search_terms,
+                        content=memory_cards,
+                        tokenize='unicode61 remove_diacritics 0'
+                    );
+                    CREATE TRIGGER IF NOT EXISTS memory_cards_terms_insert
+                        AFTER INSERT ON memory_cards BEGIN
+                            INSERT INTO memory_terms_fts(rowid, search_terms)
+                            VALUES (new.rowid, COALESCE(new.search_terms, ''));
+                        END;
+                    CREATE TRIGGER IF NOT EXISTS memory_cards_terms_update_before
+                        BEFORE UPDATE ON memory_cards BEGIN
+                            INSERT INTO memory_terms_fts(memory_terms_fts, rowid, search_terms)
+                            VALUES ('delete', old.rowid, COALESCE(old.search_terms, ''));
+                        END;
+                    CREATE TRIGGER IF NOT EXISTS memory_cards_terms_update_after
+                        AFTER UPDATE ON memory_cards BEGIN
+                            INSERT INTO memory_terms_fts(rowid, search_terms)
+                            VALUES (new.rowid, COALESCE(new.search_terms, ''));
+                        END;
+                    CREATE TRIGGER IF NOT EXISTS memory_cards_terms_delete
+                        BEFORE DELETE ON memory_cards BEGIN
+                            INSERT INTO memory_terms_fts(memory_terms_fts, rowid, search_terms)
+                            VALUES ('delete', old.rowid, COALESCE(old.search_terms, ''));
+                        END;
+                    """)
+                    built = conn.execute(
+                        "SELECT value FROM timeline_meta WHERE key='terms_fts_built'"
+                    ).fetchone()
+                    if built is None:
+                        conn.execute("INSERT INTO memory_terms_fts(memory_terms_fts) VALUES('rebuild')")
+                        conn.execute("INSERT OR REPLACE INTO timeline_meta(key, value) VALUES('terms_fts_built', '1')")
+                except Exception:
+                    pass  # FTS5 unavailable; Jaccard over the same terms still ranks
+                from .semantic import VECTOR_SCHEMA
+                conn.executescript(VECTOR_SCHEMA)
         finally:
             conn.close()
 
@@ -502,9 +689,16 @@ class TimelineMemory:
         if generated_key:
             memory_key = generated_key
         if contract["referenceStatus"] == "needs-clarification":
+            # Under every policy an unresolved reference cannot own a canonical
+            # key: its subject may be a bare pronoun, so a key such as
+            # "location:它" would let unrelated cards supersede each other.
             memory_key = None
             supersede = False
-            if kind in {"fact", "state", "preference"} and status == "active":
+            # Only strict also withholds the card as pending. Under demote/off
+            # retrieval decides how much an unresolved reference weighs; the
+            # write path must not quietly park it where no query reaches it.
+            if (reference_policy() == "strict" and kind in {"fact", "state", "preference"}
+                    and status == "active"):
                 status = "pending"
         recurrence_json = json.dumps(recurrence, ensure_ascii=False, sort_keys=True) if recurrence else "null"
         normalized = normalize_text(text)
@@ -574,9 +768,13 @@ class TimelineMemory:
                        AND (normalized_text=? OR text=?)""",
                     (user_id, scope, case_id, previous["normalized_text"], old_source_text),
                 ).fetchall()
+                retired_ids = [supersedes_id]
                 for sibling in siblings:
                     if set(json.loads(sibling["source_ids"])) & set(old_card["sourceIds"]):
                         connection.execute("UPDATE memory_cards SET status='superseded', updated_at=? WHERE id=?", (now, sibling["id"]))
+                        retired_ids.append(str(sibling["id"]))
+                # A corrected event must not survive inside a digest either.
+                self._retire_digests(connection, user_id, retired_ids)
             if (not replaces_card_id and supersede and memory_key and status == "active"
                     and kind not in {"event", "scene", "observation"} and effective_stop is None
                     and (effective is None or effective <= now)
@@ -612,8 +810,8 @@ class TimelineMemory:
                     memory_key, happened_at, day_key,
                     source_ids, status, importance, supersedes, metadata, created_at, updated_at,
                     recorded_at, effective_at, effective_end, timezone_name, utc_offset_minutes, recurrence,
-                    subject, predicate, value
-                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    subject, predicate, value, search_terms
+                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     card_id, user_id, case_id, scope, tier, kind, text, normalized,
                     memory_key, happened, _day_key(happened, timezone_name, utc_offset_minutes),
@@ -623,12 +821,116 @@ class TimelineMemory:
                     now, effective, effective_stop, str(timezone_name or "UTC"),
                     int(utc_offset_minutes), recurrence_json,
                     normalized_subject, normalized_predicate, None if value is None else str(value),
+                    search_terms_text(text),
                 ),
             )
             row = connection.execute("SELECT * FROM memory_cards WHERE id=?", (card_id,)).fetchone()
         card = self._row_to_card(row)
+        if self._embedder is not None and self.embed_on_write:
+            self._embed_after_write(card["id"])
         self._emit("timeline.memory.written", {"card": card})
         return card
+
+    def _embed_after_write(self, card_id: str) -> None:
+        """Embed a newly written card without stalling an event loop.
+
+        An embedder may be a network call (seconds, up to its timeout). Called
+        from a coroutine, that would freeze every connection on the loop, so
+        the work is handed to a worker thread there. Called from plain
+        synchronous code (scripts, tests, worker threads) it runs inline, which
+        keeps "write then retrieve" immediately consistent.
+        """
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            self.index_vectors(card_ids=[card_id])
+            return
+        future = loop.run_in_executor(None, lambda: self.index_vectors(card_ids=[card_id]))
+        self._embedding_tasks.add(future)
+        future.add_done_callback(self._embedding_tasks.discard)
+
+    def index_vectors(self, *, card_ids: Iterable[str] | None = None, batch_size: int = 64) -> int:
+        """Embed cards that have no vector for the current embedder model.
+
+        Failures are reported as an event, never raised: the lexical path must
+        keep working when an embedding provider is down.
+        """
+        if self._embedder is None:
+            return 0
+        from .semantic import encode
+        model = str(getattr(self._embedder, "name", "embedder"))
+        clauses = ["(v.card_id IS NULL OR v.model<>?)"]
+        values: list[Any] = [model]
+        if card_ids is not None:
+            ids = list(dict.fromkeys(str(c) for c in card_ids))
+            if not ids:
+                return 0
+            clauses.append("mc.id IN (" + ",".join("?" for _ in ids) + ")")
+            values.extend(ids)
+        with self._lock, self._connect() as connection:
+            pending = connection.execute(
+                "SELECT mc.id, mc.text FROM memory_cards mc LEFT JOIN memory_vectors v ON v.card_id=mc.id WHERE "
+                + " AND ".join(clauses), values).fetchall()
+        written = 0
+        for start in range(0, len(pending), max(1, int(batch_size))):
+            batch = pending[start:start + batch_size]
+            try:
+                vectors = self._embedder([row["text"] for row in batch], role="document")
+            except Exception as exc:
+                self._emit("timeline.memory.embedding_failed", {"error": type(exc).__name__ + ": " + str(exc)[:200],
+                                                                "cards": len(batch)})
+                return written
+            with self._lock, self._connect() as connection:
+                for row, vector in zip(batch, vectors):
+                    connection.execute(
+                        "INSERT OR REPLACE INTO memory_vectors(card_id, model, dim, vector) VALUES(?, ?, ?, ?)",
+                        (row["id"], model, int(len(vector)), encode(vector)))
+            written += len(batch)
+        return written
+
+    def _embed_query(self, query_text):
+        """Embed the query, or return None when the dense channel must sit out.
+
+        Runs BEFORE the timeline lock is taken: an embedder can be a network
+        call, and holding the lock across it would stall every other memory
+        read and write. On an event loop thread the call would also freeze all
+        connections, so there the dense channel is skipped and retrieval stays
+        lexical; the server's read path already runs retrieval in a worker
+        thread (EvidenceService.run_read), where it is used normally.
+        """
+        if self._embedder is None or not str(query_text).strip():
+            return None
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            pass
+        else:
+            return None
+        try:
+            return self._embedder([str(query_text)], role="query")[0]
+        except Exception as exc:
+            self._emit("timeline.memory.embedding_failed", {"error": type(exc).__name__ + ": " + str(exc)[:200],
+                                                            "cards": 0, "query": True})
+            return None
+
+    def _semantic_candidates(self, connection, query_vector, clauses, values, limit):
+        """Return ({card_id: cosine}, nominated_ids) over the scoped corpus."""
+        if query_vector is None:
+            return {}, []
+        from .semantic import decode, top_k
+        model = str(getattr(self._embedder, "name", "embedder"))
+        scoped = " AND ".join("mc." + clause if clause != "0" else clause for clause in clauses)
+        rows = connection.execute(
+            "SELECT v.card_id, v.dim, v.vector FROM memory_vectors v CROSS JOIN memory_cards mc ON mc.id=v.card_id "
+            "WHERE v.model=? AND " + scoped, [model, *values]).fetchall()
+        if not rows:
+            return {}, []
+        import numpy as np
+        ids = [str(row["card_id"]) for row in rows]
+        matrix = np.stack([decode(row["vector"], int(row["dim"])) for row in rows])
+        ranked = top_k(query_vector, ids, matrix, len(ids))
+        scores = dict(ranked)
+        return scores, [card_id for card_id, _ in ranked[:limit]]
 
     def begin_draft(
         self,
@@ -818,7 +1120,39 @@ class TimelineMemory:
             if not changed.rowcount:
                 raise ValueError("memory card not found")
             row = connection.execute("SELECT * FROM memory_cards WHERE id=?", (str(card_id),)).fetchone()
+            if status in {"deleted", "superseded"}:
+                self._retire_digests(connection, str(row["user_id"]), [str(card_id)])
         return self._row_to_card(row)
+
+    @staticmethod
+    def _retire_digests(connection, user_id: str, child_ids: Iterable[str]) -> list[str]:
+        """Delete active digests that quote any of ``child_ids``.
+
+        A digest copies its children's text. When a child is deleted or
+        superseded, a digest that still quotes it would keep the retired text
+        recallable, so the digest is retired with it. ``build_digests`` can
+        rebuild a digest from the children that remain active.
+        """
+        children = {str(child) for child in child_ids}
+        if not children:
+            return []
+        rows = connection.execute(
+            """SELECT id, metadata FROM memory_cards
+               WHERE user_id=? AND status='active' AND kind='event'
+                 AND metadata LIKE '%consolidation-digest%'""",
+            (str(user_id),),
+        ).fetchall()
+        retired = []
+        for row in rows:
+            metadata = json.loads(row["metadata"] or "{}")
+            if (metadata.get("producer") == "consolidation-digest"
+                    and children & set(metadata.get("childCardIds", []))):
+                connection.execute(
+                    "UPDATE memory_cards SET status='deleted', updated_at=? WHERE id=?",
+                    (_iso(None), row["id"]),
+                )
+                retired.append(str(row["id"]))
+        return retired
 
     def activate_pending(self, card_id: str) -> dict[str, Any]:
         now = _iso(None)
@@ -852,6 +1186,87 @@ class TimelineMemory:
         card = self._row_to_card(activated)
         self._emit("timeline.memory.confirmed", {"card": card})
         return card
+
+    # Pending claims are inferred-consent (or, under the strict reference
+    # policy, unresolved-reference) fact/event/state cards. Preferences have
+    # their own confirmation flow in PreferenceMemory; captures are drafts.
+    # Before this path existed nothing could ever activate these cards, so a
+    # pending claim was silently unrecallable for the lifetime of the store.
+    PENDING_CLAIM_KINDS = ("fact", "event", "state")
+
+    def pending_claims(
+        self, *, user_id: str, case_id: str | None, scope: str, limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        return self.cards(
+            user_id=user_id, case_id=case_id if scope == "case" else None, scope=scope,
+            kinds=self.PENDING_CLAIM_KINDS, statuses=("pending",), limit=limit,
+        )
+
+    def resolve_pending(self, card_id: str, *, user_id: str, accepted: bool) -> dict[str, Any]:
+        """Confirm (activate) or reject (soft-delete) one pending claim.
+
+        Ownership and kind are checked before any state change, so a caller can
+        neither confirm another user's card nor use this path to bypass the
+        preference confirmation flow. Check and change happen under one lock
+        and one conditional UPDATE, so a concurrent resolve cannot slip between.
+        """
+        with self._lock:
+            with self._connect() as connection:
+                row = connection.execute(
+                    "SELECT user_id, kind, status FROM memory_cards WHERE id=?", (str(card_id),),
+                ).fetchone()
+            if row is None or str(row["user_id"]) != str(user_id):
+                raise ValueError("memory card not found")
+            if row["kind"] not in self.PENDING_CLAIM_KINDS:
+                raise ValueError("memory card is not a pending claim")
+            if row["status"] != "pending":
+                raise ValueError("memory card is not pending")
+            if accepted:
+                return self.activate_pending(str(card_id))
+            with self._connect() as connection:
+                changed = connection.execute(
+                    "UPDATE memory_cards SET status='deleted', updated_at=? "
+                    "WHERE id=? AND user_id=? AND status='pending'",
+                    (_iso(None), str(card_id), str(user_id)),
+                )
+                if not changed.rowcount:
+                    raise ValueError("memory card is not pending")
+                updated = connection.execute(
+                    "SELECT * FROM memory_cards WHERE id=?", (str(card_id),)).fetchone()
+        card = self._row_to_card(updated)
+        self._emit("timeline.memory.rejected", {"card": card})
+        return card
+
+    def close_open_interval(
+        self, *, user_id: str, case_id: str | None, scope: str, kind: str,
+        end: datetime | str, exclude_id: str | None = None,
+    ) -> str | None:
+        """Give the latest open-ended card of ``kind`` an end time.
+
+        Observations are written only when the visible evidence changes, so an
+        observation stays true until the next one. Closing the previous card at
+        the new card's start turns a stream of points into intervals, which is
+        what "how long" / "when did it stop" questions need. Only measured-time
+        cards are closed; a card never gets an end before its own start.
+        """
+        end_iso = _iso(end)
+        with self._lock, self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                """SELECT id, effective_at, metadata FROM memory_cards
+                   WHERE user_id=? AND scope=? AND COALESCE(case_id, '')=COALESCE(?, '')
+                     AND kind=? AND status='active' AND effective_end IS NULL
+                     AND effective_at IS NOT NULL AND effective_at < ? AND id<>?
+                   ORDER BY effective_at DESC LIMIT 1""",
+                (str(user_id), scope, case_id, kind, end_iso, str(exclude_id or "")),
+            ).fetchone()
+            if row is None or json.loads(row["metadata"] or "{}").get("timeBasis") not in {"measured", "source-media"}:
+                return None
+            connection.execute(
+                "UPDATE memory_cards SET effective_end=?, updated_at=? WHERE id=?",
+                (end_iso, _iso(None), row["id"]),
+            )
+        return str(row["id"])
 
     def delete(self, card_id: str) -> dict[str, Any]:
         return self.update_status(card_id, "deleted")
@@ -992,6 +1407,7 @@ class TimelineMemory:
         if scope not in MEMORY_SCOPES:
             raise ValueError("invalid memory scope")
         started = time.perf_counter()
+        policy = reference_policy()
         clock = clock or ClockContext.current(now_utc=now or utc_now())
         now = clock.now_utc
         query_spec = dict(query_spec or {})
@@ -1009,7 +1425,9 @@ class TimelineMemory:
         ):
             temporal_status = "needs-clarification"
         query_normalized = normalize_text(query)
-        query_terms = self._tokenize(query if ranking_query is None else ranking_query)
+        ranking_text = query if ranking_query is None else ranking_query
+        query_terms = (query_terms_for(ranking_text) if self._tokenize is memory_terms
+                       else self._tokenize(ranking_text))
         requested_kinds = set(DEFAULT_RETRIEVABLE_KINDS if kinds is None else kinds)
         requested_kinds.discard("capture")
         clauses = ["user_id=?", "scope=?", "status='active'"]
@@ -1032,7 +1450,10 @@ class TimelineMemory:
             clauses.append("id IN (" + ",".join("?" for _ in nominated) + ")" if nominated else "0")
             values.extend(nominated)
         where = " AND ".join(clauses)
+        query_vector = self._embed_query(ranking_text)  # network call: before the lock
         with self._lock, self._connect() as connection:
+            semantic_scores, semantic_ids = self._semantic_candidates(
+                connection, query_vector, clauses, values, max(8, candidate_limit // 4))
             total_candidates = connection.execute("SELECT COUNT(*) FROM memory_cards WHERE " + where, values).fetchone()[0]
             if total_candidates <= candidate_limit:
                 rows = connection.execute("SELECT * FROM memory_cards WHERE " + where, values).fetchall()
@@ -1044,15 +1465,24 @@ class TimelineMemory:
                             " AND memory_key=? ORDER BY happened_at DESC LIMIT 1", [*values, fast_key]):
                         candidates_by_id[row["id"]] = row
                 if query_terms:
-                    try:
-                        match = " OR ".join('"' + term.replace('"', '""') + '"' for term in query_terms)
-                        scoped = " AND ".join("mc." + clause if clause != "0" else clause for clause in clauses)
-                        for row in connection.execute("SELECT mc.* FROM memory_fts CROSS JOIN memory_cards mc ON mc.rowid=memory_fts.rowid "
-                                "WHERE memory_fts MATCH ? AND " + scoped + " ORDER BY bm25(memory_fts) LIMIT ?",
-                                [match, *values, candidate_limit * 3 // 4]):
+                    match = " OR ".join('"' + term.replace('"', '""') + '"' for term in query_terms)
+                    scoped = " AND ".join("mc." + clause if clause != "0" else clause for clause in clauses)
+                    # Both channels nominate; the term channel is the one that
+                    # can see two-character Chinese words.
+                    for table in ("memory_terms_fts", "memory_fts"):
+                        try:
+                            for row in connection.execute(
+                                    f"SELECT mc.* FROM {table} CROSS JOIN memory_cards mc ON mc.rowid={table}.rowid "
+                                    f"WHERE {table} MATCH ? AND " + scoped + f" ORDER BY bm25({table}) LIMIT ?",
+                                    [match, *values, candidate_limit * 3 // 8]):
+                                candidates_by_id[row["id"]] = row
+                        except sqlite3.OperationalError:
+                            pass
+                    if semantic_ids:
+                        for row in connection.execute(
+                                "SELECT * FROM memory_cards WHERE " + where + " AND id IN (" +
+                                ",".join("?" for _ in semantic_ids) + ")", [*values, *semantic_ids]):
                             candidates_by_id[row["id"]] = row
-                    except sqlite3.OperationalError:
-                        pass
                 start, end = query_time_range(query, clock)
                 if start is not None:
                     for row in connection.execute("SELECT * FROM memory_cards WHERE " + where +
@@ -1087,28 +1517,30 @@ class TimelineMemory:
         # Batch FTS5 scoring for all candidates
         fts_scores: dict[str, float] = {}
         if query_terms and rows:
-            try:
-                fts_query_str = " OR ".join(f'"{term}"' for term in query_terms)
-                scoped_clauses = ["mc." + clause if clause != "0" else clause for clause in clauses]
-                with self._lock, self._connect() as fts_conn:
-                    # bm25() must reference the FTS5 table by its real name, not a
-                    # SQL alias — `bm25(mf)` raises "no such column: mf".
-                    # CROSS JOIN keeps FTS as the driving table; allowing SQLite
-                    # to drive this join from scoped cards repeats MATCH work.
-                    fts_rows = fts_conn.execute(
-                        f"""SELECT mc.id, bm25(memory_fts) as score
-                            FROM memory_fts
-                            CROSS JOIN memory_cards mc ON mc.rowid = memory_fts.rowid
-                            WHERE memory_fts MATCH ?
-                              AND {" AND ".join(scoped_clauses)}
-                            ORDER BY bm25(memory_fts) LIMIT ?""",
-                        [fts_query_str] + values + [candidate_limit],
-                    ).fetchall()
+            fts_query_str = " OR ".join('"' + term.replace('"', '""') + '"' for term in query_terms)
+            scoped_clauses = ["mc." + clause if clause != "0" else clause for clause in clauses]
+            for table in ("memory_fts", "memory_terms_fts"):
+                try:
+                    with self._lock, self._connect() as fts_conn:
+                        # bm25() must reference the FTS5 table by its real name, not a
+                        # SQL alias — `bm25(mf)` raises "no such column: mf".
+                        # CROSS JOIN keeps FTS as the driving table; allowing SQLite
+                        # to drive this join from scoped cards repeats MATCH work.
+                        fts_rows = fts_conn.execute(
+                            f"""SELECT mc.id, bm25({table}) as score
+                                FROM {table}
+                                CROSS JOIN memory_cards mc ON mc.rowid = {table}.rowid
+                                WHERE {table} MATCH ?
+                                  AND {" AND ".join(scoped_clauses)}
+                                ORDER BY bm25({table}) LIMIT ?""",
+                            [fts_query_str] + values + [candidate_limit],
+                        ).fetchall()
                     for fts_row in fts_rows:
                         # bm25() returns negative scores; more negative = better
-                        fts_scores[fts_row[0]] = min(1.0, max(0.0, -float(fts_row[1]) / self._weights.fts_normalization_divisor))
-            except Exception:
-                pass  # FTS5 not available or query error; fall back to Jaccard
+                        normalized_bm25 = min(1.0, max(0.0, -float(fts_row[1]) / self._weights.fts_normalization_divisor))
+                        fts_scores[fts_row[0]] = max(fts_scores.get(fts_row[0], 0.0), normalized_bm25)
+                except Exception:
+                    pass  # FTS5 not available or query error; fall back to Jaccard
 
         candidates = []
         for row in rows:
@@ -1155,7 +1587,8 @@ class TimelineMemory:
                 time_eligible = False
             if (range_start is not None or query_times) and card["grounding"]["recurrence"]:
                 time_eligible = False
-            reference_eligible = card["grounding"]["referenceStatus"] != "needs-clarification"
+            source_scoped = card["grounding"]["referenceStatus"] != "needs-clarification"
+            reference_eligible = source_scoped or policy != "strict"
             card_entities = {normalize_identity(item) for item in evidence.get("entities", [])}
             entity_eligible = all(item in card_entities or item in normalize_identity(card["text"])
                                   for item in query_entities)
@@ -1204,9 +1637,25 @@ class TimelineMemory:
             # dense-vector retrieval. Subject/predicate/time remain as HARD
             # eligibility filters below (query constraints, not score priors).
             score = max(0.0, lexical)
+            cosine = semantic_scores.get(card["id"])
+            semantic_match = False
+            if cosine is not None and cosine >= self._weights.semantic_min_cosine and (
+                time_eligible and subject_eligible and predicate_eligible and entity_eligible and scene_eligible
+            ):
+                floor = self._weights.semantic_min_cosine
+                semantic = self._weights.semantic_weight * (cosine - floor) / max(1e-6, 1.0 - floor)
+                semantic_match = True
+                score = max(score, semantic)
+            # Demotion must move the score that selection actually reads, not
+            # only the audit copy. A bounded multiplicative penalty keeps every
+            # unresolved-reference card below otherwise equal source-scoped
+            # evidence, and above zero so it can still be selected when it is
+            # the only support recalled.
+            if policy == "demote" and not source_scoped:
+                score *= _UNRESOLVED_REFERENCE_PENALTY
             structured_match = bool(query_subject or query_predicate) and subject_eligible and predicate_eligible
             eligible = reference_eligible and time_eligible and subject_eligible and predicate_eligible and entity_eligible and scene_eligible and (
-                structured_match or overlap > 0
+                structured_match or overlap > 0 or semantic_match
             )
             # Pinned fast-path cards (direct key lookup) qualify on the strength of
             # their canonical structured key, bypassing the lexical-overlap floor —
@@ -1220,6 +1669,8 @@ class TimelineMemory:
             reasons = []
             if overlap:
                 reasons.append("term-overlap")
+            if semantic_match:
+                reasons.append("semantic-match")
             if query_subject and subject_eligible:
                 reasons.append("subject-match")
             if query_predicate and predicate_eligible:
@@ -1285,6 +1736,8 @@ class TimelineMemory:
                 "querySpec": {"subject": query_subject, "predicate": query_predicate},
                 "evidenceContext": query_context,
                 "temporalStatus": temporal_status,
+                "referencePolicy": policy,
+                "semanticChannel": getattr(self._embedder, "name", None) if self._embedder is not None else None,
             },
             "minimumScore": _min_score,
             "timing": {"retrievalMs": round((time.perf_counter() - started) * 1000, 3),
@@ -1296,7 +1749,8 @@ class TimelineMemory:
             **({"candidateAudit": candidates} if include_candidate_audit else {}),
             "selected": selected,
             "injection": {"status": "not-injected", "cardIds": []},
-            "scoreMeaning": "lexical-ranking-or-exact-key-priority",
+            "scoreMeaning": ("lexical-or-semantic-ranking-or-exact-key-priority" if self._embedder is not None
+                             else "lexical-ranking-or-exact-key-priority"),
             "calibratedProbability": None,
             "claimBoundary": "Source-grounded entity and time constraints precede lexical ranking. Unknown temporal roles remain unresolved. Scores are not truth probabilities.",
         }
@@ -1327,6 +1781,84 @@ class TimelineMemory:
                     created.append(source["id"])
         result = {"status": "consolidated", "shortCount": len(active_short), "created": created}
         self._emit("timeline.memory.consolidated", result)
+        return result
+
+    DIGEST_KINDS = ("event", "observation", "scene")
+
+    def build_digests(
+        self,
+        *,
+        user_id: str,
+        case_id: str | None,
+        scope: str,
+        gap_seconds: float = 1800.0,
+        max_span_seconds: float = 7200.0,
+        max_text_chars: int = 1200,
+    ) -> dict[str, Any]:
+        """Aggregate long-tier episodic cards into coarser digest cards.
+
+        ``promote_to_long`` only relabels a card's tier; it never produced a
+        coarser memory level. This builds one: contiguous long-tier event /
+        observation / scene cards (gaps <= ``gap_seconds``, span <=
+        ``max_span_seconds``) become one ``event`` digest whose interval is the
+        union of its children and whose sources are the union of theirs, so
+        source deletion still cascades. Children are kept (lossless) and each
+        child is digested at most once. The text is extractive, not generated.
+        """
+        cards = self.cards(user_id=user_id, case_id=case_id if scope == "case" else None,
+                           scope=scope, kinds=self.DIGEST_KINDS, statuses=("active",))
+        digested: set[str] = set()
+        for card in cards:
+            if card["metadata"].get("producer") == "consolidation-digest":
+                digested.update(card["metadata"].get("childCardIds", []))
+        pool = sorted(
+            (card for card in cards
+             if card["tier"] == "long" and card.get("effectiveAt") and card["id"] not in digested
+             and card["metadata"].get("producer") not in {"consolidation-digest", "long-events"}),
+            key=lambda card: (card["effectiveAt"], card["id"]),
+        )
+        groups: list[list[dict[str, Any]]] = []
+        for card in pool:
+            start = _parse_time(card["effectiveAt"])
+            if groups:
+                group = groups[-1]
+                group_start = _parse_time(group[0]["effectiveAt"])
+                group_end = max(_parse_time(c.get("effectiveEnd") or c["effectiveAt"]) for c in group)
+                if ((start - group_end).total_seconds() <= gap_seconds
+                        and (start - group_start).total_seconds() <= max_span_seconds):
+                    group.append(card)
+                    continue
+            groups.append([card])
+        created = []
+        for group in groups:
+            if len(group) < 2:
+                continue
+            start = min(_parse_time(c["effectiveAt"]) for c in group)
+            end = max(_parse_time(c.get("effectiveEnd") or c["effectiveAt"]) for c in group)
+            texts = list(dict.fromkeys(" ".join(c["text"].split()) for c in group))
+            text = "；".join(texts)
+            if len(text) > max_text_chars:
+                text = text[:max_text_chars - 1] + "…"
+            child_ids = [c["id"] for c in group]
+            card_id = "digest-" + hashlib.sha256(",".join(child_ids).encode("utf-8")).hexdigest()[:20]
+            card = self.remember(
+                text, user_id=user_id, case_id=case_id if scope == "case" else None, scope=scope,
+                kind="event", tier="long", happened_at=start, recorded_at=end,
+                effective_at=start, effective_end=end if end > start else None,
+                timezone_name=group[0].get("timezone") or "UTC",
+                utc_offset_minutes=int(group[0].get("utcOffsetMinutes") or 0),
+                source_ids=list(dict.fromkeys(s for c in group for s in c.get("sourceIds", []))),
+                importance=max(float(c.get("importance") or 0.5) for c in group),
+                supersede=False, card_id=card_id,
+                metadata={"producer": "consolidation-digest", "timeBasis": "measured",
+                          "childCardIds": child_ids, "childCount": len(group),
+                          "claim": "extractive-aggregate-of-child-cards"},
+            )
+            if card:
+                created.append(card["id"])
+        result = {"status": "digested" if created else "not-needed", "created": created,
+                  "groups": sum(len(g) >= 2 for g in groups)}
+        self._emit("timeline.memory.digested", result)
         return result
 
     def snapshot(self, *, user_id: str, case_id: str | None, scope: str) -> dict[str, Any]:

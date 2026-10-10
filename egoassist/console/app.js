@@ -1341,8 +1341,12 @@ async function connectRealtimeSession(generation, media, retryAttempt) {
     stopPlayback();
     const nextAttempt = ready ? 1 : retryAttempt + 1;
     // Intentional disconnects invalidate generation before closing the socket.
-    if ((restartAfterClose || !providerUnavailable) && nextAttempt <= 3 && currentUser) {
-      $("#duplexState").textContent = "连接中断，正在恢复 · " + nextAttempt + "/3";
+    // Server teardown of the previous socket can outlast a couple of retries
+    // (bridge close, tool confirmations), so allow a longer budget before
+    // giving up and surfacing a hard failure to the user.
+    const maxAttempts = 6;
+    if ((restartAfterClose || !providerUnavailable) && nextAttempt <= maxAttempts && currentUser) {
+      $("#duplexState").textContent = "连接中断，正在恢复 · " + nextAttempt + "/" + maxAttempts;
       setTimeout(() => {
         if (generation === connectionGeneration && connectionSessionId === selectedSessionId && currentUser) {
           connectRealtime({media: Boolean(stream), retryAttempt: nextAttempt}).catch(error => { $("#duplexState").textContent = error.message; });

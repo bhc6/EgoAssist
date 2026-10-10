@@ -26,7 +26,7 @@ sys.path.insert(0, str(ROOT))
 import requests
 import srt
 from egoassist._env import load_env
-from egoassist.memory import TimelineMemory
+from egoassist.memory import TimelineMemory, build_event_units, remember_event_unit
 from egoassist.eval.controlled_retrieval import Provider, JUDGE_PROMPT
 from backtest_realtime_modes import Trial
 from compare_realtime_backends import save, wav_file
@@ -218,21 +218,67 @@ def question_prompt(query):
                        "question": query["question"], "options": query["options"]}, ensure_ascii=False)
 
 
-def retrieve_all(dataset, output):
+def retrieve_all(dataset, output, unit="cue", *, resume=False, deadline=None):
+    """Stream sources into the timeline in end-time order, retrieving at each question cutoff.
+
+    unit="cue": one card per SRT cue (historical baseline, now with its real interval).
+    unit="event": cues merged into <=30 s event units (memory.event_units); a unit
+    becomes visible only once its last cue has ended, so no future evidence leaks.
+    resume/deadline: continue a partial run (card writes are idempotent) and stop
+    cleanly after ``deadline`` (time.monotonic()) so long ingests can be chunked.
+    """
     sources = sorted(json.loads((dataset / "sources.json").read_text(encoding="utf-8")), key=lambda r: (r["end"], r["sourceId"]))
     queries = sorted(json.loads((dataset / "questions.json").read_text(encoding="utf-8")), key=lambda q: (q["cutoff"], q["id"]))
     memory = TimelineMemory(output / "timeline.sqlite3")
+    # Embed in batches right before each retrieval instead of one call per card.
+    memory.embed_on_write = False
     source_map = {r["sourceId"]: r for r in sources}
+    if unit == "event":
+        units = sorted(build_event_units(sources, group_key=lambda r: r["day"]), key=lambda u: (u.end, u.start))
+        items = [{"end": u.end, "unit": u} for u in units]
+    elif unit == "cue":
+        items = [{"end": r["end"], "record": r} for r in sources]
+    else:
+        raise ValueError("unit must be cue or event")
+    card_sources = {}
     index, rows = 0, []
+    done = set()
+    if resume and (output / "retrieval.json").exists():
+        rows = json.loads((output / "retrieval.json").read_text(encoding="utf-8"))
+        done = {row["id"] for row in rows}
     for query in queries:
+        if deadline is not None and time.monotonic() > deadline:
+            print(json.dumps({"paused": True, "retrieved": len(rows)}), flush=True)
+            return rows
         start = time.perf_counter()
-        while index < len(sources) and sources[index]["end"] <= query["cutoff"]:
-            row = sources[index]
-            memory.remember(row["text"], user_id="A1_JAKE", case_id="official-heldout", scope="case", kind="event",
-                            happened_at=synthetic_time(row["start"]), recorded_at=synthetic_time(row["end"]),
-                            source_ids=[row["sourceId"]], card_id=row["sourceId"], supersede=False,
-                            metadata={"videoId": row["videoId"], "sourcePath": row["path"], "cue": row["cue"], "timeBasis": "synthetic-relative-day"})
+        while index < len(items) and items[index]["end"] <= query["cutoff"]:
+            item = items[index]
+            if query["id"] in done:
+                # Already retrieved: only rebuild the id->sources map, no writes.
+                if unit == "event":
+                    card_sources[item["unit"].unit_id("egolife-heldout")] = list(item["unit"].source_ids)
+                else:
+                    card_sources[item["record"]["sourceId"]] = [item["record"]["sourceId"]]
+                index += 1
+                continue
+            if unit == "event":
+                card = remember_event_unit(memory, item["unit"], user_id="A1_JAKE", case_id="official-heldout",
+                                           origin=ANCHOR, namespace="egolife-heldout", wearer="Jake",
+                                           time_basis="synthetic-relative-day")
+                if card:
+                    card_sources[card["id"]] = list(item["unit"].source_ids)
+            else:
+                row = item["record"]
+                memory.remember(row["text"], user_id="A1_JAKE", case_id="official-heldout", scope="case", kind="event",
+                                happened_at=synthetic_time(row["start"]), recorded_at=synthetic_time(row["end"]),
+                                effective_end=synthetic_time(max(row["end"], row["start"] + 0.001)),
+                                source_ids=[row["sourceId"]], card_id=row["sourceId"], supersede=False,
+                                metadata={"videoId": row["videoId"], "sourcePath": row["path"], "cue": row["cue"], "timeBasis": "synthetic-relative-day"})
+                card_sources[row["sourceId"]] = [row["sourceId"]]
             index += 1
+        if query["id"] in done:
+            continue
+        memory.index_vectors()
         ingest_ms = (time.perf_counter() - start) * 1000
         start = time.perf_counter()
         result = memory.retrieve(query["question"], user_id="A1_JAKE", case_id="official-heldout", scope="case",
@@ -240,15 +286,76 @@ def retrieve_all(dataset, output):
         selected = [r["cardId"] for r in result["selected"]]
         hard = [r["cardId"] for r in result["hardCandidates"]]
         assert set(selected).issubset(hard)
-        assert all(source_map[sid]["end"] <= query["cutoff"] for sid in hard)
-        evidence = [{"sourceId": sid, "day": source_map[sid]["day"], "kind": source_map[sid]["kind"],
-                     "timeSecondsInDay": source_map[sid]["start"] % 86400, "text": source_map[sid]["text"]} for sid in selected]
-        rows.append({"id": query["id"], "query": query, "selectedIds": selected, "candidateIds": hard,
+        assert all(source_map[sid]["end"] <= query["cutoff"] for cid in hard for sid in card_sources[cid])
+        evidence = []
+        for cid in selected:
+            members = [source_map[sid] for sid in card_sources[cid]]
+            evidence.append({"sourceId": cid, "sourceIds": card_sources[cid], "day": members[0]["day"],
+                             "kind": "event-unit" if unit == "event" else members[0]["kind"],
+                             "timeSecondsInDay": members[0]["start"] % 86400,
+                             "text": next(r["card"]["text"] for r in result["selected"] if r["cardId"] == cid)})
+        rows.append({"id": query["id"], "query": query, "unit": unit, "selectedIds": selected, "candidateIds": hard,
+                     "selectedSourceIds": [card_sources[c] for c in selected],
+                     "candidateSourceIds": [card_sources[c] for c in hard],
                      "evidence": evidence, "routing": result["routing"], "scan": result["timing"],
                      "retrievalMs": (time.perf_counter() - start) * 1000, "newIngestMs": ingest_ms, "visibleSources": index})
         save(output / "retrieval.json", rows)
-        print(json.dumps({"retrieved": len(rows), "visibleSources": index, "selected": len(selected)}), flush=True)
+        print(json.dumps({"retrieved": len(rows), "visibleItems": index, "selected": len(selected)}), flush=True)
     return rows
+
+
+def localization(dataset, output):
+    """Point-time overlap proxy over the units actually returned (no LLM, no judge)."""
+    gold = {r["id"]: r for r in json.loads((dataset / "gold-private.json").read_text(encoding="utf-8"))}
+    retrieval = {r["id"]: r for r in json.loads((output / "retrieval.json").read_text(encoding="utf-8"))}
+    sources = {r["sourceId"]: r for r in json.loads((dataset / "sources.json").read_text(encoding="utf-8"))}
+    metrics = []
+    for qid, item in retrieval.items():
+        target = gold[qid]["target"]
+        moment = absolute_seconds(target["date"], clock_seconds(target["time"]))
+        def overlaps(sid):
+            s = sources[sid]
+            return s["kind"] == "caption" and s["start"] < moment + 1 and s["end"] >= moment
+        selected = item.get("selectedSourceIds") or [[sid] for sid in item["selectedIds"]]
+        candidates = item.get("candidateSourceIds") or [[sid] for sid in item["candidateIds"]]
+        ranks = [i + 1 for i, group in enumerate(selected) if any(overlaps(sid) for sid in group)]
+        metrics.append({"id": qid, "targetVideoGroup": f"{target['date']}:{str(target['time'])[:2]}",
+                        "targetAvailable": any(overlaps(sid) and r["end"] <= item["query"]["cutoff"] for sid, r in sources.items()),
+                        "candidateHit": any(overlaps(sid) for group in candidates for sid in group),
+                        "hit1": 1 in ranks, "hit5": bool(ranks), "rr5": 1 / ranks[0] if ranks else 0,
+                        "dcg5": 1 / math.log2(ranks[0] + 1) if ranks else 0,
+                        "selectedSpanSeconds": sum(max(sources[s]["end"] for s in g) - min(sources[s]["start"] for s in g) for g in selected)})
+    save(output / "target-localization.json", metrics)
+    summary = {"queries": len(metrics), "goldTargetAvailable": sum(r["targetAvailable"] for r in metrics),
+               **{key: statistics.mean(r[key] for r in metrics) for key in ("candidateHit", "hit1", "hit5", "rr5", "dcg5", "selectedSpanSeconds")},
+               "note": "Point-time overlap proxy, not official evidence relevance. Event units cover more seconds per "
+                       "selection than cues; compare hit5 together with selectedSpanSeconds."}
+    return metrics, summary
+
+
+def retrieval_ablation(dataset, output, unit, *, resume=False, max_seconds=None):
+    """Retrieval-only run under the CURRENT code (not the frozen protocol)."""
+    freeze = json.loads((dataset / "freeze.json").read_text(encoding="utf-8"))
+    for name, digest in freeze["files"].items():
+        if sha((dataset / name).read_bytes()) != digest:
+            raise ValueError("frozen dataset changed: " + name)
+    output.mkdir(parents=True, exist_ok=resume)
+    from egoassist.core.settings import reference_policy
+    embedder = os.getenv("EGOASSIST_MEMORY_EMBEDDER", "none")
+    if not (output / "run-plan.json").exists():
+        save(output / "run-plan.json", {"dataset": str(dataset), "unit": unit, "referencePolicy": reference_policy(),
+                                        "embedder": embedder,
+                                        "protocol": "retrieval-ablation, current code, not the frozen evaluate protocol",
+                                        "startedAt": datetime.now(timezone.utc).isoformat()})
+    deadline = time.monotonic() + max_seconds if max_seconds else None
+    rows = retrieve_all(dataset, output, unit, resume=resume, deadline=deadline)
+    if len(rows) < len(json.loads((dataset / "questions.json").read_text(encoding="utf-8"))):
+        return None
+    _, summary = localization(dataset, output)
+    summary.update(unit=unit, referencePolicy=reference_policy(), embedder=embedder)
+    save(output / "summary.json", summary)
+    print(json.dumps(summary, ensure_ascii=False), flush=True)
+    return summary
 
 
 async def evaluate(dataset, output):
@@ -334,20 +441,7 @@ def score(dataset, output):
             save(output / "scored.json", rows)
             print(f"scored {index + 1}/{len(rows)}", flush=True)
     save(output / "scored.json", rows)
-    retrieval_metrics = []
-    for qid, item in retrieval.items():
-        target = gold[qid]["target"]
-        moment = absolute_seconds(target["date"], clock_seconds(target["time"]))
-        def overlaps(sid):
-            s = sources[sid]
-            return s["kind"] == "caption" and s["start"] < moment + 1 and s["end"] >= moment
-        ranks = [i + 1 for i, sid in enumerate(item["selectedIds"]) if overlaps(sid)]
-        retrieval_metrics.append({"id": qid, "targetVideoGroup": f"{target['date']}:{str(target['time'])[:2]}",
-                                  "targetAvailable": any(overlaps(sid) and r["end"] <= item["query"]["cutoff"] for sid, r in sources.items()),
-                                  "candidateHit": any(overlaps(sid) for sid in item["candidateIds"]),
-                                  "hit1": 1 in ranks, "hit5": bool(ranks), "rr5": 1 / ranks[0] if ranks else 0,
-                                  "dcg5": 1 / math.log2(ranks[0] + 1) if ranks else 0})
-    save(output / "target-localization.json", retrieval_metrics)
+    retrieval_metrics, localization_summary = localization(dataset, output)
     summary = {"questions": len(gold), "seeds": SEEDS, "participants": 1, "cost": None,
                "scope": "project-heldout sampled official QA over captions/transcripts, not raw multimodal perception",
                "supportMethod": "separate qwen-flash judge over selected answer/evidence, no gold; correlated model bias",
@@ -371,9 +465,7 @@ def score(dataset, output):
             "applicationCacheHits": 0 if backend == "modular" else None,
             "bySeed": {str(seed): {"correct": sum(r["correct"] is True for r in selected if r["seed"] == seed),
                                    "total": sum(r["seed"] == seed for r in selected)} for seed in SEEDS}}
-    summary["targetLocalization"] = {"queries": len(retrieval_metrics), "goldTargetAvailable": sum(r["targetAvailable"] for r in retrieval_metrics),
-        **{key: statistics.mean(r[key] for r in retrieval_metrics) for key in ("candidateHit", "hit1", "hit5", "rr5", "dcg5")},
-        "note": "Point-time overlap proxy, not official evidence relevance Recall/MRR/nDCG; rr is truncated at 5"}
+    summary["targetLocalization"] = localization_summary
     groups = {}
     for item in retrieval_metrics:
         qid = item["id"]
@@ -392,14 +484,19 @@ def score(dataset, output):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("mode", choices=("prepare", "evaluate", "score"))
+    parser.add_argument("mode", choices=("prepare", "evaluate", "score", "retrieve"))
     parser.add_argument("--dataset", type=Path)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--download-cache", type=Path, help="Reuse source downloads from an incomplete preparation")
+    parser.add_argument("--unit", choices=("cue", "event"), default="cue", help="retrieve mode: memory unit to ingest")
+    parser.add_argument("--resume", action="store_true", help="retrieve mode: continue a partial run in --output")
+    parser.add_argument("--max-seconds", type=float, help="retrieve mode: pause cleanly after this many seconds")
     args = parser.parse_args()
     if args.mode == "prepare":
         prepare(args.output, args.download_cache)
     elif args.mode == "evaluate":
         asyncio.run(evaluate(args.dataset, args.output))
+    elif args.mode == "retrieve":
+        retrieval_ablation(args.dataset, args.output, args.unit, resume=args.resume, max_seconds=args.max_seconds)
     else:
         score(args.dataset, args.output)

@@ -53,3 +53,33 @@ def tool_settings():
 
 def tool_calls_enabled():
     return bool(integer("EGOASSIST_TOOL_CALLS_ENABLED", 0, minimum=0, maximum=1))
+
+
+def option(name, default, *, allowed):
+    """Read a validated string option from the environment.
+
+    Used for behaviour switches whose default must stay on the conservative
+    branch so that existing deployments and regression suites are unaffected
+    until a run explicitly opts in.
+    """
+    value = str(os.getenv(name, default)).strip().casefold()
+    if value not in allowed:
+        raise ValueError(f"{name} must be one of {sorted(allowed)}")
+    return value
+
+
+# How strictly an unresolved reference (a pronoun or deictic with no extracted
+# subject) blocks recall at query time.
+#   strict   - such cards are never eligible. Historical default.
+#   demote   - they stay eligible but always rank below source-scoped evidence.
+#   off      - no reference-based ranking pressure at all.
+REFERENCE_POLICIES = {"strict", "demote", "off"}
+DEFAULT_REFERENCE_POLICY = "strict"
+
+
+def reference_policy():
+    return option(
+        "EGOASSIST_MEMORY_REFERENCE_POLICY",
+        DEFAULT_REFERENCE_POLICY,
+        allowed=REFERENCE_POLICIES,
+    )

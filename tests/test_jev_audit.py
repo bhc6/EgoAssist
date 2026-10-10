@@ -11,6 +11,7 @@ from egoassist.core.journal import SessionJournal
 from egoassist.realtime.prompt_audit import decision_audit
 from egoassist.realtime.work_ledger import CaseWorkLedger
 from run_egoassist import create_app
+from tests.support import run_node
 
 
 def decision():
@@ -100,4 +101,4 @@ assert.ok(legacy.includes('历史日志未记录选项说明') && legacy.include
 assert.ok(!jevRouteSummary({memoryKind:'event', memoryText:'事实'}).includes('记忆检索'));
 assert.ok(jevRouteDetails(semantic).includes('分类总耗时：1500 ms'));
 '''
-    subprocess.run(['node', '-'], input=script, text=True, encoding='utf8', check=True, timeout=15)
+    run_node(script)

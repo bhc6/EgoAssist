@@ -340,6 +340,13 @@ class MemoryService:
         return self._operation('preference.resolve', adapter.owner_user_id, candidate_scope,
                                lambda: adapter.resolve_candidate(accepted, candidate_scope=candidate_scope))
 
+    def pending_claims(self, user_id, case_id, *, scope='case', limit=50):
+        return self.timeline.pending_claims(user_id=user_id, case_id=case_id, scope=scope, limit=limit)
+
+    def resolve_pending_claim(self, user_id, case_id, card_id, accepted):
+        return self._operation('claim.resolve', user_id, case_id,
+                               lambda: self.timeline.resolve_pending(card_id, user_id=user_id, accepted=accepted))
+
     def delete_preference(self, adapter, record_id, *, candidate_scope=None):
         return self._operation('preference.delete', adapter.owner_user_id, candidate_scope,
                                lambda: adapter.delete_preference(record_id, candidate_scope=candidate_scope))
@@ -351,9 +358,14 @@ class MemoryService:
         return adapter.snapshot(**scope)
 
     def consolidate(self, user, case):
-        return self._operation('consolidate', user, case, lambda: [
-            self.timeline.promote_to_long(user_id=user, case_id=case, scope='case'),
-            self.timeline.promote_to_long(user_id=user, case_id=None, scope='participant')])
+        def run():
+            return [
+                self.timeline.promote_to_long(user_id=user, case_id=case, scope='case'),
+                self.timeline.promote_to_long(user_id=user, case_id=None, scope='participant'),
+                # Tier promotion only relabels; digests add the coarser level.
+                self.timeline.build_digests(user_id=user, case_id=case, scope='case'),
+            ]
+        return self._operation('consolidate', user, case, run)
 
     def pending_draft(self, user_id, case_id):
         return self.timeline.pending_draft(user_id=user_id, case_id=case_id)
@@ -395,12 +407,21 @@ class MemoryService:
     def _remember_observation(self, request, policy):
         if not request.eligible or not policy['components']['timeline']['episodic_enabled']:
             return None
-        return self.episode(request.user_id, request.session_id, policy['components']['timeline']['scope']).remember(
+        card = self.episode(request.user_id, request.session_id, policy['components']['timeline']['scope']).remember(
             request.text, kind='observation', source=request.source, skill=request.skill, task=request.task,
             session_id=request.session_id, user_scope=request.user_id, evidence_event_id=request.source_id,
             happened_at=request.captured_at, recorded_at=request.recorded_at,
             timezone_name=request.clock.timezone_name, utc_offset_minutes=request.clock.utc_offset_minutes,
-            evidence_context=request.evidence)
+            evidence_context=request.evidence,
+            # captured_at is the frame timestamp: a measured event time that
+            # words inside the VLM description ("今天", "三点") must not move.
+            time_basis='measured' if request.captured_at else None)
+        if card and request.captured_at and card.get('effectiveAt'):
+            # The previous observation held until this change was seen.
+            self.timeline.close_open_interval(
+                user_id=card['userScope'], case_id=card.get('sessionId'), scope=card['scope'],
+                kind='observation', end=card['effectiveAt'], exclude_id=card['id'])
+        return card
 
     def remember_tool_effect(self, *, user_id, session_id, call_id, name, result, source_id):
         return self._operation('tool.write', user_id, session_id, lambda: self._remember_tool_effect(

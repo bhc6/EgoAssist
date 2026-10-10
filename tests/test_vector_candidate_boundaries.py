@@ -5,7 +5,9 @@ import pytest
 from egoassist.memory import TimelineMemory
 
 
-def test_vector_nomination_preserves_scope_status_reference_and_time(tmp_path):
+def test_vector_nomination_preserves_scope_status_reference_and_time(tmp_path, monkeypatch):
+    # Reference gating here is the strict contract; relaxed policies demote instead.
+    monkeypatch.setenv("EGOASSIST_MEMORY_REFERENCE_POLICY", "strict")
     memory = TimelineMemory(tmp_path / "timeline.db")
     now = datetime(2026, 9, 14, 12, tzinfo=timezone.utc)
     defaults = dict(user_id="u", case_id="c", scope="case", kind="event", happened_at=now)

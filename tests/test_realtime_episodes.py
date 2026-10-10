@@ -21,8 +21,8 @@ def test_realtime_episode_memory_persists_summaries_without_raw_media(tmp_path):
 
     restored = RealtimeEpisodeMemory(tmp_path / "episodes.json")
     result = restored.retrieve("番茄放在哪里")
-    assert result["selected"] == []
-    assert result["candidates"] == []
+    # Scene summaries are recallable evidence (they were previously write-only).
+    assert [item["episodeId"] for item in result["selected"]] == [record["id"]]
     assert result["minimumScore"] == 0.05
 
 

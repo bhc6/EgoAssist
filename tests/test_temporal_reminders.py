@@ -21,6 +21,8 @@ import egoassist.realtime.omni as omni_module
 import run_egoassist
 from run_egoassist import create_app
 
+from tests.support import requires_temporal
+
 
 ROOT = Path(__file__).parents[1]
 
@@ -84,6 +86,7 @@ def test_activity_is_idempotent_for_result_and_notification(tmp_path):
     asyncio.run(scenario())
 
 
+@requires_temporal
 def test_temporal_reminder_survives_worker_restart_and_cancel_is_distinct(tmp_path):
     async def scenario():
         environment = await WorkflowEnvironment.start_time_skipping(
@@ -143,6 +146,7 @@ def test_temporal_reminder_survives_worker_restart_and_cancel_is_distinct(tmp_pa
     asyncio.run(scenario())
 
 
+@requires_temporal
 def test_product_api_exposes_timer_only_with_live_temporal_worker(tmp_path, monkeypatch):
     monkeypatch.setenv('EGOASSIST_TOOL_CALLS_ENABLED', '1')
     async def scenario():
@@ -204,6 +208,7 @@ def test_product_api_exposes_timer_only_with_live_temporal_worker(tmp_path, monk
     asyncio.run(scenario())
 
 
+@requires_temporal
 def test_multi_intent_timer_and_memory_draft_recover_after_disconnect(tmp_path, monkeypatch):
     bridge_instances = []
 

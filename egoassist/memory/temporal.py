@@ -16,7 +16,45 @@ except ImportError:  # pragma: no cover - Python 3.10+ always provides zoneinfo
 _DATE_ISO = re.compile(r"(?<!\d)(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})(?!\d)")
 _DATE_CJK = re.compile(r"(?:(\d{4})年)?(\d{1,2})月(\d{1,2})日")
 _CLOCK = re.compile(r"(?<!\d)(\d{1,2})(?::(\d{1,2})|点(?:(\d{1,2})分?)?)(?!\d)")
-_CJK_CLOCK = re.compile(r"([零〇一二两三四五六七八九十]{1,3})点(?:([零〇一二两三四五六七八九十]{1,3})分?)?")
+# A CJK clock reading: a whole numeral (never a suffix of a longer numeral, so
+# "十一点" can't be read as "一点") followed by 点 and an optional minute.
+_CJK_CLOCK_RAW = re.compile(
+    r"(?<![零〇一二两三四五六七八九十])"
+    r"([零〇一二两三四五六七八九十]{1,3})点"
+    r"(?:([零〇一二两三四五六七八九十]{1,3})分?|(半))?"
+)
+# "一点" is also a degree word (多一点 / 快一点 / 有一点 / 一点儿 / 一点点).
+# Only a bare 一 can be that word, so only it gets the extra guard.
+_DEGREE_BEFORE = set("多快慢有好差少稍大小高低再轻重近远")
+_DEGREE_AFTER = set("儿点些")
+
+
+def _cjk_clock_matches(text: str) -> list[re.Match]:
+    matches = []
+    for match in _CJK_CLOCK_RAW.finditer(text):
+        if match.group(1) == "一":
+            before = text[match.start() - 1] if match.start() > 0 else ""
+            after = text[match.end(1) + 1] if match.end(1) + 1 < len(text) else ""
+            if before in _DEGREE_BEFORE or after in _DEGREE_AFTER:
+                continue
+        matches.append(match)
+    return matches
+
+
+class _CjkClock:
+    """Regex-like facade so existing call sites keep ``search``/``findall``."""
+
+    @staticmethod
+    def search(text: str):
+        found = _cjk_clock_matches(text)
+        return found[0] if found else None
+
+    @staticmethod
+    def findall(text: str):
+        return _cjk_clock_matches(text)
+
+
+_CJK_CLOCK = _CjkClock()
 _DAY_OFFSETS = {
     "大前天": -3, "前天": -2, "昨天": -1, "昨日": -1, "昨晚": -1,
     "今天": 0, "今日": 0, "今晚": 0, "今早": 0, "今晨": 0, "今中午": 0,
@@ -30,9 +68,13 @@ _DAY_WORDS = re.compile("|".join(
     for word in sorted(_DAY_OFFSETS, key=len, reverse=True)
 ), re.I)
 _RELATIVE_DAYS = re.compile(r"(\d+|[一二两三四五六七八九十]+)天([前后])|\b(\d+) days? (ago|later)\b", re.I)
-_VAGUE_TIME = re.compile(r"前几天|几天前|那天|当天|当时|之前|刚才|最近|上次|下次|过几天|"
+# 刚才 / 刚刚 / just now are not vague: they place the statement at (about) its
+# own source time. Treating them as unresolved erased the effective time and
+# also disabled supersede, so "钥匙刚才放桌上了" could never replace an older
+# location. They are handled by the source-clock branch below instead.
+_VAGUE_TIME = re.compile(r"前几天|几天前|那天|当天|当时|之前|最近|上次|下次|过几天|"
                          r"[上下本这]周|[上下这]个?月|去年|明年|星期[一二三四五六日天]|"
-                         r"\b(?:recently|earlier|that day|last time|a few days ago|just now|"
+                         r"\b(?:recently|earlier|that day|last time|a few days ago|"
                          r"(?:last|next|this) (?:week|month|year)|monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b", re.I)
 
 
@@ -153,11 +195,13 @@ def _clock_from_text(text: str) -> tuple[int, int] | None:
                 return 0, 0
             return None
         hour = _cjk_number(cjk.group(1))
-        minute = _cjk_number(cjk.group(2)) if cjk.group(2) else 0
+        minute = 30 if cjk.group(3) else (_cjk_number(cjk.group(2)) if cjk.group(2) else 0)
         if hour is None or minute is None:
             return None
     lowered = text.casefold()
-    if (any(marker in lowered for marker in ("下午", "晚上", "傍晚")) or re.search(r"\bpm\b", lowered)) and hour < 12:
+    # "晚八点" / "明晚十一点": 晚 directly before the number is an evening marker.
+    evening = bool(re.search(r"晚(?=[零〇一二两三四五六七八九十\d])", text))
+    if (evening or any(marker in lowered for marker in ("下午", "晚上", "傍晚")) or re.search(r"\bpm\b", lowered)) and hour < 12:
         hour += 12
     if (any(marker in lowered for marker in ("凌晨", "上午", "早上")) or re.search(r"\bam\b", lowered)) and hour == 12:
         hour = 0

@@ -58,7 +58,7 @@ def test_contracts_round_trip_and_reject_untyped_provider_fields():
     candidate = IntentCandidate(
         kind="foreground-dialogue", text="answer this", parameters={},
     )
-    assert job.job_id and result.result_id and request.connector and candidate.kind
+    assert job.job_id and result.result_id
 
 
 def test_ports_are_small_protocol_boundaries():

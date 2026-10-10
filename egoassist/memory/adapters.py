@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Iterable
+from datetime import datetime, timedelta
 from typing import Any
 
 from .store import MemoryItem
@@ -28,8 +29,14 @@ def import_visual_items(
     user_id: str,
     case_id: str,
     source: str,
+    video_origin: datetime | None = None,
 ) -> list[dict[str, Any]]:
-    """Persist visual segments without changing their native retrieval path."""
+    """Persist visual segments without changing their native retrieval path.
+
+    Pass ``video_origin`` (the wall-clock instant of video second 0) so each
+    card carries its real interval. Without it the card can only be stamped
+    with the import time, which no time-scoped query will ever match.
+    """
     cards = []
     for item in items:
         caption = " ".join(str(item.caption).split()).strip()
@@ -54,6 +61,11 @@ def import_visual_items(
         ]
         source_ids = [f"{source}:memory:{item.id}"]
         source_ids.extend(f"{source}:frame:{value}" for value in frame_ids if value)
+        timing: dict[str, Any] = {}
+        if video_origin is not None:
+            start = video_origin + timedelta(seconds=float(item.t_start))
+            end = video_origin + timedelta(seconds=max(float(item.t_end), float(item.t_start) + 1e-3))
+            timing = {"happened_at": start, "recorded_at": end, "effective_at": start, "effective_end": end}
         card = timeline.remember(
             caption,
             user_id=user_id,
@@ -63,9 +75,11 @@ def import_visual_items(
             tier="long" if item.tier == "long" else "short",
             source_ids=source_ids,
             importance=0.7,
+            **timing,
             metadata={
                 "producer": "hierarchical-visual-memory",
                 "visualEvidence": True,
+                **({"timeBasis": "source-media", "videoOrigin": video_origin.isoformat()} if video_origin else {}),
                 "source": source,
                 "sourceMemoryId": int(item.id),
                 "videoStartSeconds": float(item.t_start),

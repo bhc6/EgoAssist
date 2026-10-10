@@ -80,3 +80,8 @@ include = ["egoassist*"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
+markers = [
+    "requires_temporal: needs the Temporal test server binary (downloaded on first online run)",
+]
+# Unknown markers are a typo, not a silent no-op.
+filterwarnings = ["error::pytest.PytestUnknownMarkWarning"]

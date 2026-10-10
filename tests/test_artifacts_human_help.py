@@ -6,14 +6,7 @@ from aiohttp.test_utils import TestClient, TestServer
 
 from egoassist import BUILTIN_SKILLS_ROOT
 from run_egoassist import create_app
-
-
-async def register_client(client, username):
-    response = await client.post("/api/auth/register", json={
-        "username": username, "password": "baseline-pass-123",
-    })
-    assert response.status == 200
-    return (await response.json())["user"]
+from tests.support import register_client
 
 
 def test_task_artifact_is_checkpoint_scoped_and_records_access(tmp_path, monkeypatch):

@@ -13,7 +13,9 @@ Trade-off vs. HierarchicalMemory path:
 
 from __future__ import annotations
 
+import hashlib
 import json
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import List, Optional
 
@@ -22,7 +24,7 @@ from ..backends.base import VLMBackend
 from ..capture.events import segment_stream
 from ..capture.stream import FrameStream
 from ..config import Config
-from ..memory.timeline import TimelineMemory
+from ..memory.timeline import TimelineMemory, utc_now
 from ..timefmt import format_beijing_iso
 from .pipeline import QAResult  # reuse the shared result dataclass
 
@@ -45,12 +47,16 @@ class TimelineAssistant:
         timeline: TimelineMemory,
         user_id: str,
         case_id: str,
+        video_origin: Optional[datetime] = None,
     ) -> None:
         self.backend = backend
         self.cfg = cfg or Config()
         self._timeline = timeline
         self._user_id = user_id
         self._case_id = case_id
+        # Wall-clock instant of video second 0. When unknown, the first ingest
+        # fixes it once so all segments keep correct relative times.
+        self._video_origin = video_origin
         self.abstention = ConformalAbstention(alpha=self.cfg.risk_alpha)
         self._calibrated = False
         # Track card IDs written during ingest for provenance checks.
@@ -61,15 +67,26 @@ class TimelineAssistant:
     # ------------------------------------------------------------------
 
     def ingest(self, stream: FrameStream) -> int:
-        """Caption video segments and store them as scene cards in the timeline."""
+        """Caption video segments and store them as scene cards in the timeline.
+
+        Each card carries the segment's real interval: ``video_origin`` +
+        ``t_start`` / ``t_end``. Previously every card was stamped with the
+        ingest wall-clock time and no end, so time-scoped queries could never
+        match and the answer model was told the wrong event time.
+        """
         n = 0
+        origin = self._video_origin or utc_now()
+        self._video_origin = origin
         for seg in segment_stream(stream, self.cfg):
-            cap = self.backend.caption(seg.frames)
-            cap = " ".join(cap.split()).strip()
+            n += 1
+            cap = " ".join(self.backend.caption(seg.frames).split()).strip()
             if not cap:
-                cap = "[no visual content]"
+                # An empty caption is not evidence; storing a placeholder card
+                # only adds an unmatchable row to the candidate pool.
+                continue
             kf_times = [float(t) for t in seg.frame_times]
             kf_meta = [dict(m) for m in seg.frame_meta]
+            identity = f"{self._case_id}:{float(seg.t_start):.3f}:{float(seg.t_end):.3f}:{cap}"
             card = self._timeline.remember(
                 cap,
                 user_id=self._user_id,
@@ -78,17 +95,24 @@ class TimelineAssistant:
                 kind="scene",
                 tier="short",
                 importance=0.7,
+                happened_at=origin + timedelta(seconds=float(seg.t_start)),
+                recorded_at=origin + timedelta(seconds=float(seg.t_end)),
+                effective_at=origin + timedelta(seconds=float(seg.t_start)),
+                effective_end=origin + timedelta(seconds=max(float(seg.t_end), float(seg.t_start) + 1e-3)),
+                card_id="scene-" + hashlib.sha256(identity.encode("utf-8")).hexdigest()[:16],
+                supersede=False,
                 metadata={
                     "producer": "timeline-visual-pipeline",
+                    "timeBasis": "source-media",
+                    "videoOrigin": origin.isoformat(),
                     "videoStartSeconds": float(seg.t_start),
                     "videoEndSeconds": float(seg.t_end),
                     "keyframeTimes": kf_times,
                     "keyframeMeta": kf_meta,
                 },
             )
-            if card:
+            if card and card["id"] not in self._ingested_card_ids:
                 self._ingested_card_ids.append(card["id"])
-            n += 1
         return n
 
     # ------------------------------------------------------------------
@@ -173,17 +197,19 @@ class TimelineAssistant:
     # ------------------------------------------------------------------
 
     def all_captions(self) -> list[str]:
-        """Return captions of all ingested cards (for invalid-caption detection)."""
+        """Return captions of all ingested cards (for invalid-caption detection).
+
+        Reads the store directly: ``retrieve("")`` only ever returns its
+        20-row audit slice, which silently truncated this list.
+        """
         return [
-            c["card"]["text"]
-            for c in self._timeline.retrieve(
-                "",
+            card["text"]
+            for card in self._timeline.cards(
                 user_id=self._user_id,
                 case_id=self._case_id,
                 scope="case",
                 kinds=_BENCHMARK_KINDS,
-                limit=9999,
-            ).get("candidates", [])
+            )
         ]
 
     def save_manifest(self, path: Path, provenance: dict) -> Path:

@@ -115,6 +115,7 @@ class RealtimeEpisodeMemory:
         candidate_scope: str | None = None,
         evidence_context: dict[str, Any] | None = None,
         replaces_card_id: str | None = None,
+        time_basis: str | None = None,
     ) -> dict[str, Any] | None:
         summary = str(summary).strip()
         if not summary:
@@ -138,6 +139,8 @@ class RealtimeEpisodeMemory:
             "candidateScope": str(candidate_scope or "__default__"),
             "evidenceContext": evidence_context or {},
         }
+        if time_basis:
+            metadata["timeBasis"] = str(time_basis)
         card = self._timeline.remember(
             summary,
             user_id=user_id,

@@ -80,6 +80,76 @@ class RealtimeConnection:
     voice: Any
     web: Any
 
+    # A browser reconnects as soon as it notices the socket closed, which is
+    # typically *before* the server has finished the previous socket's teardown
+    # (bridge close, tool confirmations, media flush). Rejecting that window
+    # with HTTP 409 is what made reconnects intermittently fail, since the
+    # browser cannot see the status and only has a short retry budget. Wait for
+    # the release instead; a genuinely live second socket still gets 409.
+    RECONNECT_RELEASE_TIMEOUT = 15.0
+    # How often the gate re-checks the session while waiting. The release event
+    # wakes it immediately on the normal path; the poll covers paths that free
+    # the session without setting the event (e.g. a skill/task transition).
+    RECONNECT_POLL_INTERVAL = 0.25
+    # Upper bounds on teardown steps that talk to the network. An unbounded
+    # wait here also widens the window for the next reconnect.
+    TEARDOWN_CLOSE_TIMEOUT = 10.0
+    # Teardown steps that outlived the bound keep running here. Holding a
+    # reference stops the event loop from garbage-collecting them mid-close.
+    _background_teardown = set()
+
+    def _finish_background_teardown(self, task) -> None:
+        self._background_teardown.discard(task)
+        if not task.cancelled() and task.exception() is not None:
+            self.LOGGER.warning("background teardown step failed: %r", task.exception())
+
+    @staticmethod
+    def _session_free(owner) -> bool:
+        return owner.socket_token is None and not owner.transitioning
+
+    async def await_socket_release(self, owner) -> bool:
+        """Return True once no socket holds the session.
+
+        Waits while the session is being released (previous socket tearing
+        down, or a skill/task transition). A second *live* connection is still
+        refused immediately: that is the single-writer invariant, not a race.
+        """
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + float(self.RECONNECT_RELEASE_TIMEOUT)
+        while True:
+            if self._session_free(owner):
+                return True
+            if owner.socket_token is not None and not owner.releasing:
+                return False
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                return False
+            try:
+                await asyncio.wait_for(
+                    owner.released.wait(),
+                    timeout=min(remaining, float(self.RECONNECT_POLL_INTERVAL)),
+                )
+            except asyncio.TimeoutError:
+                pass
+            if owner.released.is_set() and not self._session_free(owner):
+                # A stale "released" from an earlier cycle must not spin the loop.
+                owner.released.clear()
+
+    def release_socket(self, owner, session_id, socket_token) -> bool:
+        """Drop this socket's claim and let a waiting reconnect proceed.
+
+        Returns True when the claim belonged to ``socket_token``. Denies 409
+        by waking ``owner.released``, so a rejected connect can be retried at
+        once instead of blocking for the whole release timeout.
+        """
+        if owner.socket_token is not socket_token:
+            return False
+        owner.socket_token = None
+        owner.socket = None
+        self.live_harnesses.pop(session_id, None)
+        owner.released.set()
+        return True
+
     async def realtime(self, request):
         server_loop = asyncio.get_running_loop()
         user = request[self.user_key]
@@ -92,29 +162,32 @@ class RealtimeConnection:
         except PermissionError as exc:
             raise self.web.HTTPForbidden(text=str(exc)) from exc
         owner = self.case_owner(user_id, session_id)
-        if owner.socket_token is not None or owner.transitioning:
+        if not await self.await_socket_release(owner):
+            raise self.web.HTTPConflict(text="context session is already active")
+        # The wait may have let the old owner be evicted and replaced; claim the
+        # current one. No await below until socket_token is set, so two waiters
+        # cannot both claim the session.
+        owner = self.case_owner(user_id, session_id)
+        if not self._session_free(owner):
             raise self.web.HTTPConflict(text="context session is already active")
         socket_token = object()
         owner.epoch += 1
         connection_epoch = owner.epoch
         owner.socket_token = socket_token
+        # A session now holds a socket again, so the next reconnect must wait
+        # for this one's teardown rather than reading a stale "released".
+        owner.released.clear()
         self.live_harnesses[session_id] = owner.harness
         ws = self.web.WebSocketResponse(heartbeat=20, max_msg_size=3000000)
         owner.socket = ws
         try:
             await ws.prepare(request)
         except BaseException:
-            if owner.socket_token is socket_token:
-                owner.socket_token = None
-                owner.socket = None
-                self.live_harnesses.pop(session_id, None)
+            self.release_socket(owner, session_id, socket_token)
             raise
         if owner.socket_token is not socket_token or owner.epoch != connection_epoch:
             await ws.close(code=1000, message=b"case runtime changed during connection")
-            if owner.socket_token is socket_token:
-                owner.socket_token = None
-                owner.socket = None
-                self.live_harnesses.pop(session_id, None)
+            self.release_socket(owner, session_id, socket_token)
             return ws
         api_key = os.getenv("QWEN_API_KEY") or os.getenv("DASHSCOPE_API_KEY")
         if not api_key:
@@ -122,10 +195,7 @@ class RealtimeConnection:
                 {"type": "error", "message": "QWEN_API_KEY is not configured"}
             )
             await ws.close()
-            if owner.socket_token is socket_token:
-                owner.socket_token = None
-                owner.socket = None
-                self.live_harnesses.pop(session_id, None)
+            self.release_socket(owner, session_id, socket_token)
             return ws
         livekit_active = False
         unattributed_outputs = set()
@@ -275,10 +345,7 @@ class RealtimeConnection:
                 owner.memory_bus.set_ws_emitter(emit, asyncio.get_event_loop())
             initial_context = harness.build(self.harness_layers(session_runtime))
         except Exception as exc:
-            if owner.socket_token is socket_token:
-                owner.socket_token = None
-                owner.socket = None
-                self.live_harnesses.pop(session_id, None)
+            self.release_socket(owner, session_id, socket_token)
             if not ws.closed:
                 try:
                     await ws.send_json({"type": "error", "message": str(exc)})
@@ -287,10 +354,7 @@ class RealtimeConnection:
             await ws.close()
             return ws
         except BaseException:
-            if owner.socket_token is socket_token:
-                owner.socket_token = None
-                owner.socket = None
-                self.live_harnesses.pop(session_id, None)
+            self.release_socket(owner, session_id, socket_token)
             await ws.close()
             raise
 
@@ -1332,12 +1396,25 @@ class RealtimeConnection:
         finally:
             _turn_accumulator.flush_now()
             owns_reservation = owner.socket_token is socket_token
+            if owns_reservation:
+                # Mark the release before any await: from here on a reconnect
+                # must wait for this teardown, not be refused as a live socket.
+                owner.releasing = True
+                owner.released.clear()
             try:
                 if livekit_media_task is not None:
                     livekit_media_task.cancel()
                     await asyncio.gather(livekit_media_task, return_exceptions=True)
                 if livekit_active and self.livekit_transport is not None:
-                    await self.livekit_transport.close(session_id)
+                    try:
+                        await asyncio.wait_for(
+                            asyncio.shield(self.livekit_transport.close(session_id)),
+                            timeout=self.TEARDOWN_CLOSE_TIMEOUT,
+                        )
+                    except asyncio.TimeoutError:
+                        self.LOGGER.warning(
+                            "timed out closing LiveKit media for case %s", session_id
+                        )
                     self.capability_overrides["realtime-media"] = livekit_capability(
                         self.livekit_settings
                     )
@@ -1352,11 +1429,32 @@ class RealtimeConnection:
                     )
                 if bridge:
                     self.live_bridges.discard(bridge)
-                    await asyncio.gather(
-                        *tuple(owner.tool_confirmation_tasks.values()),
-                        return_exceptions=True,
+                    # Wait for in-flight tool confirmations before closing the
+                    # bridge, as before, but never longer than the bound: an
+                    # unbounded wait here holds the session and refuses the next
+                    # reconnect for as long as the hang lasts. Both steps are
+                    # shielded, so on timeout they keep running to completion in
+                    # the background instead of being cancelled half-way (a
+                    # cancelled close would skip its later sub-closes and leak).
+                    steps = (
+                        ("tool-confirmations",
+                         lambda: asyncio.gather(*tuple(owner.tool_confirmation_tasks.values()),
+                                                return_exceptions=True)),
+                        ("bridge-close", bridge.close),
                     )
-                    await bridge.close()
+                    for name, start in steps:
+                        task = asyncio.ensure_future(start())
+                        try:
+                            await asyncio.wait_for(asyncio.shield(task),
+                                                   timeout=self.TEARDOWN_CLOSE_TIMEOUT)
+                        except asyncio.TimeoutError:
+                            self.LOGGER.warning(
+                                "%s still running after %ss during teardown of case %s;"
+                                " releasing the session and letting it finish",
+                                name, self.TEARDOWN_CLOSE_TIMEOUT, session_id,
+                            )
+                            self._background_teardown.add(task)
+                            task.add_done_callback(self._finish_background_teardown)
             finally:
                 await semantic_router.aclose()
                 self.live_sockets.discard(ws)
@@ -1367,5 +1465,8 @@ class RealtimeConnection:
                 if owns_reservation:
                     self.live_harnesses.pop(session_id, None)
                     owner.transitioning = False
+                    owner.releasing = False
+                    # Wakes a reconnect that is waiting for this session.
+                    owner.released.set()
                     interaction_state.reset_playback()
         return ws

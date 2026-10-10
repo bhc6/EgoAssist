@@ -1,0 +1,31 @@
+# Store text files with LF in the repository regardless of platform.
+#
+# Without this, a Windows working tree (where most editors write CRLF) makes
+# every touched file show as fully modified: the repository holds LF, the file
+# on disk holds CRLF, and each line counts as a change. Text is normalised to
+# LF on commit so diffs and reviews stay about content, not line endings.
+* text=auto eol=lf
+
+# Windows-only scripts keep CRLF so cmd.exe and PowerShell parse them.
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+
+# Binary assets: never touch line endings.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.pdf binary
+*.zip binary
+*.whl binary
+*.mp4 binary
+*.mkv binary
+*.mov binary
+*.bin binary
+*.pt binary
+*.pth binary
+*.safetensors binary
+*.sqlite3 binary
+*.db binary

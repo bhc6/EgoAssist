@@ -307,10 +307,10 @@ def test_unrelated_chinese_cards_do_not_match_on_one_shared_character(tmp_path):
     assert result["selected"] == []
 
 
-def test_default_retrieval_excludes_legacy_and_scene_even_when_text_matches(tmp_path):
+def test_default_retrieval_excludes_legacy_but_recalls_scene(tmp_path):
     memory = TimelineMemory(tmp_path / "timeline.sqlite3")
     remember(memory, "开瑞坦放在书桌右边的架子上", kind="legacy")
-    remember(memory, "开瑞坦放在书桌右边的架子上", kind="scene")
+    scene = remember(memory, "开瑞坦放在书桌右边的架子上", kind="scene")
     fact = remember(
         memory, "开瑞坦放在书桌右边的架子上", kind="state",
         subject="开瑞坦", predicate="location", value="书桌右边的架子上",
@@ -321,8 +321,10 @@ def test_default_retrieval_excludes_legacy_and_scene_even_when_text_matches(tmp_
         query_spec={"subject": "开瑞坦", "predicate": "location"},
     )
 
-    assert [item["cardId"] for item in result["selected"]] == [fact["id"]]
-    assert {item["kind"] for item in result["candidates"]} == {"state"}
+    # Scene cards are no longer write-only; the structured fact still ranks first.
+    assert [item["cardId"] for item in result["selected"]][0] == fact["id"]
+    assert {item["kind"] for item in result["candidates"]} == {"state", "scene"}
+    assert scene["id"] in {item["cardId"] for item in result["candidates"]}
     assert result["minimumScore"] == DEFAULT_RETRIEVAL_MIN_SCORE
 
 
@@ -372,6 +374,8 @@ def test_memory_draft_persists_and_rejects_unrelated_entity(tmp_path):
     assert restored.draft_accepts(pending, subject="小李", predicate="phone")
     assert not restored.draft_accepts(pending, subject="小陈", predicate="phone")
     assert not restored.draft_accepts(pending, subject="小李", predicate="location")
+    # A subjectless atom cannot fill a slot that is already keyed to a subject.
+    assert not restored.draft_accepts(pending, subject=None, predicate="phone")
 
 
 def test_real_civil_time_is_separate_from_recording_time(tmp_path):
@@ -515,16 +519,13 @@ def test_v1_database_migrates_in_place_without_losing_cards(tmp_path):
         version = connection.execute(
             "SELECT value FROM timeline_meta WHERE key='schema_version'"
         ).fetchone()[0]
-    assert version == "3"
+    assert version == "4"
+    # v4 backfills the term index for pre-existing rows.
+    assert restored.retrieve("旧版记忆", user_id="user-a", case_id="case-a", scope="case")["selected"][0]["cardId"] == "legacy-card"
 
 
 def test_dst_day_ranges_follow_civil_calendar_and_normalize_missing_hour():
-    try:
-        from zoneinfo import ZoneInfo
-        ZoneInfo("America/New_York")
-    except Exception:
-        return
-
+    # tzdata is a required dependency, so this needs no availability guard.
     spring = ClockContext.current(
         "America/New_York", -300,
         now_utc=datetime(2026, 3, 8, 12, 0, tzinfo=timezone.utc),
@@ -573,11 +574,3 @@ def test_clock_query_uses_exact_minute_instead_of_following_day(tmp_path):
         clock=clock, query_spec={"subject": "用户", "predicate": "medication.taken"},
     )
     assert [item["cardId"] for item in result["selected"]] == [first["id"]]
-
-
-def test_draft_with_known_subject_rejects_subjectless_atom(tmp_path):
-    memory = TimelineMemory(tmp_path / "timeline.sqlite3")
-    draft = memory.begin_draft(
-        user_id="user-a", case_id="case-a", subject="小李", predicate="phone",
-    )
-    assert not memory.draft_accepts(draft, subject=None, predicate="phone")

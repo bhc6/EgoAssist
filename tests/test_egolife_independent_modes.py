@@ -72,3 +72,21 @@ def test_retrieval_never_indexes_unfinished_future_source(experiment, tmp_path):
     assert result["visibleSources"] == 1
     assert "future" not in result["candidateIds"]
     assert "future" not in result["selectedIds"]
+
+
+def test_event_unit_is_withheld_until_its_last_cue_ends(experiment, tmp_path):
+    dataset, output = tmp_path / "data", tmp_path / "run"
+    dataset.mkdir()
+    output.mkdir()
+    records = [{"sourceId": sid, "videoId": "DAY2:00", "text": text, "kind": "caption", "start": start,
+                "end": end, "day": "DAY2", "path": sid + ".srt", "cue": 1}
+               for sid, start, end, text in [("past", 86400, 86401, "The cup is on the desk."),
+                                             ("future", 86401.5, 86403, "The cup moved into the cabinet.")]]
+    question = {"id": "synthetic", "day": "DAY2", "queryClock": "00000200", "cutoff": 86402,
+                "question": "Where is the cup?", "options": {"A": "desk", "B": "cabinet", "C": "chair", "D": "floor"}}
+    (dataset / "sources.json").write_text(json.dumps(records), encoding="utf-8")
+    (dataset / "questions.json").write_text(json.dumps([question]), encoding="utf-8")
+    result = experiment.retrieve_all(dataset, output, "event")[0]
+    # Both cues form one unit that ends after the cutoff, so nothing is visible yet.
+    assert result["visibleSources"] == 0
+    assert result["candidateSourceIds"] == [] and result["selectedSourceIds"] == []

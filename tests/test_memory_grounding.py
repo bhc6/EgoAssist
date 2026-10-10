@@ -109,7 +109,9 @@ def test_recurring_plan_does_not_prove_todays_completion(tmp_path):
 
 
 @pytest.mark.parametrize("subject,value", [("他", "42"), ("钥匙", "那里"), ("那个", "门口")])
-def test_unresolved_reference_does_not_become_current_fact(tmp_path, subject, value):
+def test_unresolved_reference_does_not_become_current_fact(tmp_path, monkeypatch, subject, value):
+    # Verifies the strict reference contract (see tests/test_reference_policy.py for demote/off).
+    monkeypatch.setenv("EGOASSIST_MEMORY_REFERENCE_POLICY", "strict")
     memory = TimelineMemory(tmp_path / "memory.db")
     card = save(memory, f"{subject}的位置是{value}", kind="state", subject=subject, predicate="位置", value=value)
     assert card["status"] == "pending"
@@ -158,12 +160,11 @@ def test_relative_day_expressions_use_source_civil_calendar(phrase, date):
     assert result["expressions"][0]["localDate"] == date
 
 
-def test_date_aliases_and_daylight_savings_are_not_ambiguous():
+def test_date_aliases_are_not_ambiguous():
+    # The same-day-with-explicit-date case. DST spans are covered by
+    # test_timeline_memory.test_dst_day_ranges_follow_civil_calendar...
     result = resolve_time_semantics("今天（2026年9月11日）", TODAY, kind="event")
     assert result["ambiguous"] is False
-    dst = ClockContext.current("America/New_York", now_utc=datetime(2026, 11, 1, 12, tzinfo=timezone.utc))
-    result = resolve_time_semantics("今天", dst, kind="event")
-    assert datetime.fromisoformat(result["effectiveEnd"]) - datetime.fromisoformat(result["effectiveAt"]) == timedelta(hours=25)
 
 
 def test_restart_keeps_unknown_event_time_unknown(tmp_path):

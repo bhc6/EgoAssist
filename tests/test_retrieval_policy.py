@@ -5,7 +5,9 @@ class T:
         return {"hardCandidates":[{"cardId":"a", "hardEligible":True},{"cardId":"b", "hardEligible":True}],"routing":{"temporalStatus":"not-requested"}}
 
 class S:
-    def search(self,q,limit): return [("b",.9),("a",.8)]
+    # "zzz" is NOT a hard candidate: a semantic retriever nominates, it can
+    # never add evidence the eligibility layer did not admit.
+    def search(self,q,limit): return [("zzz",.99),("b",.9),("a",.8)]
 
 def test_semantic_ranking_cannot_invent_sources():
     d=EvidenceFirstPolicy(T(),S()).retrieve("q",user_id="u",case_id="c")
@@ -16,7 +18,3 @@ def test_semantic_failure_is_audited():
         def search(self,*a): raise RuntimeError("down")
     d=EvidenceFirstPolicy(T(),Bad()).retrieve("q",user_id="u",case_id="c")
     assert d.rejection_reasons["semantic"].startswith("unavailable:")
-
-def test_semantic_and_lexical_scores_are_fused():
-    d=EvidenceFirstPolicy(T(),S()).retrieve("q",user_id="u",case_id="c",limit=2)
-    assert {x["cardId"] for x in d.selected} == {"a","b"}

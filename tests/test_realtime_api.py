@@ -13,6 +13,9 @@ from egoassist.realtime import CaseWorkLedger, SessionJournal
 import run_egoassist
 from run_egoassist import create_app
 
+# Re-exported: other test modules import this helper from here by name.
+from tests.support import register_client
+
 
 ROOT = Path(__file__).parents[1]
 
@@ -65,13 +68,6 @@ def patch_semantic_router(monkeypatch):
     monkeypatch.setattr(run_egoassist.SemanticTurnRouter, "classify", classify)
 
 
-async def register_client(client, username="researcher"):
-    response = await client.post(
-        "/api/auth/register",
-        json={"username": username, "password": "baseline-pass-123"},
-    )
-    assert response.status == 200
-    return (await response.json())["user"]
 
 
 def semantic_result(text, *, selected_skill=None):

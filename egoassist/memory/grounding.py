@@ -17,6 +17,10 @@ _REFERENCE = re.compile(r"^(?:他|她|它|他们|她们|它们|这个|那个|这
 _DEICTIC = re.compile(r"这个|那个|这里|那里|这儿|那儿|这件事|那件事|(?<!其)[他她它](?:们)?|"
                       r"\b(?:he|she|it|they|here|there)\b", re.I)
 
+# metadata["timeBasis"] values meaning effectiveAt/effectiveEnd were measured
+# from source media, so text-derived time must never override them.
+MEASURED_TIME_BASES = frozenset({"measured", "source-media", "synthetic-relative-day"})
+
 
 def evidence_contract(card: dict[str, Any]) -> dict[str, Any]:
     """Derive temporal/identity boundaries using the *source* clock, never recall time."""
@@ -39,7 +43,12 @@ def evidence_contract(card: dict[str, Any]) -> dict[str, Any]:
     start, end = card.get("effectiveAt"), card.get("effectiveEnd")
     status = "resolved" if start else "unspecified"
     # Do not turn a video import's wall clock into the video's calendar date.
-    imported = "videoStartSeconds" in metadata or metadata.get("visualEvidence")
+    # Likewise, a card whose time was *measured* from its source media (an SRT
+    # cue interval, a frame timestamp, a dataset clock) already carries the
+    # authoritative event time. Its text is speech or a caption *about* the
+    # world; a "明天" inside it is what someone said, not when it happened.
+    imported = ("videoStartSeconds" in metadata or metadata.get("visualEvidence")
+                or metadata.get("timeBasis") in MEASURED_TIME_BASES)
     if not imported:
         if temporal["status"] == "needs-clarification":
             start = end = None

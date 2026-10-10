@@ -148,14 +148,68 @@ def validate_updates(value, state, batch):
     return result
 
 
+def project_to_timeline(timeline, events, *, user_id, case_id):
+    """Write derived long events as retrievable long-tier ``event`` cards.
+
+    Long events used to live only in the journal (``long_event.batch``), so
+    ``TimelineMemory.retrieve`` could never see them. Each revision becomes one
+    card that replaces the previous revision's card. The card keeps the source
+    ids, so ``forget_sources`` still cascades, and it is labelled as a derived
+    hypothesis, never as independent evidence.
+    """
+    written = []
+    for event in events:
+        revision = int(event.get('revision', 1))
+        card_id = f"longevent-{event['eventId']}-r{revision}"
+        # Replace whichever earlier revision is currently active, not just r-1:
+        # if writing r-1 had failed, r-2 would otherwise stay active alongside.
+        prefix = f"longevent-{event['eventId']}-r"
+        active = [card for card in timeline.cards(
+                      user_id=user_id, case_id=case_id, scope='case', kinds=('event',))
+                  if card['id'].startswith(prefix) and card['id'] != card_id
+                  and int(card['id'][len(prefix):] or 0) < revision]
+        replaces = max(active, key=lambda c: int(c['id'][len(prefix):]))['id'] if active else None
+        coverage_value = event.get('coverage') or {}
+        first, last = coverage_value.get('firstEvidenceAt'), coverage_value.get('lastEvidenceAt')
+        phases = '；'.join(p.get('description', '') for p in event.get('phases', [])[-6:] if p.get('description'))
+        text = '\n'.join(part for part in (event.get('title'), event.get('summary'),
+                                           ('阶段：' + phases) if phases else None) if part)
+        span = first and last and datetime.fromisoformat(last) > datetime.fromisoformat(first)
+        card = timeline.remember(
+            text, user_id=user_id, case_id=case_id, scope='case', kind='event', tier='long',
+            happened_at=first, recorded_at=event.get('updatedAt') or last, effective_at=first,
+            effective_end=last if span else None,
+            source_ids=list(event.get('sourceIds', [])), importance=0.8, supersede=False,
+            card_id=card_id, replaces_card_id=replaces,
+            metadata={'producer': 'long-events', 'timeBasis': 'measured', 'longEventId': event['eventId'],
+                      'revision': revision, 'eventStatus': event.get('status'),
+                      'uncertainties': list(event.get('uncertainties', [])),
+                      'claim': 'derived-hypothesis-not-independent-evidence'})
+        if card:
+            written.append(card)
+    return written
+
+
 class LongEvents:
-    def __init__(self, journal, key):
+    def __init__(self, journal, key, *, on_batch=None):
         self.journal = journal
         self.service = AnswerService(key, model=os.getenv('EGOASSIST_EVENT_MODEL', 'qwen-flash'), timeout=30)
         self.task = None
         self.lock = asyncio.Lock()
         self.last_attempt = 0
         self.closed = False
+        # Optional consumer of each validated batch (e.g. timeline projection).
+        # Failures there never fail derivation: the journal stays the source of truth.
+        self.on_batch = on_batch
+
+    def _publish(self, updates):
+        if not self.on_batch or not updates:
+            return
+        try:
+            self.on_batch(updates)
+        except Exception as exc:
+            self.journal.append('long_event.projection_failed', {'error': type(exc).__name__ + ': ' + str(exc)[:180],
+                                                                  'eventIds': [u['eventId'] for u in updates]})
 
     def schedule(self, *, force=False):
         if self.closed or not self.service.key or self.task and not self.task.done():
@@ -226,6 +280,7 @@ class LongEvents:
                         'requestId': request['id'], 'model': self.service.model, 'providerRequestId': payload.get('request_id'),
                         'ignoredWithoutNewEvidence': len(parsed['updates']) - len(updates)}, required_event_ids=deps)
                     self.journal.append('long_event.job', {'status': 'completed', 'requestId': request['id']})
+                    self._publish(updates)
                 except asyncio.CancelledError:
                     self.journal.append('long_event.job', {'status': 'queued', 'requestId': request['id']})
                     raise

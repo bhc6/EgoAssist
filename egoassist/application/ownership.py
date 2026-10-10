@@ -248,6 +248,14 @@ class CaseRuntimeOwner:
     maintenance_task: asyncio.Task | None = None
     consolidation_requested: bool = False
     transitioning: bool = False
+    # Set when a socket's teardown has fully finished; wakes a reconnect that
+    # is waiting for the session (see RealtimeConnection.await_socket_release).
+    # It starts cleared, which is harmless: the gate checks socket_token and
+    # transitioning first and only uses this event to wake up early.
+    released: asyncio.Event = field(default_factory=asyncio.Event)
+    # True from the first line of a socket's teardown until it is released, so
+    # a reconnect in that window waits instead of being refused as live.
+    releasing: bool = False
     turn_sequence: int = 0
     latest_input_sequence: int = 0
     # Input receipt never owns speech. Only a validated semantic decision can

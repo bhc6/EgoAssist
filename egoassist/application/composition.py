@@ -868,6 +868,12 @@ def create_app(
         owner.scene = SharedScene(
             journal, os.getenv("QWEN_API_KEY") or os.getenv("DASHSCOPE_API_KEY") or ""
         )
+        from egoassist.memory.long_events import project_to_timeline
+
+        # Derived long events become retrievable long-tier timeline cards.
+        owner.scene.events.on_batch = lambda events, _u=user_id, _s=session_id: project_to_timeline(
+            timeline, events, user_id=_u, case_id=_s
+        )
         owner.scene.recover()
 
         # Phase 1: Memory observability bus
@@ -2513,6 +2519,8 @@ def create_app(
     get_privacy_export = _memoryendpoints.get_privacy_export
     get_timeline_memory = _memoryendpoints.get_timeline_memory
     post_candidate = _memoryendpoints.post_candidate
+    get_pending_claims = _memoryendpoints.get_pending_claims
+    post_pending_claim = _memoryendpoints.post_pending_claim
     post_delete = _memoryendpoints.post_delete
     post_insight = _memoryendpoints.post_insight
     post_insight_cancel = _memoryendpoints.post_insight_cancel
@@ -2725,6 +2733,8 @@ def create_app(
             web.post("/api/livekit/token", post_livekit_token),
             web.post("/api/results/dismiss", post_result_dismiss),
             web.post("/api/candidate", post_candidate),
+            web.get("/api/memory/pending", get_pending_claims),
+            web.post("/api/memory/pending", post_pending_claim),
             web.post("/api/memory/delete", post_delete),
             web.post("/api/tools/execute", post_tool),
             web.get("/ws/realtime", realtime),

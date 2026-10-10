@@ -9,6 +9,7 @@ from egoassist.realtime.direct_visual import prepared_visual_answer, validate_di
 from test_modular_realtime import conversation, settle
 from egoassist.product.answer_jobs import AnswerJobs, answer_jobs
 from egoassist.core.journal import SessionJournal
+from tests.support import run_node
 
 
 ANSWER = {'text': '画面中是红白格桌布。', 'model': 'test-vl', 'sourceIds': ['frame-1']}
@@ -93,7 +94,7 @@ def test_ui_reports_actual_stages_and_correlates_tts():
         {'type': 'provider.pipeline.metrics', 'payload': {'responseId': 'other', 'stage': 'text', 'apiCalls': 1, 'model': 'other-model'}},
     ]
     script = source + '\nconsole.log(JSON.stringify(turnModelStages({turnId:"t",semantic:{model:"jev"}},' + json.dumps(events) + ')));'
-    result = subprocess.run(['node', '-e', script], capture_output=True, text=True, encoding='utf8', check=True)
+    result = run_node(script, via_stdin=False)
     assert [s['model'] for s in json.loads(result.stdout)] == ['jev', 'test-vl', 'tts-model']
 
 
@@ -110,7 +111,7 @@ def test_ui_reports_jev_route_and_probabilities():
         }}},
     }
     script = source + '\nconsole.log(jevRouteSummary(' + json.dumps(semantic) + '));\nconsole.log(jevRouteDetails(' + json.dumps(semantic) + '));'
-    result = subprocess.run(['node', '-e', script], capture_output=True, text=True, encoding='utf8', check=True)
+    result = run_node(script, via_stdin=False)
     lines = result.stdout.splitlines()
     assert '回答' in lines[0] and '对助手' in lines[0] and '语音' in lines[0]
     assert '路由：回答' in result.stdout and 'JEV选择' in result.stdout and '98%' in result.stdout and '分类总耗时：812.4 ms' in result.stdout

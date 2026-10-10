@@ -322,6 +322,58 @@ class MemoryEndpoints:
             )
         return self.web.json_response(self.scoped_state_for_user(user_id, session_id))
 
+    async def get_pending_claims(self, request):
+        """List inferred-consent claims awaiting user confirmation."""
+        user_id = request[self.user_key]["id"]
+        session_id = str(request.query.get("session", "")).strip() or None
+        scope = "case" if session_id else "participant"
+        if session_id:
+            self.identity.get_context_session(user_id, session_id)
+        try:
+            limit = max(1, min(int(request.query.get("limit", "50")), 200))
+        except ValueError:
+            return self.web.json_response({"error": "limit must be an integer"}, status=400)
+        cards = self.memory_service.pending_claims(user_id, session_id, scope=scope, limit=limit)
+        return self.web.json_response({
+            "sessionId": session_id,
+            "scope": scope,
+            "claims": [
+                {
+                    "id": card["id"], "kind": card["kind"], "text": card["text"],
+                    "happenedAt": card.get("happenedAt"),
+                    "happenedAtBeijing": format_beijing_iso(card.get("happenedAt")),
+                    "subject": card.get("subject"), "predicate": card.get("predicate"),
+                    "value": card.get("value"),
+                    "referenceStatus": card.get("grounding", {}).get("referenceStatus"),
+                }
+                for card in cards
+            ],
+        })
+
+    async def post_pending_claim(self, request):
+        """Confirm or reject one pending claim; rejection is a soft delete."""
+        user_id = request[self.user_key]["id"]
+        payload = await request.json()
+        card_id = str(payload.get("cardId", "")).strip()
+        if not card_id:
+            return self.web.json_response({"error": "cardId is required"}, status=400)
+        session_id = str(payload.get("sessionId", "")).strip() or None
+        if session_id:
+            self.identity.get_context_session(user_id, session_id)
+        accepted = bool(payload.get("accepted"))
+        try:
+            card = self.memory_service.resolve_pending_claim(user_id, session_id, card_id, accepted)
+        except ValueError as exc:
+            return self.web.json_response({"error": str(exc)}, status=404)
+        if session_id:
+            self.append_memory_audit(
+                self.case_journal(user_id, session_id),
+                "memory.confirmed" if accepted else "memory.rejected",
+                "pending-claim",
+                {"memoryId": card["id"], "kind": card["kind"], "accepted": accepted},
+            )
+        return self.web.json_response({"card": {"id": card["id"], "status": card["status"]}})
+
     async def post_delete(self, request):
         user_id = request[self.user_key]["id"]
         payload = await request.json()
