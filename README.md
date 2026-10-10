@@ -1,189 +1,161 @@
 # EgoAssist
 
-面向智能眼镜助手的本地软件 Demo 和记忆研究项目。浏览器提供文本、麦克风和摄像头入口，Python 服务管理案例与持久状态。JEV 可承担有限路由与控制判断，Qwen 提供复杂提取、实时回答和报告生成。
+面向智能眼镜的第一视角助手：本地 Python 服务 + 浏览器控制台。浏览器提供文本、麦克风和摄像头输入，服务端负责实时对话、现场观察、长期记忆和日记回顾。Qwen（DashScope）提供识别、理解、回答与报告；可选 JEV（OpenRouter）承担轻量路由与控制判断。
 
-EgoAssist 可作为科研工程基座；新的机制对照与评分由独立项目 MemoryMechanismLab 管理，两者分别构建和发布。见[产品与科研边界](docs/RESEARCH_BOUNDARY.md)。
+项目同时是记忆研究的工程基座。新的机制对照与评分在独立项目 MemoryMechanismLab 中进行，两者分开构建与发布，见[产品与科研边界](docs/RESEARCH_BOUNDARY.md)。
 
-## 核心
+> 软件测试通过不代表模型判断正确，也不代表眼镜硬件已经验收。
 
-| 链路 | 职责 | 核心代码 |
-| --- | --- | --- |
-| 观察 | 采样声画、理解现场、校验证据 | `realtime/observation_service.py`、`realtime/scene.py` |
-| 交互 | 理解输入、打断与补答、执行 Skill 和工具 | `realtime/turn_coordinator.py`、`realtime/interaction_service.py` |
-| 记忆 | 原文证据、派生记忆、时间检索、纠正及遗忘 | `memory/evidence_service.py`、`memory/source_index.py`、`memory/commit.py` |
+## 快速开始
 
-三条链路独立执行，通过带来源的事件协作。Skill、工具和报告是链路内能力。软件测试不证明模型判断正确，也不代表眼镜硬件已经验收。
+环境：Windows + Python 3.13 + Edge 为主要验证环境；云端 Demo 不需要 GPU。以下命令在项目根目录（本机为 `D:\DEMO\EgoAssist`）的 PowerShell 中执行。
 
-日常对话的发言时机由语义控制：附和和旁人交谈保留当前回答，新问题与停止指令才切换发言状态。连续输入的回答会等待短暂语音间隙，不因收到下一段转写就丢失。机制、EgoLife 失败迭代及真实浏览器验收见[日常对话语义交接](docs/DAILY_DIALOGUE_2026-09-26.md)。
+```powershell
+py -3.13 -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -e ".[dev,modular]"
+if (-not (Test-Path .env)) { Copy-Item .env.example .env }
+```
 
-## 启动
+在 `.env` 中填写 `QWEN_API_KEY`（或 `DASHSCOPE_API_KEY`），账户需有对应模型权限，网络需能访问 DashScope 的 HTTPS 与 WebSocket。**不要提交 `.env`。**
 
-完整功能演示使用[演示指南](docs/DEMO_GUIDE.md)：统一启动检查、独立演示数据、四种 Skill、七个任务入口、语音、视觉、记忆和日/周/月回顾。
+```powershell
+.\.venv\Scripts\python.exe .\run_egoassist.py --open
+```
+
+`--open` 会等服务开始监听后再打开浏览器。终端出现 `Running on http://127.0.0.1:8770` 即可访问；按 `Ctrl+C` 停止。首次使用先注册账户并创建案例，麦克风和摄像头需要浏览器授权。Linux/macOS 用 `.venv/bin/python`（未全面验证）。
+
+| 页面 | 地址 |
+| --- | --- |
+| 助手：语音、摄像头、任务 | <http://127.0.0.1:8770/> |
+| 个人日记：日报、周报、月报 | <http://127.0.0.1:8770/diary.html> |
+
+完整功能演示（统一检查、独立演示数据、四个 Skill、七个任务入口）见[演示指南](docs/DEMO_GUIDE.md)：
 
 ```powershell
 .\.venv\Scripts\python.exe scripts/demo.py check
 .\.venv\Scripts\python.exe scripts/demo.py start
 ```
 
-首次使用先完成下面的依赖和密钥配置；演示入口另需 `.[modular]` 与 `playwright`，具体安装命令见指南。
+## 架构
 
-云端 Demo 不需要 GPU。主要本地验证环境为 Windows、Python 3.13、Edge。
+三条链路各自执行，通过带来源的事件协作：
 
-以下 PowerShell 命令在项目根目录执行，本工作区为 `D:\DEMO\EgoAssist`。首次使用先创建虚拟环境并安装依赖；已经完成安装时可直接运行后面的启动命令。
+| 链路 | 职责 | 核心代码 |
+| --- | --- | --- |
+| 观察 | 采样声画、理解现场、校验证据 | `realtime/observation_service.py`、`realtime/scene.py` |
+| 交互 | 理解输入、打断与补答、执行 Skill 和工具 | `realtime/turn_coordinator.py`、`realtime/interaction_service.py` |
+| 记忆 | 原文证据、派生记忆、时间检索、纠正与遗忘 | `memory/evidence_service.py`、`memory/timeline.py`、`memory/commit.py` |
 
-```powershell
-py -3.13 -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -e ".[dev]"
-if (-not (Test-Path .env)) { Copy-Item .env.example .env }
-```
+发言时机由语义控制：附和与旁人交谈不打断当前回答，新问题和停止指令才切换。见[日常对话语义交接](docs/DAILY_DIALOGUE_2026-09-26.md)。
 
-在 `.env` 填写 `QWEN_API_KEY` 或 `DASHSCOPE_API_KEY`，需要对应模型权限以及 DashScope HTTPS/WebSocket 网络访问。不要提交密钥。
-
-本工作区正式使用 JEV 优先路由：另配 `OPENROUTER_API_KEY`，并设置 `EGOASSIST_TURN_ROUTER_BACKEND=openrouter-decisions`。JEV 连接复用、TTS 准备并行及长会话上下文精简默认启用；只配置 Qwen 的新安装仍可使用模板中的 `qwen` 路由。启用结果与限制见[长会话优化及正式启用记录](docs/LONG_SESSION_OPTIMIZATION_2026-09-25.md)。
-
-```powershell
-.\.venv\Scripts\python.exe .\run_egoassist.py --open
-```
-
-入口文件名是 `run_egoassist.py`，下划线前不要加反斜杠。命令直接使用虚拟环境中的 Python，无需另外激活环境。
-
-`--open` 会等待服务完成初始化并成功监听端口后，再打开默认浏览器。看到终端显示 `Running on http://127.0.0.1:8770` 后，也可直接访问 [http://127.0.0.1:8770/](http://127.0.0.1:8770/)。运行期间保留终端，按 `Ctrl+C` 停止服务。
-
-注册账户并创建案例；媒体设备需要浏览器授权。Linux/macOS 使用 `.venv/bin/python`，不假定所有平台均已验证。
-
-### 日常使用入口
-
-同一服务、同一账户即可使用下面的功能。个人日记无需另外启动服务或注册账号。
-
-| 功能 | 默认本地地址 |
+| 目录 | 定位 |
 | --- | --- |
-| 助手、语音、摄像头与任务 | <http://127.0.0.1:8770/> |
-| 个人日记、日报、周报、月报 | <http://127.0.0.1:8770/diary.html> |
+| `egoassist/application/` | 服务装配、HTTP/WebSocket 接口、账户与案例生命周期 |
+| `egoassist/core/` | 无上层依赖的共享契约、来源日志、删除规则 |
+| `egoassist/realtime/`、`egoassist/memory/` | 三条核心链路 |
+| `egoassist/product/` | 持久作业、隐私、提醒、外部连接器 |
+| `egoassist/diary/` | 个人日记与日/周/月分层压缩 |
+| `egoassist/console/` | 原生 JS 控制台（资源随包分发，不依赖 CDN） |
+| `egoassist/skills/`、`prompts/`、`watchlists/` | 政策与资源的唯一来源 |
+| `egoassist/capture/`、`backends/`、`qa/`、`retrieval/`、`abstention/`、`eval/` | 离线视频记忆研究，不在实时主流程 |
+| `tests/`、`scripts/`、`docs/` | 回归测试、诊断与验收脚本、架构与实验记录 |
 
-日记是独立持久任务与归档模块，共享账户权限和三链路来源。结构化历史导入与问答使用 `/api/history/*`，见[当前功能和实现选择](docs/README.md)。多个端口的旧演示是不同数据环境，日常使用不需要照搬。
+运行形态为本地单进程。详见 [ARCHITECTURE.md](ARCHITECTURE.md) 与 [MEMORY_ARCHITECTURE.md](MEMORY_ARCHITECTURE.md)。内置 Skill：`kitchen-coach`、`assembly-coach`、`packing-coach`、`field-notes`。
 
-### 页面打不开
+## 记忆
 
-- 浏览器未自动打开，或之前显示无法连接：等待终端出现 `Running on`，再访问上面的地址或刷新页面，无需重复启动。
-- 端口已占用或数据目录已被锁定：先检查是否已有实例运行；需要第二个实例时，同时更换端口和数据根目录，见下方命令。
-- 程序报错退出：先看终端错误；默认日志位于 `.egoassist/server.log`。可在另一个 PowerShell 窗口检查服务和日志：
+原话先落盘为原文证据，再按策略提取事实、偏好与事件，写成 Timeline 卡片（SQLite）。回答时按用户、案例、时间范围检索并注入带来源的证据；后台负责失败恢复、长事件整理与日记压缩。
+
+- **检索**：默认是词法检索——三字 trigram 全文索引加一个能匹配两字中文词的词项索引，打分前先过范围、时间、主体等硬过滤，最多评分 256 个候选（`EGOASSIST_MEMORY_CANDIDATE_LIMIT`）。
+- **可选语义通道**：`EGOASSIST_MEMORY_EMBEDDER=dashscope` 启用向量召回（text-embedding-v3）。它只能提名候选、救回零词面重叠的改写，不会绕过任何硬过滤；向量随卡片一起删除。默认关闭。
+- **指代策略**：`EGOASSIST_MEMORY_REFERENCE_POLICY` 控制只有代词、没有主体的卡片能否作答——`strict`（默认，不作答）、`demote`（降权）、`off`。
+- **记忆单元**：带起止区间；离线 EgoLife 实验可把字幕合并为 ≤30 秒的事件单元，并带结构化说话人。
+- **分层**：长事件写成 long 层卡片；`build_digests` 把相邻卡片聚合成摘要卡，子卡被删除或更正时摘要卡一并作废。
+- **待确认记忆**：推断得来的事实先挂起，可通过 `GET/POST /api/memory/pending` 确认或拒绝。
+- **删除**：关闭记忆、删除卡片和擦除原始来源的影响范围不同，详见记忆文档。
+
+当前历史问答开发集证据召回为 **72.82%**（目标 80%，未达到），见[证据架构与校正结果](docs/SOURCE_EVIDENCE_LIFECYCLE_FIX_2026-09-17.md)。2026-10-09 的建库修复与 EgoLife 30 题检索消融见 [TIMELINE_BUILD_FIX](docs/TIMELINE_BUILD_FIX_2026-10-09.md)：改用事件单元后候选池命中 4/30 → 18/30、Top-5 命中 0 → 4/30，其中一部分来自每张卡覆盖时长变长，引用时需一并说明。各实验协议不混合排名，见[历史实验索引](docs/HISTORY.md)。
+
+## 配置
+
+全部配置见 [.env.example](.env.example)，依赖以 [pyproject.toml](pyproject.toml) 为准。
+
+| 设置 | 作用 |
+| --- | --- |
+| `QWEN_API_KEY` / `DASHSCOPE_API_KEY` | 必填，云端模型 |
+| `EGOASSIST_REALTIME_BACKEND` / `--realtime-backend` | `modular`（默认：ASR + VL + 文本 + 流式 TTS）或 `omni` |
+| `EGOASSIST_TURN_ROUTER_BACKEND` | `qwen`（默认）或 `openrouter-decisions`（JEV 优先，另需 `OPENROUTER_API_KEY`） |
+| `EGOASSIST_MEMORY_REFERENCE_POLICY` | `strict` / `demote` / `off` |
+| `EGOASSIST_MEMORY_EMBEDDER` | `none` / `hashing`（离线测试用，非语义）/ `dashscope` |
+| `LIVEKIT_URL` / `_API_KEY` / `_API_SECRET` | 配齐后媒体走 LiveKit RTC，否则走 WebSocket |
+| `EGOASSIST_TEMPORAL_TARGET` | 提醒功能所需的 Temporal 服务 |
+
+后端对照见[模块化实时后端](docs/MODULAR_REALTIME_2026-09-14.md)与[语音后端对照](docs/VOICE_BACKEND_COMPARISON_2026-09-26.md)；JEV 启用记录见[长会话优化](docs/LONG_SESSION_OPTIMIZATION_2026-09-25.md)。离线模型研究另装 `.[gpu,api]`，PyTorch 按平台单独安装。
+
+第二个实例必须同时更换端口和数据根目录（每个根目录只允许一个进程持有写入租约）：
+
+```powershell
+.\.venv\Scripts\python.exe .\run_egoassist.py --port 8780 --memory-path .egoassist-second/runtime.json --open
+```
+
+## 故障排查
+
+**页面打不开**：等终端出现 `Running on` 后刷新，不要重复启动。端口或数据目录被占用时，检查是否已有实例在运行。日志在 `.egoassist/server.log`：
 
 ```powershell
 Invoke-WebRequest -Uri http://127.0.0.1:8770/ -UseBasicParsing | Select-Object StatusCode
 Get-Content .\.egoassist\server.log -Tail 40
 ```
 
-首页返回 `200` 表示 HTTP 页面可访问，不代表云端模型或麦克风、摄像头已经连接成功。使用自定义端口时，相应修改检查地址。
+返回 `200` 只说明页面可访问，不代表模型、麦克风或摄像头已经连通。
 
-### 模型拒绝访问或记忆解析失败
+**实时连接断开**：浏览器会自动重连（最多 6 次，退避约 15 秒）。服务端会等旧连接关闭完成后再接入新连接，不再因为重连过快而返回 409。同一会话若已在另一个标签页打开，第二个连接仍会被拒绝——这是"一个会话一条连接"的规则。
 
-- 返回 `Arrearage`：在阿里云百炼检查当前 API Key 所属账户的计费状态，处理欠费或充值。仅有 `AccessDenied` 时，还需检查密钥和模型访问权限。
-- 账户限制会停止自动重试和 Omni 重连。恢复账户后，结束并重新建立浏览器实时连接；必要时重启服务。
-- 失败输入仍然保留。在提示词审计的记忆恢复记录中，核对原话后点击“重试解析”，不要批量重放可能包含环境语音的历史输入。
+**模型拒绝访问**：`Arrearage` 表示账户欠费，请在阿里云百炼检查计费；`AccessDenied` 还需核对密钥和模型权限。账户恢复后重新建立实时连接。解析失败的输入不会丢，可在提示词审计的记忆恢复记录中核对原话后点"重试解析"。见[实时异常处理记录](docs/LIVE_FAILURE_REMEDIATION_2026-09-14.md)。
 
-已确认的异常、修复与验证见[实时异常处理记录](docs/LIVE_FAILURE_REMEDIATION_2026-09-14.md)。
-
-### 切换模式与多实例
-
-默认使用模块化实时链路，由 ASR、VL、文本模型和流式 TTS 分工。也可显式切回 Omni 对照：
-
-```powershell
-.\.venv\Scripts\python.exe -m pip install -e ".[modular]"
-.\.venv\Scripts\python.exe .\run_egoassist.py --realtime-backend modular --open
-```
-
-切回使用 `--realtime-backend omni`；配置、真实对照结果和限制见[模块化实时后端](docs/MODULAR_REALTIME_2026-09-14.md)与[语音后端对照](docs/VOICE_BACKEND_COMPARISON_2026-09-26.md)。
-
-第二个实例必须同时使用不同端口和数据根目录：
-
-```powershell
-.\.venv\Scripts\python.exe .\run_egoassist.py --port 8780 --memory-path .egoassist-real-demo/runtime.json --open
-```
-
-`--memory-path` 的父目录是整个持久数据根目录，每个根目录只允许一个服务进程持有写入租约。
-
-## 结构与边界
-
-| 目录 | 定位 |
-| --- | --- |
-| `egoassist/application/` | 服务装配、接口、账户和案例生命周期 |
-| `egoassist/core/` | 无上层依赖的共享契约、来源日志、增量投影和删除规则 |
-| `egoassist/realtime/`、`memory/` | 三条核心链路 |
-| `egoassist/product/` | 持久作业、隐私、资料、提醒和外部连接器 |
-| `egoassist/diary/` | 个人日记、日/周/月分层压缩、归档和生成恢复 |
-| `egoassist/console/` | 原生 JS 控制台与随包分发的媒体/PDF 资源 |
-| `egoassist/skills/`、`egoassist/prompts/`、`egoassist/watchlists/` | 政策与资源的唯一来源 |
-| `egoassist/capture/`、`backends/`、`qa/`、`retrieval/`、`habits/`、`abstention/`、`eval/` | 离线视频与记忆研究，不是实时主流程 |
-| `tests/`、`scripts/` | 行为回归、诊断、真实验收与研究入口 |
-| `docs/` | 当前架构、历史决策及实验记录 |
-
-运行形态仍是本地单进程。详细职责见 [ARCHITECTURE.md](ARCHITECTURE.md)，完整记忆机制见 [MEMORY_ARCHITECTURE.md](MEMORY_ARCHITECTURE.md)（2026-09-20 源码核对）。
-
-在线记忆同时使用原文证据索引和 Timeline 卡片：原话先持久化，再按政策提取事实与偏好；回答时按范围检索并注入证据，后台负责恢复、长事件与日记整理。默认检索使用 SQLite FTS/词法匹配，离线分层向量是另一路研究实现。关闭记忆开关、删除卡片和擦除原始来源的影响范围不同，详见记忆文档。
-
-- 实时回答、观察、补答和报告分别执行，仍共享进程、磁盘与网络。
-- 文本按账户、案例和请求 ID 去重。重启恢复持久任务，不保证云端调用或外部副作用恰好执行一次。
-- 静音、取消、生成完成和播放完成分别记录。刷新可恢复文本与任务，不恢复旧媒体连接或丢失的音频缓存。
-- 保留策略暂停该账户写入，清理过期来源及其派生记录；`make clean` 不删除用户数据。
-- 状态输出有界、投影增量更新，检索默认最多评分 256 个候选。首次恢复、导出和清理仍受历史规模影响；截断可能影响召回。
-
-内置 `kitchen-coach`、`assembly-coach`、`packing-coach`、`field-notes` 四个 Skill，共七个固定任务及一个无固定步骤工作流。确认检查点不证明实物动作已完成。
-
-## 配置与扩展
-
-配置集中在 [.env.example](.env.example)，依赖以 [pyproject.toml](pyproject.toml) 为准。
-
-- 配齐 `LIVEKIT_URL/API_KEY/API_SECRET` 后使用 LiveKit RTC/API，否则使用 WebSocket；不依赖 LiveKit Agents 框架。
-- 提醒需要 `EGOASSIST_TEMPORAL_TARGET`，通知、求助需要真实连接器；MCP 不由默认入口自动连接。
-- 离线模型研究安装 `.[gpu,api]`，PyTorch 按平台另装。声画分离模型见 `scripts/setup_shared_perception.py --help`。
-- 浏览器资源随包分发，不依赖运行时 CDN。维护使用 `npm ci`、`npm run vendor:livekit`、`npm run vendor:vad`。
-
-## 验证
+## 测试
 
 ```powershell
 # 确定性回归，不需要 API Key
-.venv\Scripts\python.exe -m pytest -p no:cacheprovider
-.venv\Scripts\python.exe scripts/benchmark_local_scaling.py
+.\.venv\Scripts\python.exe -m pytest -p no:cacheprovider
 
-# Edge 浏览器，需要 Playwright；默认不调用云端回答
-.venv\Scripts\python.exe -m pip install playwright
-.venv\Scripts\python.exe scripts/verify_browser.py --output outputs/new-browser
+# 浏览器验收（Edge + Playwright，默认不调用云端回答）
+.\.venv\Scripts\python.exe -m pip install playwright
+.\.venv\Scripts\python.exe scripts/verify_browser.py --output outputs/new-browser
 
-# 真实供应商，每次使用新目录保留证据
-.venv\Scripts\python.exe scripts/verify_real_turn_attribution.py --output outputs/new-attribution
-.venv\Scripts\python.exe scripts/benchmark_realtime_latency.py --output outputs/new-latency --repeats 3
+# 真实供应商验收，每次使用新目录保留证据
+.\.venv\Scripts\python.exe scripts/verify_real_turn_attribution.py --output outputs/new-attribution
+.\.venv\Scripts\python.exe scripts/benchmark_realtime_latency.py --output outputs/new-latency --repeats 3
 ```
 
-离线评测用 `run_egolife_benchmark.py --help`，记忆对比用 `scripts/compare_memory_mechanisms.py --help`，综合真实验收用 `scripts/verify_real_acceptance.py --help`。后两者需要相应数据源与供应商访问。
+2026-10-10，Python 3.13 / SQLite 3.53 下全量 1083 通过、3 跳过。跳过的是 3 个需要 Temporal 测试服务器的用例：本机未下载该二进制时自动跳过，联网运行一次后即可执行。需要 Node 的控制台测试在没有 Node 时同样跳过。公共测试工具在 `tests/support.py`。
 
-### 质量与历史实验
+离线评测：`run_egolife_benchmark.py --help`；EgoLife 检索消融：`scripts/egolife_independent_modes.py retrieve --unit event|cue`；记忆机制对比：`scripts/compare_memory_mechanisms.py --help`。
 
-当前原文历史问答的开发集最终证据召回为 **72.82%**，未达到 80% 目标；结构和引用 ID 校验不等于答案语义正确。见[证据架构与校正结果](docs/SOURCE_EVIDENCE_LIFECYCLE_FIX_2026-09-17.md)。
-
-EgoLifeQA A–D、向量检索、模块化实时后端等对照集中在[历史实验索引](docs/HISTORY.md)。不同协议、数据集合及评分口径不混合排名，未证明更优的研究方案不替换默认运行路径。
-
-### 工作区清理
-
-成功的确定性测试会自动清除本轮生成的临时目录；失败记录和显式 `--basetemp` 保留。Windows 下可预览并清理旧测试目录、Python 缓存与已确认的旧 wheel，默认保留最近三次测试目录：
+清理旧测试目录与缓存（先预览，加 `-Apply` 才执行；不会删除账户数据、媒体和实验日志）：
 
 ```powershell
 .\scripts\clean_workspace.ps1
 .\scripts\clean_workspace.ps1 -Apply
 ```
 
-清理会生成路径和结果清单，跳过 Git 跟踪文件、链接及无权限目录。账户数据、媒体、模型缓存、原始实验日志和录屏不属于此清理范围。当前说明见[文档导航](docs/README.md)，历史文件的证据链接保留。
-
 ## 部署与数据
 
-优先绑定 `127.0.0.1`；远程访问需要 TLS、访问控制和持久卷。
+默认只绑定 `127.0.0.1`。远程访问需要 TLS、访问控制和持久卷。
 
 ```powershell
 docker build -t egoassist .
 docker run --rm -p 127.0.0.1:8770:8770 --env-file .env -v egoassist-data:/app/.egoassist egoassist
 ```
 
-Docker 配置存在不代表容器已验收。备份应停止写入后复制整个数据根目录，包括 SQLite、日志和媒体，不只复制 `runtime.json`。账户支持导出和删除。`.egoassist*/`、`outputs/`、`data_real/` 及模型缓存不是可随意清理的源码残留。
+Docker 配置存在，但容器部署尚未验收。备份要先停止写入，再复制整个数据根目录（SQLite、日志、媒体），不能只复制 `runtime.json`。账户支持导出与删除。`.egoassist*/`、`outputs/`、`data_real/` 是数据，不是可以随手清理的残留。
 
-模型仍可能遗漏、错误指代、误解时间或漏检证据。采样图片会保存，连续原始媒体不完整保存。眼镜硬件、持续长时间运行、功耗、多设备同步与生产灾难恢复尚未验收。
+## 已知限制
 
-[开发约束](CONTRIBUTING.md) · [安全说明](SECURITY.md) · [Apache 2.0](LICENSE) · [第三方归属](NOTICE)
+- 模型可能遗漏信息、指代错误、误解时间或漏检证据。
+- 采样图片会保存，连续的原始音视频不完整保存。
+- 刷新页面能恢复文本与任务，不能恢复旧的媒体连接和音频缓存。
+- 重启后持久任务会恢复，但不保证云端调用或外部副作用恰好执行一次。
+- 眼镜硬件、长时间连续运行、功耗、多设备同步和生产灾备均未验收。
+
+[开发约束](CONTRIBUTING.md) · [安全说明](SECURITY.md) · [Apache 2.0](LICENSE) · [第三方归属](NOTICE) · [文档导航](docs/README.md)
